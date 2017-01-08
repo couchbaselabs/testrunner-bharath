@@ -1,4 +1,4 @@
-from failover.autofailoverbasetest import AutoFailoverBaseTest
+from failover.AutoFailoverBaseTest import AutoFailoverBaseTest
 
 
 class AutoFailoverTests(AutoFailoverBaseTest):
@@ -22,7 +22,7 @@ class AutoFailoverTests(AutoFailoverBaseTest):
     def test_autofailover(self):
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions[self.failover_action]()
+        self.failover_actions[self.failover_action](self)
         self.wait_for_failover_or_assert(self.master, 1)
 
     def test_autofailover_during_rebalance(self):

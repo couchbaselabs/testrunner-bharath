@@ -19,10 +19,11 @@ class AutoFailoverBaseTest(BaseTestCase):
                                                       False)
         self.multiple_node_failure = self.input.param("multiple_nodes_failure",
                                                       False)
+        self.num_items = self.input.param("num_items", 10000)
+        self.nodes_init = self.input.param("nodes_init", 3)
         self.update_items = self.input.param("update_items", 1000)
         self.delete_items = self.input.param("delete_items", 1000)
         self.add_back_node = self.input.param("add_back_node", True)
-        self.buckets
         self.recovery_strategy = self.input.param("recovery_strategy",
                                                   "graceful")
         self.multi_node_failures = self.input.param("multi_node_failures",
@@ -36,6 +37,7 @@ class AutoFailoverBaseTest(BaseTestCase):
             "pause_between_failover_action", 0)
         self.rest = RestConnection(self.master)
         self.task_manager = TaskManager("Autofailover_thread")
+        self.task_manager.start()
         self.initial_load_gen = BlobGenerator('auto-failover',
                                               'auto-failover-',
                                               self.value_size,
@@ -49,7 +51,7 @@ class AutoFailoverBaseTest(BaseTestCase):
                                              self.value_size,
                                              end=self.delete_items)
         self._load_all_buckets(self.servers[0], self.initial_load_gen,
-                               "create", self.expiry)
+                               "create", 0)
         self.server_to_fail = self._servers_to_fail()
         self.servers_to_add = self.servers[self.nodes_init:self.nodes_init +
                                                            self.nodes_in]
@@ -57,6 +59,17 @@ class AutoFailoverBaseTest(BaseTestCase):
                                               self.nodes_out:self.nodes_init]
 
     def tearDown(self):
+        self.failover_orchestrator = self.input.param("failover_orchestrator",
+                                                      False)
+        self.num_node_failures = self.input.param("num_node_failures", 1)
+        self.timeout = self.input.param("timeout", 60)
+        self.pause_between_failover_action = self.input.param(
+            "pause_between_failover_action", 0)
+        self.task_manager = TaskManager("Autofailover_thread")
+        self.task_manager.start()
+        self.server_to_fail = self._servers_to_fail()
+        self.start_couchbase_server()
+        self.disable_firewall()
         super(AutoFailoverBaseTest, self).tearDown()
         """ Delete the new zones created if zone > 1. """
         if self.input.param("zone", 1) > 1:
@@ -102,7 +115,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         failover_count = 0
         while time.time() < time_max_end:
             failover_count = self.get_failover_count(master)
-            if failover_count == autofailover_count:
+            if failover_count == autofailover_count and \
+                            self.num_node_failures == 1:
                 self.log.info(
                     "{0} nodes failed over as expected".format(failover_count))
                 self.log.info(
@@ -110,6 +124,7 @@ class AutoFailoverBaseTest(BaseTestCase):
                     "seconds".format
                     (self.timeout - AutoFailoverBaseTest.MAX_FAIL_DETECT_TIME,
                      time.time() - time_start))
+                #self._verify_stats_all_buckets(self.servers, master)
                 return
             time.sleep(2)
         if self.num_node_failures > 1:
@@ -159,12 +174,27 @@ class AutoFailoverBaseTest(BaseTestCase):
                 failover_count += 1
         return failover_count
 
+    def asyn_enable_firewall(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "enable_firewall", self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
+
     def enable_firewall(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
                                             "enable_firewall", self.timeout,
                                             self.pause_between_failover_action)
         self.task_manager.schedule(task)
         task.result()
+
+    def async_disable_firewall(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "disable_firewall",
+                                            self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
 
     def disable_firewall(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
@@ -174,6 +204,14 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         task.result()
 
+    def async_restart_couchbase_server(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "restart_couchbase",
+                                            self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
+
     def restart_couchbase_server(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
                                             "restart_couchbase",
@@ -182,12 +220,26 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         task.result()
 
+    def async_stop_couchbase_server(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "stop_couchbase", self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
+
     def stop_couchbase_server(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
                                             "stop_couchbase", self.timeout,
                                             self.pause_between_failover_action)
         self.task_manager.schedule(task)
         task.result()
+
+    def async_start_couchbase_server(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "start_couchbase", self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
 
     def start_couchbase_server(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
@@ -196,13 +248,26 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         task.result()
 
+    def async_stop_restart_network(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "restart_network", self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
+
     def stop_restart_network(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
                                             "restart_network", self.timeout,
                                             self.pause_between_failover_action)
-
         self.task_manager.schedule(task)
         task.result()
+
+    def async_restart_machine(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "restart_machine", self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
 
     def restart_machine(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
@@ -211,6 +276,13 @@ class AutoFailoverBaseTest(BaseTestCase):
 
         self.task_manager.schedule(task)
         task.result()
+
+    def async_stop_memcached(self):
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "stop_memcached", self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        return task
 
     def stop_memcached(self):
         task = AutoFailoverNodesFailureTask(self.server_to_fail,
@@ -223,7 +295,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         if self.failover_orchestrator:
             servers_to_fail = self.servers[0:self.num_node_failures]
         else:
-            servers_to_fail = self.servers[1:self.num_node_failures]
+            servers_to_fail = self.servers[1:self.num_node_failures + 1]
         return servers_to_fail
 
     def shuffle_nodes_between_zones_and_rebalance(self, to_remove=None):
@@ -297,7 +369,7 @@ class AutoFailoverBaseTest(BaseTestCase):
 
     failover_actions = {
         "firewall": enable_firewall,
-        "stop_server": disable_firewall,
+        "stop_server": stop_couchbase_server,
         "restart_server": restart_couchbase_server,
         "restart_machine": restart_machine,
         "restart_network": stop_restart_network,

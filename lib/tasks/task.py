@@ -4452,50 +4452,26 @@ class EnterpriseCompactTask(Task):
         else:
             task_manager.schedule(self, 10)
 
-class GenericAutoFailoverFailureTask(Task, Thread):
-    def __init__(self, timeout_secs=60):
-        Thread.__init__(self)
-        Task.__init__(self, "autofailover_failure_task")
-        self.timeout = timeout_secs
+
+class AutoFailoverNodesFailureTask(Task):
+    def __init__(self, servers_to_fail, failure_type, timeout, pause=0):
+        Task.__init__(self, "AutoFailoverNodesFailureTask")
+        self.servers_to_fail = servers_to_fail
+        self.num_servers_to_fail = self.servers_to_fail.__len__()
+        self.itr = 0
+        self.failure_type = failure_type
+        self.timeout = timeout
+        self.pause = pause
 
     def execute(self, task_manager):
-        self.start()
-        self.state = EXECUTING
-
-    def check(self, task_manager):
-        pass
-
-    def run(self):
         while self.has_next() and not self.done():
             self.next()
         self.state = FINISHED
         self.set_result(True)
 
-    def has_next(self):
-        raise NotImplementedError
-
-    def next(self):
-        raise NotImplementedError
-
-
-class AutoFailoverNodesFailureTask(GenericAutoFailoverFailureTask):
-    def __init__(self, servers_to_fail, failure_type, timeout, pause=0):
-        GenericAutoFailoverFailureTask.__init__(timeout)
-        self.servers_to_fail = servers_to_fail
-        self.num_servers_to_fail = self.servers_to_fail.__len__()
-        self.itr = 0
-        self.failure_type = failure_type
-        self.pause = pause
-        self.log.info("")
-
-    def execute(self, task_manager):
-        try:
-            self.log.info("")
-        except:
-            self.log.info("")
-
     def check(self, task_manager):
-        self.log.info("")
+        self.log.info("Done AutoFailoverNodesFailureTask")
+        pass
 
     def has_next(self):
         return self.itr < self.num_servers_to_fail
