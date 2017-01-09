@@ -1,4 +1,5 @@
 from failover.AutoFailoverBaseTest import AutoFailoverBaseTest
+from membase.api.exception import RebalanceFailedException
 
 
 class AutoFailoverTests(AutoFailoverBaseTest):
@@ -31,9 +32,15 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         rebalance_task = self.cluster.async_rebalance(self.servers,
                                                       self.servers_to_add,
                                                       self.servers_to_remove)
-        self.failover_actions[self.failover_action]()
+        self.sleep(10)
+        self.failover_actions[self.failover_action](self)
         self.wait_for_failover_or_assert(self.master, 1)
-        rebalance_task.result()
+        try:
+            rebalance_task.result()
+        except RebalanceFailedException:
+            pass
+        else:
+            self.fail("Rebalance should fail since a node went down")
 
     def test_autofailover_after_rebalance(self):
         self.enable_autofailover_and_validate()
@@ -44,13 +51,13 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         if not rebalance_success:
             self.disable_firewall()
             self.fail("Rebalance failed. Check logs")
-        self.failover_actions[self.failover_action]()
+        self.failover_actions[self.failover_action](self)
         self.wait_for_failover_or_assert(self.master, 1)
 
     def test_rebalance_after_autofailover(self):
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions[self.failover_action]()
+        self.failover_actions[self.failover_action](self)
         self.wait_for_failover_or_assert(self.master, 1)
         rebalance_success = self.cluster.rebalance(self.servers,
                                                    self.servers_to_add,
@@ -61,12 +68,17 @@ class AutoFailoverTests(AutoFailoverBaseTest):
     def test_autofailover_and_addback_of_node(self):
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions[self.failover_action]()
+        self.failover_actions[self.failover_action](self)
         self.wait_for_failover_or_assert(self.master, 1)
-        self.rest.add_back_node(self.server_to_fail[0])
-        self.rest.set_recovery_type(self.server_to_fail[0],
-                                    self.recovery_strategy)
+        self.bring_back_failed_nodes_up()
+        self.sleep(30)
+        self.log.info(self.server_to_fail[0])
         self.nodes = self.rest.node_statuses()
+        self.log.info(self.nodes[0].id)
+        self.rest.add_back_node("ns_1@{}".format(self.server_to_fail[0].ip))
+        self.rest.set_recovery_type("ns_1@{}".format(self.server_to_fail[
+                                                          0].ip),
+                                    self.recovery_strategy)
         self.rest.rebalance(otpNodes=[node.id for node in self.nodes])
         msg = "rebalance failed while recovering failover nodes {0}".format(
             self.server_to_fail[0])
@@ -75,7 +87,7 @@ class AutoFailoverTests(AutoFailoverBaseTest):
     def test_autofailover_and_remove_failover_node(self):
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions[self.failover_action]()
+        self.failover_actions[self.failover_action](self)
         self.wait_for_failover_or_assert(self.master, 1)
         self.nodes = self.rest.node_statuses()
         self.rest.rebalance(otpNodes=[node.id for node in self.nodes])
@@ -86,5 +98,5 @@ class AutoFailoverTests(AutoFailoverBaseTest):
     def test_autofailover_on_bucket_warmup(self):
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions["restart_server"]()
+        self.failover_actions["restart_server"](self)
         self.wait_for_failover_or_assert(self.master, 1)

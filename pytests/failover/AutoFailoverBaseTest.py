@@ -20,12 +20,11 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.multiple_node_failure = self.input.param("multiple_nodes_failure",
                                                       False)
         self.num_items = self.input.param("num_items", 10000)
-        self.nodes_init = self.input.param("nodes_init", 3)
         self.update_items = self.input.param("update_items", 1000)
         self.delete_items = self.input.param("delete_items", 1000)
         self.add_back_node = self.input.param("add_back_node", True)
         self.recovery_strategy = self.input.param("recovery_strategy",
-                                                  "graceful")
+                                                  "delta")
         self.multi_node_failures = self.input.param("multi_node_failures",
                                                     False)
         self.num_node_failures = self.input.param("num_node_failures", 1)
@@ -111,7 +110,7 @@ class AutoFailoverBaseTest(BaseTestCase):
 
     def wait_for_failover_or_assert(self, master, autofailover_count):
         time_start = time.time()
-        time_max_end = time_start + self.timeout
+        time_max_end = time_start + self.timeout + 10
         failover_count = 0
         while time.time() < time_max_end:
             failover_count = self.get_failover_count(master)
@@ -290,6 +289,12 @@ class AutoFailoverBaseTest(BaseTestCase):
                                             self.pause_between_failover_action)
         self.task_manager.schedule(task)
         task.result()
+
+    def bring_back_failed_nodes_up(self):
+        if self.failover_action == "firewall":
+            self.disable_firewall()
+        elif self.failover_action == "stop_server":
+            self.start_couchbase_server()
 
     def _servers_to_fail(self):
         if self.failover_orchestrator:
