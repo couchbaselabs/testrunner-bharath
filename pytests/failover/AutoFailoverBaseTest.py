@@ -109,6 +109,8 @@ class AutoFailoverBaseTest(BaseTestCase):
                                            "autofailover_settings!")
 
     def wait_for_failover_or_assert(self, master, autofailover_count):
+        if self.failover_orchestrator:
+            master = self.servers[1]
         time_start = time.time()
         time_max_end = time_start + self.timeout + 10
         failover_count = 0
