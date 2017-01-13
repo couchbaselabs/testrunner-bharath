@@ -3,6 +3,7 @@ import time
 from basetestcase import BaseTestCase
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
+from membase.helper.cluster_helper import ClusterOperationHelper
 from tasks.task import AutoFailoverNodesFailureTask
 from tasks.taskmanager import TaskManager
 
@@ -58,6 +59,7 @@ class AutoFailoverBaseTest(BaseTestCase):
                                               self.nodes_out:self.nodes_init]
 
     def tearDown(self):
+        self.log.info("============AutoFailoverBaseTest teardown============")
         self.failover_orchestrator = self.input.param("failover_orchestrator",
                                                       False)
         self.num_node_failures = self.input.param("num_node_failures", 1)
@@ -68,6 +70,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.start()
         self.server_to_fail = self._servers_to_fail()
         self.start_couchbase_server()
+        self.sleep(10)
         self.disable_firewall()
         super(AutoFailoverBaseTest, self).tearDown()
         """ Delete the new zones created if zone > 1. """
@@ -77,6 +80,24 @@ class AutoFailoverBaseTest(BaseTestCase):
                 a = "Group "
                 if rest.is_zone_exist(a + str(i + 1)):
                     rest.delete_zone(a + str(i + 1))
+        master = self.servers[0]
+        rest = RestConnection(master)
+        cluster_status = rest.cluster_status()
+        if cluster_status and self.failover_orchestrator:
+            cluster_cleanup = False
+            active_servers = []
+            for node in cluster_status['nodes']:
+                if node['clusterMembership'] == "inactiveFailed":
+                    cluster_cleanup = True
+                else:
+                    node_ip = node['hostname']
+                    server = [x for x in self.servers if "{}:{}".format(
+                        x.ip, x.port) == node_ip][0]
+                    active_servers.append(server)
+            if cluster_cleanup:
+                master = active_servers[0]
+                ClusterOperationHelper.cleanup_cluster(active_servers,
+                                                       master=master)
 
     def post_failover_steps(self):
         self.log.info("Post Failover Steps")
@@ -113,6 +134,8 @@ class AutoFailoverBaseTest(BaseTestCase):
             master = self.servers[1]
         time_start = time.time()
         time_max_end = time_start + self.timeout + 10
+        if self.failover_orchestrator:
+            time_max_end += self.timeout
         failover_count = 0
         while time.time() < time_max_end:
             failover_count = self.get_failover_count(master)
@@ -125,7 +148,7 @@ class AutoFailoverBaseTest(BaseTestCase):
                     "seconds".format
                     (self.timeout - AutoFailoverBaseTest.MAX_FAIL_DETECT_TIME,
                      time.time() - time_start))
-                #self._verify_stats_all_buckets(self.servers, master)
+                # self._verify_stats_all_buckets(self.servers, master)
                 return
             time.sleep(2)
         if self.num_node_failures > 1:

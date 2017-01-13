@@ -1,5 +1,6 @@
 from failover.AutoFailoverBaseTest import AutoFailoverBaseTest
-from membase.api.exception import RebalanceFailedException
+from membase.api.exception import RebalanceFailedException, \
+    ServerUnavailableException
 
 
 class AutoFailoverTests(AutoFailoverBaseTest):
@@ -38,6 +39,8 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         try:
             rebalance_task.result()
         except RebalanceFailedException:
+            pass
+        except ServerUnavailableException:
             pass
         else:
             self.fail("Rebalance should fail since a node went down")
