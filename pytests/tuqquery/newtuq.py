@@ -48,6 +48,13 @@ class QueryTests(BaseTestCase):
         self.isprepared = False
         self.skip_primary_index = self.input.param("skip_primary_index",False)
         self.scan_consistency = self.input.param("scan_consistency", 'REQUEST_PLUS')
+        shell = RemoteMachineShellConnection(self.master)
+        type = shell.extract_remote_info().distribution_type
+        self.path = testconstants.LINUX_COUCHBASE_BIN_PATH
+        if type.lower() == 'windows':
+            self.path = testconstants.WIN_COUCHBASE_BIN_PATH
+        elif type.lower() == "mac":
+            self.path = testconstants.MAC_COUCHBASE_BIN_PATH
         if self.primary_indx_type.lower() == "gsi":
             self.gsi_type = self.input.param("gsi_type", None)
         else:
@@ -657,10 +664,11 @@ class QueryTests(BaseTestCase):
                 if not(self.isprepared):
                     query = query.replace('"', '\\"')
                     query = query.replace('`', '\\`')
-                if os == "linux":
-                    cmd = "%s/cbq  -engine=http://%s:8091/ -q" % (testconstants.LINUX_COUCHBASE_BIN_PATH,server.ip)
-                elif os == "windows":
-                    cmd = "%s/cbq  -q" % (testconstants.WIN_COUCHBASE_BIN_PATH)
+
+                if "system" in query:
+                        cmd =  "%s/cbq  -engine=http://%s:8091/ -q -u Administrator -p password" % (self.path,server.ip)
+                else:
+                        cmd = "%s/cbq  -engine=http://%s:8091/ -q" % (self.path,server.ip)
                 output = self.shell.execute_commands_inside(cmd,query,"","","","","")
                 if not(output[0] == '{'):
                     output1 = '{'+str(output)
@@ -866,7 +874,7 @@ class QueryTests(BaseTestCase):
         self.log.info("CREATE PRIMARY INDEX using %s" % self.primary_indx_type)
         rest = RestConnection(self.master)
         versions = rest.get_nodes_versions()
-        if versions[0].startswith("4") or versions[0].startswith("3"):
+        if versions[0].startswith("4") or versions[0].startswith("3") or versions[0].startswith("5"):
             for bucket in self.buckets:
                 if self.primary_indx_drop:
                     self.log.info("Dropping primary index for %s using %s ..." % (bucket.name,self.primary_indx_type))

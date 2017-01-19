@@ -8,6 +8,7 @@ import copy
 import logger
 import logging
 import re
+import json
 
 from couchbase_helper.cluster import Cluster
 from membase.api.rest_client import RestConnection, Bucket
@@ -172,7 +173,8 @@ class QUERY:
                 "level": "",
                 "vectors": {}
             },
-            "timeout": 60000
+            # "timeout": 60000  Optional timeout( 10000 by default).
+            # it's better to get rid of hardcoding
         }
     }
 
@@ -915,11 +917,16 @@ class FTSIndex:
         rest = RestConnection(self.__cluster.get_random_fts_node())
         return rest.get_fts_index_uuid(self.name)
 
-    def construct_cbft_query_json(self, query, fields=None, timeout=None,
+    def construct_cbft_query_json(self, query, fields=None, timeout=60000,
                                                           facets=False,
                                                           sort_fields=None,
                                                           explain=False,
-                                                          show_results_from_item=0):
+                                                          show_results_from_item=0,
+                                                          highlight=False,
+                                                          highlight_style=None,
+                                                          highlight_fields=None,
+                                                          consistency_level='',
+                                                          consistency_vectors={}):
         max_matches = TestInputSingleton.input.param("query_max_matches", 10000000)
         query_json = QUERY.JSON
         # query is a unicode dict
@@ -930,15 +937,30 @@ class FTSIndex:
             query_json['size'] = int(max_matches)
         if show_results_from_item:
             query_json['from'] = int(show_results_from_item)
-        if timeout:
-            query_json['timeout'] = int(timeout)
+        if timeout is not None:
+            query_json['ctl']['timeout'] = int(timeout)
+        else:
+            del query_json['ctl']['timeout']
         if fields:
             query_json['fields'] = fields
         if facets:
             query_json['facets'] = self.construct_facets_definition()
         if sort_fields:
             query_json['sort'] = sort_fields
-
+        if highlight:
+            query_json['highlight'] = {}
+            if highlight_style:
+                query_json['highlight']['style'] = highlight_style
+            if highlight_fields:
+                query_json['highlight']['fields'] = highlight_fields
+        if consistency_level is None:
+            del query_json['ctl']['consistency']['level']
+        else:
+            query_json['ctl']['consistency']['level'] = consistency_level
+        if consistency_vectors is None:
+            del query_json['ctl']['consistency']['vectors']
+        elif consistency_vectors != {}:
+            query_json['ctl']['consistency']['vectors'] = consistency_vectors
         return query_json
 
     def construct_facets_definition(self):
@@ -998,22 +1020,36 @@ class FTSIndex:
 
     def execute_query(self, query, zero_results_ok=True, expected_hits=None,
                       return_raw_hits=False, sort_fields=None,
-                      explain=False, show_results_from_item=0):
+                      explain=False, show_results_from_item=0, highlight=False,
+                      highlight_style=None, highlight_fields=None, consistency_level='',
+                      consistency_vectors={}, timeout=60000):
         """
         Takes a query dict, constructs a json, runs and returns results
         """
         query_dict = self.construct_cbft_query_json(query,
                                                     sort_fields=sort_fields,
                                                     explain=explain,
-                                                    show_results_from_item=show_results_from_item)
+                                                    show_results_from_item=show_results_from_item,
+                                                    highlight=highlight,
+                                                    highlight_style=highlight_style,
+                                                    highlight_fields=highlight_fields,
+                                                    consistency_level=consistency_level,
+                                                    consistency_vectors=consistency_vectors,
+                                                    timeout=timeout)
+
         hits = -1
         matches = []
         doc_ids = []
         time_taken = 0
         status = {}
         try:
+            if timeout == 0:
+                # force limit in 10 min in case timeout=0(no timeout)
+                rest_timeout = 600
+            else:
+                rest_timeout = timeout/1000 + 10
             hits, matches, time_taken, status = \
-                self.__cluster.run_fts_query(self.name, query_dict)
+                self.__cluster.run_fts_query(self.name, query_dict, timeout=rest_timeout)
         except ServerUnavailableException:
             # query time outs
             raise ServerUnavailableException
@@ -1280,7 +1316,56 @@ class FTSIndex:
 
         return result
 
+    def validate_snippet_highlighting_in_result_content(self, contents, doc_id,
+                                                        field_names, terms,
+                                                        highlight_style=None):
+        '''
+        Validate the snippets and highlighting in the result content for a given
+        doc id
+        :param contents: Result contents
+        :param doc_id: Doc ID to check highlighting/snippet for
+        :param field_names: Field name for which term is to be validated
+        :param terms: search term which should be highlighted
+        :param highlight_style: Expected highlight style - ansi/html
+        :return: True/False
+        '''
+        validation = True
+        for content in contents:
+            if content['id'] == doc_id:
+                # Check if Location section is present for the document in the search results
+                if 'locations' in content:
+                    validation &= True
+                else:
+                    self.__log.info(
+                        "Locations not present in the search result")
+                    validation &= False
 
+                # Check if Fragments section is present in the document in the search results
+                # If present, check if the search term is highlighted
+                if 'fragments' in content:
+                    snippet = content['fragments'][field_names][0]
+
+                    # Replace the Ansi highlight tags with <mark> since the
+                    # ansi ones render themselves hence cannot be compared.
+                    if highlight_style == 'ansi':
+                        snippet = snippet.replace('\x1b[43m', '<mark>').replace(
+                            '\x1b[0m', '</mark>')
+                    search_term = '<mark>' + terms + '</marks>'
+
+                    found = snippet.find(search_term)
+
+                    if not found:
+                        self.__log.info("Search term not highlighted")
+                    validation &= found
+                else:
+                    self.__log.info(
+                        "Fragments not present in the search result")
+                    validation &= False
+
+        # If the test is a negative testcase to check if snippet, flip the result
+        if TestInputSingleton.input.param("negative_test", False):
+            validation = ~validation
+        return validation
 
     def get_score_from_query_result_content(self, contents, doc_id):
         for content in contents:
@@ -1756,7 +1841,7 @@ class CouchbaseCluster:
         @param source_name : name of couchbase bucket or "" for alias
         @param index_type : 'fulltext-index' or 'fulltext-alias'
         @param index_params :  to specify advanced index mapping;
-                                dictionary overiding params in
+                                dictionary overriding params in
                                 INDEX_DEFAULTS.BLEVE_MAPPING or
                                 INDEX_DEFAULTS.ALIAS_DEFINITION depending on
                                 index_type
@@ -1799,7 +1884,7 @@ class CouchbaseCluster:
         for index in self.__indexes:
             index.delete()
 
-    def run_fts_query(self, index_name, query_dict, node=None):
+    def run_fts_query(self, index_name, query_dict, node=None, timeout=70):
         """ Runs a query defined in query_json against an index/alias and
         a specific node
 
@@ -1813,7 +1898,7 @@ class CouchbaseCluster:
                         % (json.dumps(query_dict, ensure_ascii=False),
                            node.ip, node.fts_port))
         total_hits, hit_list, time_taken, status = \
-            RestConnection(node).run_fts_query(index_name, query_dict)
+            RestConnection(node).run_fts_query(index_name, query_dict, timeout=timeout)
         return total_hits, hit_list, time_taken, status
 
     def run_fts_query_with_facets(self, index_name, query_dict, node=None):
@@ -2874,6 +2959,23 @@ class FTSBaseTest(unittest.TestCase):
             self.expected_docs_list = self.expected_docs.split(',')
         else:
             self.expected_docs_list.append(self.expected_docs)
+        self.expected_results = self._input.param("expected_results", None)
+        self.highlight_style = self._input.param("highlight_style",None)
+        self.highlight_fields = self._input.param("highlight_fields",None)
+        self.highlight_fields_list = []
+        if (self.highlight_fields):
+            if (',' in self.highlight_fields):
+                self.highlight_fields_list = self.highlight_fields.split(',')
+            else:
+                self.highlight_fields_list.append(self.highlight_fields)
+        self.consistency_level = self._input.param("consistency_level", '')
+        if self.consistency_level.lower() == 'none':
+            self.consistency_level = None
+        self.consistency_vectors = self._input.param("consistency_vectors", {})
+        if self.consistency_vectors != {}:
+            self.consistency_vectors = eval(self.consistency_vectors)
+            if self.consistency_vectors is not None and self.consistency_vectors != '':
+                self.consistency_vectors = json.loads(self.consistency_vectors)
 
     def __initialize_error_count_dict(self):
         """

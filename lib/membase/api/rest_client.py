@@ -766,7 +766,7 @@ class RestConnection(object):
     # authorization must be a base64 string of username:password
     def _create_headers_encoded_prepared(self):
         authorization = base64.encodestring('%s:%s' % (self.username, self.password))
-        return {'Content-Type': 'Content-Type: application/json',
+        return {'Content-Type': 'application/json',
                 'Authorization': 'Basic %s' % authorization}
 
     def _http_request(self, api, method='GET', params='', headers=None, timeout=120):
@@ -1481,6 +1481,20 @@ class RestConnection(object):
 
     def get_indexer_stats(self, timeout=120, index_map=None):
         api = self.index_baseUrl + 'stats'
+        index_map = {}
+        status, content, header = self._http_request(api, timeout=timeout)
+        if status:
+            json_parsed = json.loads(content)
+            for key in json_parsed.keys():
+                tokens = key.split(":")
+                val = json_parsed[key]
+                if len(tokens) == 1:
+                    field = tokens[0]
+                    index_map[field] = val
+        return index_map
+
+    def get_indexer_internal_stats(self, timeout=120, index_map=None):
+        api = self.index_baseUrl + 'settings?internal=ok'
         index_map = {}
         status, content, header = self._http_request(api, timeout=timeout)
         if status:
@@ -2395,7 +2409,7 @@ class RestConnection(object):
                                                 self.password))
         return status
 
-    def run_fts_query(self, index_name, query_json):
+    def run_fts_query(self, index_name, query_json, timeout=70):
         """Method run an FTS query through rest api"""
         api = self.fts_baseUrl + "api/index/{0}/query".format(index_name)
         headers = self._create_capi_headers_with_auth(
@@ -2406,7 +2420,7 @@ class RestConnection(object):
             "POST",
             json.dumps(query_json, ensure_ascii=False).encode('utf8'),
             headers,
-            timeout=70)
+            timeout=timeout)
 
         if status:
             content = json.loads(content)
@@ -2727,7 +2741,7 @@ class RestConnection(object):
                 else:
                     url = "http://%s:%s/query/service" % (self.ip, port)
 
-                headers = {'Content-type': 'application/json'}
+                headers = self._create_headers_encoded_prepared()
                 body = {'prepared': named_prepare, 'encoded_plan':encoded_plan}
 
                 response, content = http.request(url, 'POST', headers=headers, body=json.dumps(body))
@@ -2757,6 +2771,8 @@ class RestConnection(object):
             if verbose:
                 log.info('query params : {0}'.format(params))
             api = "http://%s:%s/query?%s" % (self.ip, port, params)
+
+
         status, content, header = self._http_request(api, 'POST', timeout=timeout, headers=headers)
         try:
             return json.loads(content)

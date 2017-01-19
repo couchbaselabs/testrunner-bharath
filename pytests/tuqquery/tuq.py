@@ -2637,8 +2637,8 @@ class QueryTests(BaseTestCase):
     def test_date_diff_millis(self):
         self.query = "select date_diff_millis(clock_millis(), date_add_millis(clock_millis(), 100, 'day'), 'day') as now"
         res = self.run_cbq_query()
-        self.assertTrue(res["results"][0]["now"] == -98,
-                        "Result expected: %s. Actual %s" % (-98, res["results"]))
+        self.assertTrue(res["results"][0]["now"] == -100,
+                        "Result expected: %s. Actual %s" % (-100, res["results"]))
 
     def test_date_diff_str(self):
         self.query = 'select date_diff_str("2014-08-24T01:33:59", "2014-08-24T07:33:59", "minute") as now'
@@ -4040,11 +4040,15 @@ class QueryTests(BaseTestCase):
                 output = self.shell.execute_commands_inside("$GOPATH/src/github.com/couchbase/query/" +\
                                                             "shell/cbq/cbq ","","","","","","")
             else:
-                os = self.shell.extract_remote_info().type.lower()
+                #os = self.shell.extract_remote_info().type.lower()
                 if not(self.isprepared):
                     query = query.replace('"', '\\"')
                     query = query.replace('`', '\\`')
-                    cmd = "%s/cbq  -engine=http://%s:8091/ -q" % (self.path,server.ip)
+                    if "system" in query:
+                        cmd =  "%s/cbq  -engine=http://%s:8091/ -q -u Administrator -p password" % (self.path,server.ip)
+                    else:
+                        cmd = "%s/cbq  -engine=http://%s:8091/ -q" % (self.path,server.ip)
+
                     output = self.shell.execute_commands_inside(cmd,query,"","","","","")
                     if not(output[0] == '{'):
                         output1 = '{'+str(output)
@@ -4277,7 +4281,7 @@ class QueryTests(BaseTestCase):
         self.sleep(30, 'Sleep for some time prior to index creation')
         rest = RestConnection(self.master)
         versions = rest.get_nodes_versions()
-        if versions[0].startswith("4") or versions[0].startswith("3"):
+        if versions[0].startswith("4") or versions[0].startswith("3") or versions[0].startswith("5"):
             for bucket in self.buckets:
                 if self.primary_indx_drop:
                     self.log.info("Dropping primary index for %s ..." % bucket.name)

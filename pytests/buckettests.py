@@ -10,7 +10,8 @@ from testconstants import LINUX_COUCHBASE_BIN_PATH
 from testconstants import LINUX_COUCHBASE_SAMPLE_PATH
 from testconstants import WIN_COUCHBASE_BIN_PATH
 from testconstants import WIN_COUCHBASE_SAMPLE_PATH
-from testconstants import COUCHBASE_FROM_WATSON, COUCHBASE_FROM_4DOT6
+from testconstants import COUCHBASE_FROM_WATSON, COUCHBASE_FROM_4DOT6,\
+                          COUCHBASE_FROM_SPOCK
 from scripts.install import InstallerJob
 
 class CreateBucketTests(BaseTestCase):
@@ -230,10 +231,12 @@ class CreateBucketTests(BaseTestCase):
         if time.time() >= end_time_i and len(index_name) < index_count:
             self.log.info("index list {0}".format(index_name))
             self.fail("some indexing may not complete")
-        elif len(index_name) == 8:
+        elif len(index_name) == index_count:
             self.log.info("travel-sample bucket is created and complete indexing")
             self.log.info("index list in travel-sample bucket: {0}"
                                        .format(index_name))
+        else:
+            self.log.info("There is extra index %s" % index_name)
 
     def test_cli_travel_sample_bucket(self):
         sample = "travel-sample"
@@ -245,14 +248,15 @@ class CreateBucketTests(BaseTestCase):
         set_index_storage_type = ""
         if self.node_version[:5] in COUCHBASE_FROM_WATSON:
             set_index_storage_type = " --index-storage-setting=memopt "
-        options = '--cluster-init-username="Administrator" \
-                        --cluster-init-password="password" \
-                        --cluster-init-port=8091 \
-                        --cluster-ramsize=300 \
-                        --cluster-index-ramsize=300 \
-                        --services=data,index,query %s ' % set_index_storage_type
+        options = ' --cluster-port=8091 \
+                    --cluster-ramsize=300 \
+                    --cluster-index-ramsize=300 \
+                    --services=data,index,query %s ' % set_index_storage_type
         o, e = shell.execute_couchbase_cli(cli_command="cluster-init", options=options)
-        self.assertEqual(o[0], "SUCCESS: init/edit localhost")
+        if self.node_version[:5] in COUCHBASE_FROM_SPOCK:
+            self.assertEqual(o[0], 'SUCCESS: Cluster initialized')
+        else:
+            self.assertEqual(o[0], "SUCCESS: init/edit localhost")
 
         shell = RemoteMachineShellConnection(self.master)
         shell.execute_command("{0}cbdocloader -u Administrator -p password \
@@ -306,6 +310,8 @@ class CreateBucketTests(BaseTestCase):
             self.log.info("travel-sample bucket is created and complete indexing")
             self.log.info("index list in travel-sample bucket: {0}"
                                        .format(index_name))
+        else:
+            self.log.info("There is extra index %s" % index_name)
 
     def _get_cb_version(self):
         rest = RestConnection(self.master)

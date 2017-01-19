@@ -96,6 +96,8 @@ class ImportExportTests(CliBaseTest):
                         field_separator_flag = ""
                         if self.imex_type == "csv":
                             format_flag = ""
+                            if self.format_type is None:
+                                self.format_type = ""
                             if self.field_separator != "comma":
                                 if self.field_separator == "tab":
                                     """ we test tab separator in this case """
@@ -746,7 +748,7 @@ class ImportExportTests(CliBaseTest):
                 self.fail("%s failed to create error file in log flag"
                                                         % self.test_type)
         elif self.errors_flag == "absolute_path":
-            output, error = self.shell.execute_command("ls %s " % self.cli_command_path)
+            output, error = self.shell.execute_command("ls %s " % errors_path)
             if self._check_output("error", output):
                 error_check = False
                 self.log.info("%s error file created" % self.test_type)

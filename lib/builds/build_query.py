@@ -352,10 +352,22 @@ class BuildQuery(object):
                                  build_details[:5], os_name, CB_RELEASE_REPO)
                 else:
                     if "2.5.2" in build_details[:5]:
-                        build.url = "{5}{0}/{1}_{4}_{2}.{3}"\
-                            .format(build_version[:build_version.find('-')],
-                            product, os_architecture, deliverable_type,
-                            build_details[:5], CB_RELEASE_REPO)
+                        if product == "moxi-server" and deliverable_type == "deb":
+                            build.url = "{5}{0}/{1}_{4}_{2}_openssl098.{3}".format(
+                                            build_version[:build_version.find('-')],
+                                            product,
+                                            os_architecture,
+                                            deliverable_type,
+                                            build_details[:5],
+                                            CB_RELEASE_REPO)
+                        else:
+                            build.url = "{5}{0}/{1}_{4}_{2}.{3}".format(
+                                            build_version[:build_version.find('-')],
+                                            product,
+                                            os_architecture,
+                                            deliverable_type,
+                                            build_details[:5],
+                                            CB_RELEASE_REPO)
                     else:
                         build.url = "{5}{0}/{1}_{2}_{4}.{3}"\
                             .format(build_version[:build_version.find('-')],
@@ -736,8 +748,12 @@ class BuildQuery(object):
                 distribution version:    centos release 6.5 (final)  """
             centos_version = "centos6"
 
-            if "centos" in distribution_version:
+            if "centos" in distribution_version or "red hat" in distribution_version:
                 if "centos 7" in distribution_version:
+                    centos_version = "centos7"
+                elif "red hat enterprise linux server release 6" in distribution_version:
+                    centos_version = "centos6"
+                elif "red hat enterprise linux server release 7" in distribution_version:
                     centos_version = "centos7"
                 build.name = edition_type + "-" + build.product_version + \
                    "-" + centos_version + "." + build.architecture_type + \

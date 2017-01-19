@@ -61,6 +61,13 @@ class BaseTestCase(unittest.TestCase):
             self.cluster = Cluster()
         self.pre_warmup_stats = {}
         self.cleanup = False
+        self.nonroot = False
+        shell = RemoteMachineShellConnection(self.master)
+        type = shell.extract_remote_info().distribution_type
+        if type.lower() != 'windows':
+            if self.master.ssh_username != "root":
+                self.nonroot = True
+        shell.disconnect()
         """ some tests need to bypass checking cb server at set up
             to run installation """
         self.skip_init_check_cbserver = \
@@ -1141,7 +1148,7 @@ class BaseTestCase(unittest.TestCase):
     def change_port(self, new_port="9090", current_port='8091'):
         nodes = RestConnection(self.master).node_statuses()
         remote_client = RemoteMachineShellConnection(self.master)
-        options = "--cluster-init-port=%s" % new_port
+        options = "--cluster-port=%s" % new_port
         cli_command = "cluster-edit"
         output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options,
                                                             cluster_host="localhost:%s" % current_port,
