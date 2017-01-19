@@ -1,20 +1,19 @@
 import copy
 import json
 import os
-from threading import Thread
-import time
-import string
 import random
+import string
+import time
+from threading import Thread
 
-from membase.api.rest_client import RestConnection
-from memcached.helper.data_helper import MemcachedClientHelper
 from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
-from remote.remote_util import RemoteMachineShellConnection
 from couchbase_cli import CouchbaseCLI
-from testconstants import CLI_COMMANDS, COUCHBASE_FROM_WATSON,\
-                          COUCHBASE_FROM_SPOCK, LINUX_COUCHBASE_BIN_PATH,\
-                          WIN_COUCHBASE_BIN_PATH, COUCHBASE_FROM_SHERLOCK,\
+from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
+from remote.remote_util import RemoteMachineShellConnection
+from testconstants import CLI_COMMANDS, COUCHBASE_FROM_SPOCK, \
+    COUCHBASE_FROM_SHERLOCK,\
                           COUCHBASE_FROM_4DOT6
 
 help = {'CLUSTER': '--cluster=HOST[:PORT] or -c HOST[:PORT]',

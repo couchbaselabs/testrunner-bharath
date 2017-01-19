@@ -1,17 +1,17 @@
-from basetestcase import BaseTestCase
-from remote.remote_util import RemoteMachineShellConnection
-from membase.api.rest_client import RestConnection
-from testconstants import LINUX_COUCHBASE_BIN_PATH, LINUX_ROOT_PATH
-from testconstants import WIN_COUCHBASE_BIN_PATH, WIN_ROOT_PATH
-from testconstants import MAC_COUCHBASE_BIN_PATH
-from testconstants import LINUX_COUCHBASE_SAMPLE_PATH, WIN_COUCHBASE_SAMPLE_PATH,\
-                          WIN_BACKUP_C_PATH, LINUX_BACKUP_PATH, LINUX_COUCHBASE_LOGS_PATH, \
-                          WIN_COUCHBASE_LOGS_PATH, COUCHBASE_FROM_4DOT6, WIN_TMP_PATH,\
-                          WIN_BACKUP_PATH
-import logger
 import random
 import time
-import zlib
+
+import logger
+from basetestcase import BaseTestCase
+from membase.api.rest_client import RestConnection
+from remote.remote_util import RemoteMachineShellConnection
+from testconstants import LINUX_COUCHBASE_BIN_PATH, LINUX_ROOT_PATH
+from testconstants import LINUX_COUCHBASE_SAMPLE_PATH, WIN_COUCHBASE_SAMPLE_PATH,\
+                          WIN_BACKUP_C_PATH, LINUX_BACKUP_PATH, LINUX_COUCHBASE_LOGS_PATH, \
+                          WIN_COUCHBASE_LOGS_PATH, WIN_TMP_PATH,\
+                          WIN_BACKUP_PATH
+from testconstants import MAC_COUCHBASE_BIN_PATH
+from testconstants import WIN_COUCHBASE_BIN_PATH, WIN_ROOT_PATH
 
 log = logger.Logger.get_logger()
 

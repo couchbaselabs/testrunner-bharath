@@ -1,9 +1,10 @@
 import logging
 import random
-from newtuq import QueryTests
+
 from couchbase_helper.cluster import Cluster
 from couchbase_helper.query_definitions import SQLDefinitionGenerator
 from membase.api.rest_client import RestConnection
+from newtuq import QueryTests
 
 log = logging.getLogger(__name__)
 

@@ -1,18 +1,20 @@
-import re, copy
+import copy
+import re
 from random import randrange
 
+from couchbase.bucket import Bucket
+
 from couchbase_helper.cluster import Cluster
+from couchbase_helper.document import View
 from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator
+from couchbase_helper.stats_tools import StatsCommon
 from ent_backup_restore.enterprise_backup_restore_base import EnterpriseBackupRestoreBase
-from membase.api.rest_client import RestConnection, Bucket
+from membase.api.rest_client import RestConnection
+from newupgradebasetest import NewUpgradeBaseTest
 from remote.remote_util import RemoteUtilHelper, RemoteMachineShellConnection
 from security.auditmain import audit
-from newupgradebasetest import NewUpgradeBaseTest
-from couchbase.bucket import Bucket
-from couchbase_helper.document import View
 from tasks.future import TimeoutError
 from xdcr.xdcrnewbasetests import NodeHelper
-from couchbase_helper.stats_tools import StatsCommon
 
 AUDITBACKUPID = 20480
 AUDITRESTOREID= 20485

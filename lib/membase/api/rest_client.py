@@ -1,20 +1,17 @@
 import base64
 import json
-import urllib
-import httplib2
 import socket
 import time
-import logger
+import urllib
 import uuid
 from copy import deepcopy
 from threading import Thread
-from TestInput import TestInputSingleton
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA
-from testconstants import COUCHBASE_FROM_VERSION_4
 
 import httplib2
 import logger
-import traceback
+from TestInput import TestInputSingleton
+from testconstants import COUCHBASE_FROM_VERSION_4
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA
 
 try:
     from couchbase_helper.document import DesignDocument, View
@@ -23,7 +20,7 @@ except ImportError:
 
 from memcached.helper.kvstore import KVStore
 from exception import ServerAlreadyJoinedException, ServerUnavailableException, InvalidArgumentException
-from membase.api.exception import BucketCreationException, ServerSelfJoinException, ClusterRemoteException, \
+from membase.api.exception import BucketCreationException, ServerSelfJoinException, \
     RebalanceFailedException, FailoverFailedException, DesignDocCreationException, QueryViewException, \
     ReadDocumentException, GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, AddNodeException, \
     BucketFlushFailed, CBRecoveryFailedException, XDCRException, SetRecoveryTypeFailed, BucketCompactionException

@@ -1,20 +1,13 @@
+import ast
 import copy
-import json, filecmp
-import os, shutil, ast
-from threading import Thread
+import os
+import shutil
 
-from membase.api.rest_client import RestConnection
-from memcached.helper.data_helper import MemcachedClientHelper
-from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
-from remote.remote_util import RemoteMachineShellConnection
+from membase.api.rest_client import RestConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
-from couchbase_cli import CouchbaseCLI
-from pprint import pprint
-from testconstants import CLI_COMMANDS, COUCHBASE_FROM_WATSON,\
-                          COUCHBASE_FROM_SPOCK, LINUX_COUCHBASE_BIN_PATH,\
-                          WIN_COUCHBASE_BIN_PATH, COUCHBASE_FROM_SHERLOCK
+from remote.remote_util import RemoteMachineShellConnection
 
 
 class ImportExportTests(CliBaseTest):
