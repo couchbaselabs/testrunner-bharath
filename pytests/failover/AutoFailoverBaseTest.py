@@ -98,6 +98,7 @@ class AutoFailoverBaseTest(BaseTestCase):
                 master = active_servers[0]
                 ClusterOperationHelper.cleanup_cluster(active_servers,
                                                        master=master)
+        self.task_manager.shutdown(force=True)
 
     def post_failover_steps(self):
         self.log.info("Post Failover Steps")
