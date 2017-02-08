@@ -4496,6 +4496,11 @@ class AutoFailoverNodesFailureTask(Task):
             self._stop_restart_network(server_to_fail, self.timeout)
         elif self.failure_type == "restart_machine":
             self._restart_machine(server_to_fail, self.timeout)
+        elif self.failure_type == "network_split":
+            self._block_incoming_network_from_node(self.servers_to_fail[0],
+                                                   self.servers_to_fail[
+                                                       self.itr + 1])
+            self.itr += 1
         self.itr += 1
 
     def _enable_firewall(self, node):
@@ -4541,3 +4546,10 @@ class AutoFailoverNodesFailureTask(Task):
         except:
             self.log.info("Unable to connect to the host. Machine has not "
                           "restarted")
+
+    def _block_incoming_network_from_node(self, node1, node2):
+        shell = RemoteMachineShellConnection(node1)
+        self.log.info("Adding {0} into iptables rules on {1}".format(
+            node1.ip, node2.ip))
+        command = "iptables -A INPUT -s {0} -j DROP".format(node2.ip)
+        shell.execute_command(command)

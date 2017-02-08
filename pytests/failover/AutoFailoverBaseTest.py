@@ -152,7 +152,8 @@ class AutoFailoverBaseTest(BaseTestCase):
                 # self._verify_stats_all_buckets(self.servers, master)
                 return
             time.sleep(2)
-        if self.num_node_failures > 1:
+        if self.num_node_failures > 1 and self.failover_action \
+                != "network_split":
             self.log.info("No nodes were failed over since number of node "
                           "failures was greater than 1.")
             return
@@ -316,6 +317,15 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         task.result()
 
+    def split_network(self):
+        if self.server_to_fail.__len__() < 2:
+            self.fail("Need atleast 2 servers to fail")
+        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+                                            "network_split", self.timeout,
+                                            self.pause_between_failover_action)
+        self.task_manager.schedule(task)
+        task.result()
+
     def bring_back_failed_nodes_up(self):
         if self.failover_action == "firewall":
             self.disable_firewall()
@@ -404,5 +414,6 @@ class AutoFailoverBaseTest(BaseTestCase):
         "restart_server": restart_couchbase_server,
         "restart_machine": restart_machine,
         "restart_network": stop_restart_network,
-        "stop_memcached": stop_memcached
+        "stop_memcached": stop_memcached,
+        "network_split": split_network
     }
