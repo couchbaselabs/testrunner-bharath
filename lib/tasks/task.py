@@ -4506,7 +4506,8 @@ class AutoFailoverNodesFailureTask(Task):
                               "sec timeout period".format(
                     self.current_failure_node.ip, self.timeout))
                 self.state = FINISHED
-                raise Exception("Node not Failed over")
+                self.set_result(False)
+                self.set_exception(Exception("Node not Failed over"))
         else:
             if not auto_failed_over:
                 self.log.info("Node not autofailed over as expected")
@@ -4516,7 +4517,9 @@ class AutoFailoverNodesFailureTask(Task):
                                "autofailover of the node was "
                                "expected".format(self.current_failure_node.ip))
                 self.state = FINISHED
-                raise Exception("Node Failed over when not expected")
+                self.set_result(False)
+                self.set_exception(Exception("Node Failed over when not "
+                                             "expected"))
 
     def has_next(self):
         return self.itr < self.num_servers_to_fail
@@ -4529,7 +4532,9 @@ class AutoFailoverNodesFailureTask(Task):
                 status = rest.reset_autofailover()
                 if not status:
                     self.state = FINISHED
-                    raise Exception("Reset of autofailover count failed")
+                    self.set_result(False)
+                    self.set_exception(Exception("Reset of autofailover "
+                                                 "count failed"))
         self.current_failure_node = self.servers_to_fail[self.itr]
         if self.failure_type == "enable_firewall":
             self._enable_firewall(self.current_failure_node)
