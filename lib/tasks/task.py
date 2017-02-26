@@ -4476,6 +4476,8 @@ class AutoFailoverNodesFailureTask(Task):
     def execute(self, task_manager):
         while self.has_next() and not self.done():
             self.next()
+            if self.pause > 0 and self.pause > self.timeout:
+                self.check(task_manager)
         self.check(task_manager)
         self.state = FINISHED
         self.set_result(True)
@@ -4522,6 +4524,12 @@ class AutoFailoverNodesFailureTask(Task):
     def next(self):
         if self.pause != 0:
             time.sleep(self.pause)
+            if self.pause > self.timeout and self.itr != 0:
+                rest = RestConnection(self.master)
+                status = rest.reset_autofailover()
+                if not status:
+                    self.state = FINISHED
+                    raise Exception("Reset of autofailover count failed")
         self.current_failure_node = self.servers_to_fail[self.itr]
         if self.failure_type == "enable_firewall":
             self._enable_firewall(self.current_failure_node)
