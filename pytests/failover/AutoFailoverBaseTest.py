@@ -4,37 +4,17 @@ from basetestcase import BaseTestCase
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
 from membase.helper.cluster_helper import ClusterOperationHelper
-from tasks.task import AutoFailoverNodesFailureTask
+from tasks.task import AutoFailoverNodesFailureTask, NodeMonitorsAnalyserTask
 from tasks.taskmanager import TaskManager
 
 
 class AutoFailoverBaseTest(BaseTestCase):
     MAX_FAIL_DETECT_TIME = 120
+    ORCHESTRATOR_TIMEOUT_BUFFER = 60
 
     def setUp(self):
         super(AutoFailoverBaseTest, self).setUp()
-        self.timeout = self.input.param("timeout", 60)
-        self.failover_action = self.input.param("failover_action",
-                                                "stop_server")
-        self.failover_orchestrator = self.input.param("failover_orchestrator",
-                                                      False)
-        self.multiple_node_failure = self.input.param("multiple_nodes_failure",
-                                                      False)
-        self.num_items = self.input.param("num_items", 10000)
-        self.update_items = self.input.param("update_items", 1000)
-        self.delete_items = self.input.param("delete_items", 1000)
-        self.add_back_node = self.input.param("add_back_node", True)
-        self.recovery_strategy = self.input.param("recovery_strategy",
-                                                  "delta")
-        self.multi_node_failures = self.input.param("multi_node_failures",
-                                                    False)
-        self.num_node_failures = self.input.param("num_node_failures", 1)
-        self.services = self.input.param("services", None)
-        self.zone = self.input.param("zone", 1)
-        self.multi_services_node = self.input.param("multi_services_node",
-                                                    False)
-        self.pause_between_failover_action = self.input.param(
-            "pause_between_failover_action", 0)
+        self._get_params()
         self.rest = RestConnection(self.master)
         self.task_manager = TaskManager("Autofailover_thread")
         self.task_manager.start()
@@ -57,15 +37,11 @@ class AutoFailoverBaseTest(BaseTestCase):
                                                            self.nodes_in]
         self.servers_to_remove = self.servers[self.nodes_init -
                                               self.nodes_out:self.nodes_init]
+        self.node_monitor_task = self.start_node_monitors_task()
 
     def tearDown(self):
         self.log.info("============AutoFailoverBaseTest teardown============")
-        self.failover_orchestrator = self.input.param("failover_orchestrator",
-                                                      False)
-        self.num_node_failures = self.input.param("num_node_failures", 1)
-        self.timeout = self.input.param("timeout", 60)
-        self.pause_between_failover_action = self.input.param(
-            "pause_between_failover_action", 0)
+        self._get_params()
         self.task_manager = TaskManager("Autofailover_thread")
         self.task_manager.start()
         self.server_to_fail = self._servers_to_fail()
@@ -83,7 +59,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         master = self.servers[0]
         rest = RestConnection(master)
         cluster_status = rest.cluster_status()
-        if cluster_status and self.failover_orchestrator:
+        if cluster_status and self.failover_orchestrator and \
+                        self.remove_after_failover is not True:
             cluster_cleanup = False
             active_servers = []
             for node in cluster_status['nodes']:
@@ -98,6 +75,14 @@ class AutoFailoverBaseTest(BaseTestCase):
                 master = active_servers[0]
                 ClusterOperationHelper.cleanup_cluster(active_servers,
                                                        master=master)
+        if self.failover_orchestrator and self.remove_after_failover:
+            master = self.servers[1]
+            ClusterOperationHelper.cleanup_cluster(self.servers[1:],
+                                                   master=master)
+        if hasattr(self, "node_monitor_task"):
+            if self.node_monitor_task._exception:
+                self.fail("{}".format(self.node_monitor_task._exception))
+            self.node_monitor_task.stop = True
         self.task_manager.shutdown(force=True)
 
     def post_failover_steps(self):
@@ -134,7 +119,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         if self.failover_orchestrator:
             master = self.servers[1]
         time_start = time.time()
-        time_max_end = time_start + self.timeout + 10
+        time_max_end = time_start + self.timeout
         if self.failover_orchestrator:
             time_max_end += self.timeout
         failover_count = 0
@@ -200,131 +185,232 @@ class AutoFailoverBaseTest(BaseTestCase):
                 failover_count += 1
         return failover_count
 
+    def start_node_monitors_task(self):
+        node_monitor_task = NodeMonitorsAnalyserTask(self.orchestrator)
+        self.task_manager.schedule(node_monitor_task, sleep_time=5)
+        return node_monitor_task
+
     def asyn_enable_firewall(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
-                                            "enable_firewall", self.timeout,
-                                            self.pause_between_failover_action)
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
+                                            "enable_firewall",
+                                            self.timeout,
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
         return task
 
     def enable_firewall(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "enable_firewall", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def async_disable_firewall(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "disable_firewall",
                                             self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer, False)
         self.task_manager.schedule(task)
         return task
 
     def disable_firewall(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "disable_firewall",
                                             self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            False,
+                                            self.timeout_buffer, False)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def async_restart_couchbase_server(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "restart_couchbase",
                                             self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
         return task
 
     def restart_couchbase_server(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "restart_couchbase",
                                             self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def async_stop_couchbase_server(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "stop_couchbase", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
         return task
 
     def stop_couchbase_server(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "stop_couchbase", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def async_start_couchbase_server(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "start_couchbase", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer, False)
         self.task_manager.schedule(task)
         return task
 
     def start_couchbase_server(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "start_couchbase", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            False,
+                                            self.timeout_buffer, False)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def async_stop_restart_network(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "restart_network", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
         return task
 
     def stop_restart_network(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "restart_network", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def async_restart_machine(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "restart_machine", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
         return task
 
     def restart_machine(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "restart_machine", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
 
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def async_stop_memcached(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "stop_memcached", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
         return task
 
     def stop_memcached(self):
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        self.time_start = time.time()
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "stop_memcached", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            self.failover_expected,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def split_network(self):
+        self.time_start = time.time()
         if self.server_to_fail.__len__() < 2:
             self.fail("Need atleast 2 servers to fail")
-        task = AutoFailoverNodesFailureTask(self.server_to_fail,
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
                                             "network_split", self.timeout,
-                                            self.pause_between_failover_action)
+                                            self.pause_between_failover_action,
+                                            False,
+                                            self.timeout_buffer)
         self.task_manager.schedule(task)
-        task.result()
+        try:
+            task.result()
+        except Exception:
+            self.fail("Exception: ".format(Exception.message))
 
     def bring_back_failed_nodes_up(self):
         if self.failover_action == "firewall":
@@ -407,6 +493,42 @@ class AutoFailoverBaseTest(BaseTestCase):
                           password=serverinfo.rest_password,
                           remoteIp=node.ip)
         self.shuffle_nodes_between_zones_and_rebalance(to_remove)
+
+    def _get_params(self):
+        self.timeout = self.input.param("timeout", 60)
+        self.failover_action = self.input.param("failover_action",
+                                                "stop_server")
+        self.failover_orchestrator = self.input.param("failover_orchestrator",
+                                                      False)
+        self.multiple_node_failure = self.input.param("multiple_nodes_failure",
+                                                      False)
+        self.num_items = self.input.param("num_items", 10000)
+        self.update_items = self.input.param("update_items", 1000)
+        self.delete_items = self.input.param("delete_items", 1000)
+        self.add_back_node = self.input.param("add_back_node", True)
+        self.recovery_strategy = self.input.param("recovery_strategy",
+                                                  "delta")
+        self.multi_node_failures = self.input.param("multi_node_failures",
+                                                    False)
+        self.num_node_failures = self.input.param("num_node_failures", 1)
+        self.services = self.input.param("services", None)
+        self.zone = self.input.param("zone", 1)
+        self.multi_services_node = self.input.param("multi_services_node",
+                                                    False)
+        self.pause_between_failover_action = self.input.param(
+            "pause_between_failover_action", 0)
+        self.remove_after_failover = self.input.param(
+            "remove_after_failover", False)
+        self.timeout_buffer = 60 if self.failover_orchestrator else 3
+        failover_not_expected = self.num_node_failures > 1 and \
+                                self.pause_between_failover_action < \
+                                self.timeout
+        self.failover_expected = not failover_not_expected
+        if self.failover_action is "restart_server":
+            self.num_items *= 100
+        self.orchestrator = self.servers[0] if not \
+            self.failover_orchestrator else self.servers[
+            self.num_node_failures]
 
     failover_actions = {
         "firewall": enable_firewall,

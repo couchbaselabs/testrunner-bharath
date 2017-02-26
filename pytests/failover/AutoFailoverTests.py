@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from failover.AutoFailoverBaseTest import AutoFailoverBaseTest
 from membase.api.exception import RebalanceFailedException, \
     ServerUnavailableException
@@ -25,7 +27,6 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
-        self.wait_for_failover_or_assert(self.master, 1)
 
     def test_autofailover_during_rebalance(self):
         self.enable_autofailover_and_validate()
@@ -35,7 +36,6 @@ class AutoFailoverTests(AutoFailoverBaseTest):
                                                       self.servers_to_remove)
         self.sleep(10)
         self.failover_actions[self.failover_action](self)
-        self.wait_for_failover_or_assert(self.master, 1)
         try:
             rebalance_task.result()
         except RebalanceFailedException:
@@ -61,8 +61,9 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
-        self.wait_for_failover_or_assert(self.master, 1)
-        rebalance_success = self.cluster.rebalance(self.servers,
+        servers = deepcopy(self.servers)
+        servers.remove(self.server_to_fail)
+        rebalance_success = self.cluster.rebalance(servers,
                                                    self.servers_to_add,
                                                    self.servers_to_remove)
         if not rebalance_success:
@@ -72,7 +73,6 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
-        self.wait_for_failover_or_assert(self.master, 1)
         self.bring_back_failed_nodes_up()
         self.sleep(30)
         self.log.info(self.server_to_fail[0])
@@ -91,8 +91,8 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
-        self.wait_for_failover_or_assert(self.master, 1)
         self.nodes = self.rest.node_statuses()
+        self.remove_after_failover = True
         self.rest.rebalance(otpNodes=[node.id for node in self.nodes])
         msg = "rebalance failed while removing failover nodes {0}".format(
             self.server_to_fail[0])

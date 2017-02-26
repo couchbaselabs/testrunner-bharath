@@ -4456,24 +4456,65 @@ class EnterpriseCompactTask(Task):
 
 
 class AutoFailoverNodesFailureTask(Task):
-    def __init__(self, servers_to_fail, failure_type, timeout, pause=0):
+    def __init__(self, master, servers_to_fail, failure_type, timeout,
+                 pause=0, expect_auto_failover=True, timeout_buffer=3,
+                 check_for_failover=True):
         Task.__init__(self, "AutoFailoverNodesFailureTask")
+        self.master = master
         self.servers_to_fail = servers_to_fail
         self.num_servers_to_fail = self.servers_to_fail.__len__()
         self.itr = 0
         self.failure_type = failure_type
         self.timeout = timeout
         self.pause = pause
+        self.expect_auto_failover = expect_auto_failover
+        self.check_for_autofailover = check_for_failover
+        self.start_time = 0
+        self.timeout_buffer = timeout_buffer
+        self.current_failure_node = self.servers_to_fail[0]
 
     def execute(self, task_manager):
         while self.has_next() and not self.done():
             self.next()
+        self.check(task_manager)
         self.state = FINISHED
         self.set_result(True)
 
     def check(self, task_manager):
-        self.log.info("Done AutoFailoverNodesFailureTask")
-        pass
+        if not self.check_for_autofailover:
+            self.state = EXECUTING
+            return
+        self.start_time = time.time()
+        time_max_end = self.start_time + self.timeout + self.timeout_buffer
+        auto_failed_over = False
+        while time.time() < time_max_end and not auto_failed_over:
+            check_for_autofailover = self._check_for_autofailover_initiation(
+                self.current_failure_node)
+            if check_for_autofailover:
+                auto_failed_over = True
+                end_time = time.time()
+        if self.expect_auto_failover:
+            if auto_failed_over:
+                self.log.info("Autofailover of node {0} successfully "
+                              "initiated  in {1} sec".format(
+                    self.current_failure_node.ip, end_time - self.start_time))
+                self.state = EXECUTING
+            else:
+                self.log.error("Node {0} was not autofailed over within {1} "
+                              "sec timeout period".format(
+                    self.current_failure_node.ip, self.timeout))
+                self.state = FINISHED
+                raise Exception("Node not Failed over")
+        else:
+            if not auto_failed_over:
+                self.log.info("Node not autofailed over as expected")
+                self.state = EXECUTING
+            else:
+                self.log.error("Node {0} was autofailed over but no "
+                               "autofailover of the node was "
+                               "expected".format(self.current_failure_node.ip))
+                self.state = EXECUTING
+                raise Exception("Node Failed over when not expected")
 
     def has_next(self):
         return self.itr < self.num_servers_to_fail
@@ -4481,21 +4522,21 @@ class AutoFailoverNodesFailureTask(Task):
     def next(self):
         if self.pause != 0:
             time.sleep(self.pause)
-        server_to_fail = self.servers_to_fail[self.itr]
+        self.current_failure_node = self.servers_to_fail[self.itr]
         if self.failure_type == "enable_firewall":
-            self._enable_firewall(server_to_fail)
+            self._enable_firewall(self.current_failure_node)
         elif self.failure_type == "disable_firewall":
-            self._disable_firewall(server_to_fail)
+            self._disable_firewall(self.current_failure_node)
         elif self.failure_type == "restart_couchbase":
-            self._restart_couchbase_server(server_to_fail)
+            self._restart_couchbase_server(self.current_failure_node)
         elif self.failure_type == "stop_couchbase":
-            self._stop_couchbase_server(server_to_fail)
+            self._stop_couchbase_server(self.current_failure_node)
         elif self.failure_type == "start_couchbase":
-            self._start_couchbase_server(server_to_fail)
+            self._start_couchbase_server(self.current_failure_node)
         elif self.failure_type == "restart_network":
-            self._stop_restart_network(server_to_fail, self.timeout)
+            self._stop_restart_network(self.current_failure_node, self.timeout)
         elif self.failure_type == "restart_machine":
-            self._restart_machine(server_to_fail, self.timeout)
+            self._restart_machine(self.current_failure_node, self.timeout)
         elif self.failure_type == "network_split":
             self._block_incoming_network_from_node(self.servers_to_fail[0],
                                                    self.servers_to_fail[
@@ -4553,3 +4594,37 @@ class AutoFailoverNodesFailureTask(Task):
             node1.ip, node2.ip))
         command = "iptables -A INPUT -s {0} -j DROP".format(node2.ip)
         shell.execute_command(command)
+
+    def _check_for_autofailover_initiation(self, failed_over_node):
+        rest = RestConnection(self.master)
+        ui_logs = rest.get_logs(5)
+        ui_logs_text = [t["text"] for t in ui_logs]
+        expected_log = "Starting failing over 'ns_1@{}'".format(
+            failed_over_node.ip)
+        if expected_log in ui_logs_text:
+            return True
+        return False
+
+
+class NodeMonitorsAnalyserTask(Task):
+
+    def __init__(self, node, stop=False):
+        Task.__init__(self, "NodeMonitorAnalyzerTask")
+        self.command = "dict:to_list(node_status_analyzer:get_nodes())"
+        self.master = node
+        self.rest = RestConnection(self.master)
+        self.stop = stop
+
+    def execute(self, task_manager):
+        while not self.done() and not self.stop:
+            self.status, self.content = self.rest.diag_eval(self.command,
+                                                            print_log=False)
+            self.state = CHECKING
+
+    def check(self, task_manager):
+        if self.status and self.content:
+            self.log.info("NodeStatus: {}".format(self.content))
+            time.sleep(1)
+            self.state = EXECUTING
+        else:
+            raise Exception("Monitors not working correctly")
