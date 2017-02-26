@@ -4513,7 +4513,7 @@ class AutoFailoverNodesFailureTask(Task):
                 self.log.error("Node {0} was autofailed over but no "
                                "autofailover of the node was "
                                "expected".format(self.current_failure_node.ip))
-                self.state = EXECUTING
+                self.state = FINISHED
                 raise Exception("Node Failed over when not expected")
 
     def has_next(self):
