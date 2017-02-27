@@ -214,7 +214,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def async_disable_firewall(self):
         self.time_start = time.time()
@@ -241,7 +241,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def async_restart_couchbase_server(self):
         self.time_start = time.time()
@@ -268,7 +268,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def async_stop_couchbase_server(self):
         self.time_start = time.time()
@@ -293,7 +293,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def async_start_couchbase_server(self):
         self.time_start = time.time()
@@ -318,7 +318,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def async_stop_restart_network(self):
         self.time_start = time.time()
@@ -343,7 +343,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def async_restart_machine(self):
         self.time_start = time.time()
@@ -369,7 +369,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def async_stop_memcached(self):
         self.time_start = time.time()
@@ -394,7 +394,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def split_network(self):
         self.time_start = time.time()
@@ -410,7 +410,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         try:
             task.result()
         except Exception:
-            self.fail("Exception: ".format(Exception.message))
+            self.fail("Exception: ".format(Exception))
 
     def bring_back_failed_nodes_up(self):
         if self.failover_action == "firewall":
