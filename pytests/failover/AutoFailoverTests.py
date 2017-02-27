@@ -1,5 +1,3 @@
-from copy import deepcopy
-
 from failover.AutoFailoverBaseTest import AutoFailoverBaseTest
 from membase.api.exception import RebalanceFailedException, \
     ServerUnavailableException
@@ -61,13 +59,19 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
-        servers = deepcopy(self.servers)
-        servers = [server for server in servers if server not in
-                   self.server_to_fail]
-        rebalance_success = self.cluster.rebalance(servers,
-                                                   self.servers_to_add,
-                                                   self.servers_to_remove)
-        if not rebalance_success:
+        for node in self.servers_to_add:
+            self.rest.add_node(user=self.orchestrator.rest_username,
+                               password=self.orchestrator.rest_password,
+                               remoteIp=node.ip)
+        nodes = self.rest.node_statuses()
+        nodes_to_remove = [node.id for node in nodes if
+                           node.ip in [t.ip for t in self.servers_to_remove]]
+        nodes = [node.id for node in nodes]
+        started = self.rest.rebalance(nodes, nodes_to_remove)
+        rebalance_success = False
+        if started:
+            rebalance_success = self.rest.monitorRebalance()
+        if not rebalance_success or not started:
             self.fail("Rebalance failed. Check logs")
 
     def test_autofailover_and_addback_of_node(self):
@@ -81,7 +85,7 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         self.log.info(self.nodes[0].id)
         self.rest.add_back_node("ns_1@{}".format(self.server_to_fail[0].ip))
         self.rest.set_recovery_type("ns_1@{}".format(self.server_to_fail[
-                                                          0].ip),
+                                                         0].ip),
                                     self.recovery_strategy)
         self.rest.rebalance(otpNodes=[node.id for node in self.nodes])
         msg = "rebalance failed while recovering failover nodes {0}".format(

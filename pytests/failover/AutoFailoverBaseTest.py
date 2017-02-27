@@ -15,7 +15,7 @@ class AutoFailoverBaseTest(BaseTestCase):
     def setUp(self):
         super(AutoFailoverBaseTest, self).setUp()
         self._get_params()
-        self.rest = RestConnection(self.master)
+        self.rest = RestConnection(self.orchestrator)
         self.task_manager = TaskManager("Autofailover_thread")
         self.task_manager.start()
         self.initial_load_gen = BlobGenerator('auto-failover',
