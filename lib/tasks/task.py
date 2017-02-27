@@ -4530,6 +4530,7 @@ class AutoFailoverNodesFailureTask(Task):
             if self.pause > self.timeout and self.itr != 0:
                 rest = RestConnection(self.master)
                 status = rest.reset_autofailover()
+                self._rebalance()
                 if not status:
                     self.state = FINISHED
                     self.set_result(False)
@@ -4617,6 +4618,16 @@ class AutoFailoverNodesFailureTask(Task):
         if expected_log in ui_logs_text:
             return True
         return False
+
+    def _rebalance(self):
+        rest = RestConnection(self.master)
+        nodes = rest.node_statuses()
+        rest.rebalance(otpNodes=[node.id for node in nodes])
+        rebalance_progress = rest.monitorRebalance()
+        if not rebalance_progress:
+            self.set_result(False)
+            self.state = FINISHED
+            self.set_exception(Exception("Failed to rebalance after failover"))
 
 
 class NodeMonitorsAnalyserTask(Task):
