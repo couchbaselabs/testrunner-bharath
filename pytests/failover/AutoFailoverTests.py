@@ -64,9 +64,6 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         servers = deepcopy(self.servers)
         servers = [server for server in servers if server not in
                    self.server_to_fail]
-        self.log.info(servers)
-        self.log.info(self.servers)
-        self.log.info(self.server_to_fail)
         rebalance_success = self.cluster.rebalance(servers,
                                                    self.servers_to_add,
                                                    self.servers_to_remove)
