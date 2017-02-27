@@ -37,7 +37,7 @@ class AutoFailoverBaseTest(BaseTestCase):
                                                            self.nodes_in]
         self.servers_to_remove = self.servers[self.nodes_init -
                                               self.nodes_out:self.nodes_init]
-        self.node_monitor_task = self.start_node_monitors_task()
+        #self.node_monitor_task = self.start_node_monitors_task()
 
     def tearDown(self):
         self.log.info("============AutoFailoverBaseTest teardown============")
