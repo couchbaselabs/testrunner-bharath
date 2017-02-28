@@ -4572,6 +4572,8 @@ class AutoFailoverNodesFailureTask(Task):
             self._stop_restart_network(self.current_failure_node, self.timeout)
         elif self.failure_type == "restart_machine":
             self._restart_machine(self.current_failure_node)
+        elif self.failure_type == "stop_memcached":
+            self._stop_memcached(self.current_failure_node)
         elif self.failure_type == "network_split":
             self._block_incoming_network_from_node(self.servers_to_fail[0],
                                                    self.servers_to_fail[
@@ -4615,6 +4617,11 @@ class AutoFailoverNodesFailureTask(Task):
         shell = RemoteMachineShellConnection(node)
         command = "/sbin/reboot"
         shell.execute_command(command=command)
+
+    def _stop_memcached(self, node):
+        shell = RemoteMachineShellConnection(node)
+        o, r = shell.kill_memcached()
+        self.log.info("Killed memcached. {0} {1}".format(o, r))
 
     def _block_incoming_network_from_node(self, node1, node2):
         shell = RemoteMachineShellConnection(node1)
