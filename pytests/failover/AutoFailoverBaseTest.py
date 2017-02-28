@@ -312,9 +312,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
                                             "start_couchbase", self.timeout,
-                                            self.pause_between_failover_action,
-                                            False,
-                                            self.timeout_buffer, False)
+                                            0, False, self.timeout_buffer,
+                                            False)
         self.task_manager.schedule(task)
         try:
             task.result()

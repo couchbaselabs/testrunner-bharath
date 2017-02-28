@@ -4521,8 +4521,8 @@ class AutoFailoverNodesFailureTask(Task):
                     self.set_result(False)
                     self.set_exception(AutoFailoverException(message))
             else:
-                message = "Autofailover of node {0} was initiated after the " \
-                          "expected timeout period of {1}".format(
+                message = "Autofailover of node {0} was not initiated after " \
+                          "the expected timeout period of {1}".format(
                     self.current_failure_node.ip, self.timeout)
                 self.log.error(message)
                 self.state = FINISHED
