@@ -4558,6 +4558,7 @@ class AutoFailoverNodesFailureTask(Task):
                     self.set_exception(Exception("Reset of autofailover "
                                                  "count failed"))
         self.current_failure_node = self.servers_to_fail[self.itr]
+        self.start_time = time.time()
         if self.failure_type == "enable_firewall":
             self._enable_firewall(self.current_failure_node)
         elif self.failure_type == "disable_firewall":
@@ -4641,14 +4642,13 @@ class AutoFailoverNodesFailureTask(Task):
         return False
 
     def _wait_for_autofailover_initiation(self, timeout):
-        start_time = time.time()
         autofailover_initated = False
-        while time.time() < timeout + start_time:
+        while time.time() < timeout + self.start_time:
             autofailover_initated = self._check_for_autofailover_initiation(
                 self.current_failure_node)
             if autofailover_initated:
                 end_time = time.time()
-                time_taken = end_time - start_time
+                time_taken = end_time - self.start_time
                 return autofailover_initated, time_taken
         return autofailover_initated, -1
 
