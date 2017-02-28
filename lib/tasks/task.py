@@ -4550,7 +4550,7 @@ class AutoFailoverNodesFailureTask(Task):
         elif self.failure_type == "restart_network":
             self._stop_restart_network(self.current_failure_node, self.timeout)
         elif self.failure_type == "restart_machine":
-            self._restart_machine(self.current_failure_node, self.timeout)
+            self._restart_machine(self.current_failure_node)
         elif self.failure_type == "network_split":
             self._block_incoming_network_from_node(self.servers_to_fail[0],
                                                    self.servers_to_fail[
@@ -4590,17 +4590,10 @@ class AutoFailoverNodesFailureTask(Task):
         self.log.info("Stopped the network for {0} sec and restarted the "
                       "network on {1}".format(stop_time, node))
 
-    def _restart_machine(self, node, timeout=120):
+    def _restart_machine(self, node):
         shell = RemoteMachineShellConnection(node)
         command = "/sbin/reboot"
         shell.execute_command(command=command)
-        self.log.info("Waiting for the rebooted machine to be back up")
-        time.sleep(timeout)
-        try:
-            shell = RemoteMachineShellConnection(node)
-        except:
-            self.log.info("Unable to connect to the host. Machine has not "
-                          "restarted")
 
     def _block_incoming_network_from_node(self, node1, node2):
         shell = RemoteMachineShellConnection(node1)

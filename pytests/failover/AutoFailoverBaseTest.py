@@ -4,6 +4,7 @@ from basetestcase import BaseTestCase
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
 from membase.helper.cluster_helper import ClusterOperationHelper
+from remote.remote_util import RemoteMachineShellConnection
 from tasks.task import AutoFailoverNodesFailureTask, NodeMonitorsAnalyserTask
 from tasks.taskmanager import TaskManager
 
@@ -370,6 +371,18 @@ class AutoFailoverBaseTest(BaseTestCase):
             task.result()
         except Exception:
             self.fail("Exception: ".format(Exception))
+        finally:
+            self.sleep(120, "Sleeping for 2 min for the machines to restart")
+            for node in self.server_to_fail:
+                for i in range(0, 2):
+                    try:
+                        shell = RemoteMachineShellConnection(node)
+                        break
+                    except:
+                        self.log.info("Unable to connect to the host. "
+                                      "Machine has not restarted")
+                        self.sleep(60, "Sleep for another minute and try "
+                                       "again")
 
     def async_stop_memcached(self):
         self.time_start = time.time()
