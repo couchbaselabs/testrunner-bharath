@@ -57,7 +57,7 @@ class AutoFailoverBaseTest(BaseTestCase):
                 a = "Group "
                 if rest.is_zone_exist(a + str(i + 1)):
                     rest.delete_zone(a + str(i + 1))
-        master = self.servers[0]
+        master = self.orchestrator
         rest = RestConnection(master)
         cluster_status = rest.cluster_status()
         if cluster_status and self.failover_orchestrator and \
