@@ -4496,7 +4496,7 @@ class AutoFailoverNodesFailureTask(Task):
         if self.expect_auto_failover:
             if autofailover_initiated:
                 if time_taken < max_timeout:
-                    if time_taken > self.timeout:
+                    if time_taken > self.timeout - 2:
                         self.log.info("Autofailover of node {0} successfully "
                                       "initiated in {1} sec".format(
                             self.current_failure_node.ip, time_taken))
