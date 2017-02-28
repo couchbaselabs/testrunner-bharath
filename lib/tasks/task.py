@@ -4481,7 +4481,8 @@ class AutoFailoverNodesFailureTask(Task):
             self.next()
             if self.pause > 0 and self.pause > self.timeout:
                 self.check(task_manager)
-        self.check(task_manager)
+        if self.pause == 0 or 0 < self.pause < self.timeout:
+            self.check(task_manager)
         self.state = FINISHED
         self.set_result(True)
 
