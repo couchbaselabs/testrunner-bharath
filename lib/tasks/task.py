@@ -4472,6 +4472,7 @@ class AutoFailoverNodesFailureTask(Task):
         self.start_time = 0
         self.timeout_buffer = timeout_buffer
         self.current_failure_node = self.servers_to_fail[0]
+        self.max_time_to_wait_for_failover = self.timeout + 60
 
     def execute(self, task_manager):
         while self.has_next() and not self.done():
@@ -4486,40 +4487,53 @@ class AutoFailoverNodesFailureTask(Task):
         if not self.check_for_autofailover:
             self.state = EXECUTING
             return
-        self.start_time = time.time()
-        time_max_end = self.start_time + self.timeout + self.timeout_buffer
-        auto_failed_over = False
-        while time.time() < time_max_end and not auto_failed_over:
-            check_for_autofailover = self._check_for_autofailover_initiation(
-                self.current_failure_node)
-            if check_for_autofailover:
-                auto_failed_over = True
-                end_time = time.time()
+        max_timeout = self.timeout + self.timeout_buffer
+        autofailover_initiated, time_taken = \
+            self._wait_for_autofailover_initiation(
+                self.max_time_to_wait_for_failover)
         if self.expect_auto_failover:
-            if auto_failed_over:
-                self.log.info("Autofailover of node {0} successfully "
-                              "initiated  in {1} sec".format(
-                    self.current_failure_node.ip, end_time - self.start_time))
-                self.state = EXECUTING
+            if autofailover_initiated:
+                if time_taken < max_timeout:
+                    if time_taken > self.timeout:
+                        self.log.info("Autofailover of node {0} successfully "
+                                      "initiated in {1} sec".format(
+                            self.current_failure_node.ip, time_taken))
+                        self.state = EXECUTING
+                    else:
+                        self.log.error("Autofailover of node {0} was "
+                                       "initiated before the failover "
+                                       "timeout. Expected timeout: {1} "
+                                       "Actual time: {2}".format(
+                            self.current_failure_node.ip, self.timeout,
+                            time_taken))
+                        self.state = FINISHED
+                        self.set_result(False)
+                else:
+                    self.log.error("Autofailover of node {0} was initiated "
+                                   "after the timeout period. Expected "
+                                   "timeout: {1} Actual time taken: {"
+                                   "2}".format(self.current_failure_node.ip,
+                                               self.timeout, time_taken))
+                    self.state = FINISHED
+                    self.set_result(False)
             else:
-                self.log.error("Node {0} was not autofailed over within {1} "
-                              "sec timeout period".format(
-                    self.current_failure_node.ip, self.timeout))
+                self.log.error("Autofailover of node {0} was initiated "
+                               "after the expected timeout period of {"
+                               "1}".format(self.current_failure_node.ip,
+                                           self.timeout))
+
                 self.state = FINISHED
                 self.set_result(False)
-                self.set_exception(Exception("Node not Failed over"))
         else:
-            if not auto_failed_over:
-                self.log.info("Node not autofailed over as expected")
-                self.state = EXECUTING
-            else:
+            if autofailover_initiated:
                 self.log.error("Node {0} was autofailed over but no "
                                "autofailover of the node was "
                                "expected".format(self.current_failure_node.ip))
                 self.state = FINISHED
                 self.set_result(False)
-                self.set_exception(Exception("Node Failed over when not "
-                                             "expected"))
+            else:
+                self.log.info("Node not autofailed over as expected")
+                self.state = EXECUTING
 
     def has_next(self):
         return self.itr < self.num_servers_to_fail
@@ -4611,6 +4625,20 @@ class AutoFailoverNodesFailureTask(Task):
         if expected_log in ui_logs_text:
             return True
         return False
+
+    def _wait_for_autofailover_initiation(self, timeout):
+        start_time = time.time()
+        autofailover_initated = False
+        while time.time() < timeout + start_time:
+            autofailover_initated = self._check_for_autofailover_initiation(
+                self.current_failure_node)
+            if autofailover_initated:
+                end_time = time.time()
+                time_taken = end_time - start_time
+                return autofailover_initated, time_taken
+        return autofailover_initated, -1
+
+
 
     def _rebalance(self):
         rest = RestConnection(self.master)
