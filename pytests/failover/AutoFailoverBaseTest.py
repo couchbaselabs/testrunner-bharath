@@ -522,7 +522,7 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.timeout_buffer = 60 if self.failover_orchestrator else 3
         failover_not_expected = self.num_node_failures > 1 and \
                                 self.pause_between_failover_action < \
-                                self.timeout
+                                self.timeout or self.num_replicas < 1
         self.failover_expected = not failover_not_expected
         if self.failover_action is "restart_server":
             self.num_items *= 100
