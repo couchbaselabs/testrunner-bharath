@@ -22,7 +22,9 @@ from mc_bin_client import MemcachedError
 from membase.api.exception import BucketCreationException
 from membase.api.exception import N1QLQueryException, DropIndexException, CreateIndexException, DesignDocCreationException, QueryViewException, ReadDocumentException, RebalanceFailedException, \
                                     GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, FailoverFailedException, \
-                                    ServerUnavailableException, BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException
+                                    ServerUnavailableException, \
+    BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException,\
+    AutoFailoverException
 from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from memcacheConstants import ERR_NOT_FOUND,NotFoundError
@@ -4500,37 +4502,41 @@ class AutoFailoverNodesFailureTask(Task):
                             self.current_failure_node.ip, time_taken))
                         self.state = EXECUTING
                     else:
-                        self.log.error("Autofailover of node {0} was "
-                                       "initiated before the failover "
-                                       "timeout. Expected timeout: {1} "
-                                       "Actual time: {2}".format(
+                        message = "Autofailover of node {0} was initiated " \
+                                  "before the failover timeout. Expected " \
+                                  "timeout: {1} Actual time: {2}".format(
                             self.current_failure_node.ip, self.timeout,
-                            time_taken))
+                            time_taken)
+                        self.log.error(message)
                         self.state = FINISHED
                         self.set_result(False)
+                        self.set_exception(AutoFailoverException(message))
                 else:
-                    self.log.error("Autofailover of node {0} was initiated "
-                                   "after the timeout period. Expected "
-                                   "timeout: {1} Actual time taken: {"
-                                   "2}".format(self.current_failure_node.ip,
-                                               self.timeout, time_taken))
+                    message = "Autofailover of node {0} was initiated after " \
+                              "the timeout period. Expected  timeout: {1} " \
+                              "Actual time taken: {2}".format(
+                        self.current_failure_node.ip, self.timeout, time_taken)
+                    self.log.error(message)
                     self.state = FINISHED
                     self.set_result(False)
+                    self.set_exception(AutoFailoverException(message))
             else:
-                self.log.error("Autofailover of node {0} was initiated "
-                               "after the expected timeout period of {"
-                               "1}".format(self.current_failure_node.ip,
-                                           self.timeout))
-
+                message = "Autofailover of node {0} was initiated after the " \
+                          "expected timeout period of {1}".format(
+                    self.current_failure_node.ip, self.timeout)
+                self.log.error(message)
                 self.state = FINISHED
                 self.set_result(False)
+                self.set_exception(AutoFailoverException(message))
         else:
             if autofailover_initiated:
-                self.log.error("Node {0} was autofailed over but no "
-                               "autofailover of the node was "
-                               "expected".format(self.current_failure_node.ip))
+                message = "Node {0} was autofailed over but no autofailover " \
+                          "of the node was expected".format(
+                    self.current_failure_node.ip)
+                self.log.error(message)
                 self.state = FINISHED
                 self.set_result(False)
+                self.set_exception(AutoFailoverException(message))
             else:
                 self.log.info("Node not autofailed over as expected")
                 self.state = EXECUTING
@@ -4637,8 +4643,6 @@ class AutoFailoverNodesFailureTask(Task):
                 time_taken = end_time - start_time
                 return autofailover_initated, time_taken
         return autofailover_initated, -1
-
-
 
     def _rebalance(self):
         rest = RestConnection(self.master)

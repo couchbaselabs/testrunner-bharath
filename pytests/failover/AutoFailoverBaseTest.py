@@ -214,8 +214,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def async_disable_firewall(self):
         self.time_start = time.time()
@@ -241,8 +241,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def async_restart_couchbase_server(self):
         self.time_start = time.time()
@@ -268,8 +268,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def async_stop_couchbase_server(self):
         self.time_start = time.time()
@@ -293,8 +293,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def async_start_couchbase_server(self):
         self.time_start = time.time()
@@ -318,8 +318,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def async_stop_restart_network(self):
         self.time_start = time.time()
@@ -343,8 +343,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def async_restart_machine(self):
         self.time_start = time.time()
@@ -369,8 +369,9 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+
+            self.fail("Exception: {}".format(e))
         finally:
             self.sleep(120, "Sleeping for 2 min for the machines to restart")
             for node in self.server_to_fail:
@@ -406,8 +407,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def split_network(self):
         self.time_start = time.time()
@@ -422,8 +423,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception:
-            self.fail("Exception: ".format(Exception))
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
 
     def bring_back_failed_nodes_up(self):
         if self.failover_action == "firewall":
