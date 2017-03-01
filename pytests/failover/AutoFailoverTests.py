@@ -53,7 +53,6 @@ class AutoFailoverTests(AutoFailoverBaseTest):
             self.disable_firewall()
             self.fail("Rebalance failed. Check logs")
         self.failover_actions[self.failover_action](self)
-        self.wait_for_failover_or_assert(self.master, 1)
 
     def test_rebalance_after_autofailover(self):
         self.enable_autofailover_and_validate()
