@@ -101,9 +101,3 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         msg = "rebalance failed while removing failover nodes {0}".format(
             self.server_to_fail[0])
         self.assertTrue(self.rest.monitorRebalance(stop_if_loop=True), msg)
-
-    def test_autofailover_on_bucket_warmup(self):
-        self.enable_autofailover_and_validate()
-        self.sleep(5)
-        self.failover_actions["restart_server"](self)
-        self.wait_for_failover_or_assert(self.master, 1)
