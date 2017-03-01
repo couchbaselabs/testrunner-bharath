@@ -26,6 +26,10 @@ class QueryTests(BaseTestCase):
             self.log.info ("current status of {0}  is {1}".format(server.ip, temp['nodes'][0]['status']))
 
         indexer_node = self.get_nodes_from_services_map(service_type="index", get_all_nodes=True)
+        # Set indexer storage mode
+        indexer_rest = RestConnection(indexer_node[0])
+        doc = {"indexer.settings.storage_mode": self.gsi_type}
+        indexer_rest.set_index_settings(doc)
         self.indexer_scanTimeout = self.input.param("indexer_scanTimeout", None)
         if self.indexer_scanTimeout is not None:
             for server in indexer_node:
@@ -114,7 +118,7 @@ class QueryTests(BaseTestCase):
                 return self.generate_docs_array(num_items, start)
             return getattr(self, 'generate_docs_' + self.dataset)(num_items, start)
         except Exception, ex:
-            self.log.info(ex)
+            self.log.info(str(ex))
             self.fail("There is no dataset %s, please enter a valid one" % self.dataset)
 
     def generate_ops_docs(self, num_items, start=0):
@@ -131,7 +135,7 @@ class QueryTests(BaseTestCase):
             if self.dataset == "bigdata":
                 return self.generate_ops(num_items, start, json_generator.generate_docs_bigdata)
             if self.dataset == "array":
-                return self.generate_ops(num_items, start, json_generator.generate_docs_employee_array)
+                return self.generate_ops(num_items, start, json_generator.generate_all_type_documents_for_gsi)
         except Exception, ex:
             self.log.info(ex)
             self.fail("There is no dataset %s, please enter a valid one" % self.dataset)
@@ -161,9 +165,9 @@ class QueryTests(BaseTestCase):
         return json_generator.generate_docs_bigdata(docs_per_day=docs_per_day,
             start=start, value_size=self.value_size)
 
-    def generate_docs_array(self, docs_per_day, start=0):
+    def generate_docs_array(self, num_items=10, start=0):
         json_generator = JsonGenerator()
-        return json_generator.generate_docs_employee_array(docs_per_day=docs_per_day,
+        return json_generator.generate_all_type_documents_for_gsi(docs_per_day=num_items,
             start=start)
 
     def generate_ops(self, docs_per_day, start=0, method=None):

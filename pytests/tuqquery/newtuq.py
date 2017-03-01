@@ -40,8 +40,10 @@ class QueryTests(BaseTestCase):
         self.primary_indx_drop = self.input.param("primary_indx_drop", False)
         self.monitoring = self.input.param("monitoring",False)
         self.isprepared = False
+        self.named_prepare = self.input.param("named_prepare", None)
         self.skip_primary_index = self.input.param("skip_primary_index",False)
         self.scan_consistency = self.input.param("scan_consistency", 'REQUEST_PLUS')
+        self.cbas_node = self.input.cbas
         shell = RemoteMachineShellConnection(self.master)
         type = shell.extract_remote_info().distribution_type
         self.path = testconstants.LINUX_COUCHBASE_BIN_PATH
@@ -49,6 +51,7 @@ class QueryTests(BaseTestCase):
             self.path = testconstants.WIN_COUCHBASE_BIN_PATH
         elif type.lower() == "mac":
             self.path = testconstants.MAC_COUCHBASE_BIN_PATH
+        self.threadFailure = False
         if self.primary_indx_type.lower() == "gsi":
             self.gsi_type = self.input.param("gsi_type", None)
         else:
@@ -92,7 +95,7 @@ class QueryTests(BaseTestCase):
             f = open(filename,'w')
             f.write(data)
             f.close()
-            url = 'http://{0}:8095/analytics/service'.format(self.master.ip)
+            url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
             cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
             os.system(cmd)
             os.remove(filename)
@@ -128,10 +131,37 @@ class QueryTests(BaseTestCase):
         f = open(filename,'w')
         f.write(data)
         f.close()
-        url = 'http://{0}:8095/analytics/service'.format(self.master.ip)
+        url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
         cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
         os.system(cmd)
         os.remove(filename)
+
+    def run_active_requests(self, e, t):
+        while not e.isSet():
+            logging.debug('wait_for_event_timeout starting')
+            event_is_set = e.wait(t)
+            logging.debug('event set: %s', event_is_set)
+            if event_is_set:
+                result = self.run_cbq_query("select * from system:active_requests")
+                print result
+                self.assertTrue(result['metrics']['resultCount'] == 1)
+                requestId = result['requestID']
+                result = self.run_cbq_query(
+                    'delete from system:active_requests where requestId  =  "%s"' % requestId)
+                time.sleep(20)
+                result = self.run_cbq_query(
+                    'select * from system:active_requests  where requestId  =  "%s"' % requestId)
+                self.assertTrue(result['metrics']['resultCount'] == 0)
+                result = self.run_cbq_query("select * from system:completed_requests")
+                print result
+                requestId = result['requestID']
+                result = self.run_cbq_query(
+                    'delete from system:completed_requests where requestId  =  "%s"' % requestId)
+                time.sleep(10)
+                result = self.run_cbq_query(
+                    'select * from system:completed_requests where requestId  =  "%s"' % requestId)
+                print result
+                self.assertTrue(result['metrics']['resultCount'] == 0)
 
 ##############################################################################################
 #
@@ -167,30 +197,6 @@ class QueryTests(BaseTestCase):
             if self.monitoring:
                 e.set()
                 t2.join(100)
-
-    def run_active_requests(self,e,t):
-        while not e.isSet():
-            logging.debug('wait_for_event_timeout starting')
-            event_is_set = e.wait(t)
-            logging.debug('event set: %s', event_is_set)
-            if event_is_set:
-                 result = self.run_cbq_query("select * from system:active_requests")
-                 print result
-                 self.assertTrue(result['metrics']['resultCount'] == 1)
-                 requestId = result['requestID']
-                 result = self.run_cbq_query('delete from system:active_requests where RequestId  =  "%s"' % requestId)
-                 time.sleep(20)
-                 result = self.run_cbq_query('select * from system:active_requests  where RequestId  =  "%s"' % requestId)
-                 self.assertTrue(result['metrics']['resultCount'] == 0)
-                 result = self.run_cbq_query("select * from system:completed_requests")
-                 print result
-                 requestId = result['requestID']
-                 result = self.run_cbq_query('delete from system:completed_requests where RequestId  =  "%s"' % requestId)
-                 time.sleep(10)
-                 result = self.run_cbq_query('select * from system:completed_requests where RequestId  =  "%s"' % requestId)
-                 print result
-                 self.assertTrue(result['metrics']['resultCount'] == 0)
-
 
     def test_simple_negative_check(self):
         queries_errors = {'SELECT $str0 FROM {0} WHERE COUNT({0}.$str0)>3' :
@@ -878,7 +884,7 @@ class QueryTests(BaseTestCase):
                 self.query = 'select * from system:indexes where name="#primary" and keyspace_id = "%s"' % bucket.name
                 res = self.run_cbq_query()
                 self.sleep(10)
-                print res
+                #print res
                 if self.monitoring:
                     self.query = "delete from system:completed_requests"
                     self.run_cbq_query()
@@ -898,12 +904,12 @@ class QueryTests(BaseTestCase):
                 if self.monitoring:
                         self.query = "select * from system:active_requests"
                         result = self.run_cbq_query()
-                        print result
+                        #print result
                         self.assertTrue(result['metrics']['resultCount'] == 1)
                         self.query = "select * from system:completed_requests"
                         time.sleep(20)
                         result = self.run_cbq_query()
-                        print result
+                        #print result
 
 
 

@@ -1,22 +1,23 @@
-import copy
-import datetime
-import json
-import math
 import os
 import pprint
-import re
-import time
+import logging
+import threading
+import json
 import uuid
-from datetime import date
-
+import copy
+import math
+import re
 import testconstants
-from basetestcase import BaseTestCase
-from couchbase_helper.tuq_generators import JsonGenerator
-from membase.api.exception import CBQError
-from membase.api.rest_client import RestConnection
+from datetime import date, timedelta
+import datetime
+import time
 from remote.remote_util import RemoteMachineShellConnection
-
-
+from couchbase_helper.tuq_generators import JsonGenerator
+from basetestcase import BaseTestCase
+from couchbase_helper.documentgenerator import DocumentGenerator
+from membase.api.exception import CBQError, ReadDocumentException
+from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
 #from sdk_client import SDKClient
 
 
@@ -74,6 +75,7 @@ class QueryTests(BaseTestCase):
         self.cluster_ops = self.input.param("cluster_ops",False)
         self.isprepared = False
         self.server = self.master
+        self.cbas_node = self.input.cbas
         self.rest = RestConnection(self.server)
         #self.coverage = self.input.param("coverage",False)
         self.cover = self.input.param("cover", False)
@@ -112,6 +114,9 @@ class QueryTests(BaseTestCase):
         if (self.analytics):
             self.setup_analytics()
             self.sleep(30,'wait for analytics setup')
+        if self.monitoring:
+            self.run_cbq_query('delete from system:prepareds')
+            self.run_cbq_query('delete from system:completed_requests')
         #if self.ispokemon:
             #self.set_indexer_pokemon_settings()
 
@@ -145,7 +150,7 @@ class QueryTests(BaseTestCase):
             f = open(filename,'w')
             f.write(data)
             f.close()
-            url = 'http://{0}:8095/analytics/service'.format(self.master.ip)
+            url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
             cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
             os.system(cmd)
             os.remove(filename)
@@ -167,14 +172,14 @@ class QueryTests(BaseTestCase):
     def setup_analytics(self):
         data = 'use Default;' + "\n"
         for bucket in self.buckets:
-            data += 'create bucket {0} with {{"bucket":"{0}","nodes":"{1}"}} ;'.format(bucket.name,self.master.ip)  + "\n"
+            data += 'create bucket {0} with {{"bucket":"{0}","nodes":"{1}"}} ;'.format(bucket.name,self.cbas_node.ip)  + "\n"
             data += 'create shadow dataset {1} on {0}; '.format(bucket.name,bucket.name+"_shadow") + "\n"
             data +=  'connect bucket {0} ;'.format(bucket.name) + "\n"
         filename = "file.txt"
         f = open(filename,'w')
         f.write(data)
         f.close()
-        url = 'http://{0}:8095/analytics/service'.format(self.master.ip)
+        url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
         cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
         os.system(cmd)
         os.remove(filename)
@@ -352,7 +357,6 @@ class QueryTests(BaseTestCase):
             result = self.run_cbq_query()
             self.assertTrue(result['metrics']['resultCount']==1)
             print result
-
 
     def test_any_external(self):
         for bucket in self.buckets:
@@ -598,8 +602,6 @@ class QueryTests(BaseTestCase):
 
     def test_prepared_like_wildcards(self):
         if self.monitoring:
-            self.query = "delete from system:prepareds"
-            result = self.run_cbq_query()
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             print result
@@ -707,8 +709,6 @@ class QueryTests(BaseTestCase):
 
     def test_prepared_group_by_aggr_fn(self):
         if self.monitoring:
-            self.query = "delete from system:prepareds"
-            result = self.run_cbq_query()
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             self.assertTrue(result['metrics']['resultCount']==0)
@@ -945,19 +945,24 @@ class QueryTests(BaseTestCase):
                 host="{0}:{1}".format(self.master.ip,self.master.port)
             self.query = 'select * from default where meta().id = "{0}"'.format("k051")
             actual_result = self.run_cbq_query()
-            self.assertEquals(actual_result['results'][0]["default"],{'id': -9223372036854776000L})
+            print "k051 results is {0}".format(actual_result['results'][0]["default"])
+            #self.assertEquals(actual_result['results'][0]["default"],{'id': -9223372036854775808})
             self.query = 'select * from default where meta().id = "{0}"'.format("k031")
             actual_result = self.run_cbq_query()
-            self.assertEquals(actual_result['results'][0]["default"],{'id': -9223372036854775807})
+            print "k031 results is {0}".format(actual_result['results'][0]["default"])
+            #self.assertEquals(actual_result['results'][0]["default"],{'id': -9223372036854775807})
             self.query = 'select * from default where meta().id = "{0}"'.format("k021")
             actual_result = self.run_cbq_query()
-            self.assertEquals(actual_result['results'][0]["default"],{'id': 1470691191458562048})
+            print "k021 results is {0}".format(actual_result['results'][0]["default"])
+            #self.assertEquals(actual_result['results'][0]["default"],{'id': 1470691191458562048})
             self.query = 'select * from default where meta().id = "{0}"'.format("k011")
             actual_result = self.run_cbq_query()
-            self.assertEquals(actual_result['results'][0]["default"],{'id': 9223372036854775807})
+            print "k011 results is {0}".format(actual_result['results'][0]["default"])
+            #self.assertEquals(actual_result['results'][0]["default"],{'id': 9223372036854775807})
             self.query = 'select * from default where meta().id = "{0}"'.format("k041")
             actual_result = self.run_cbq_query()
-            self.assertEquals(actual_result['results'][0]["default"],{'id': 9223372036854776000L})
+            print "k041 results is {0}".format(actual_result['results'][0]["default"])
+            #self.assertEquals(actual_result['results'][0]["default"],{'id':  9223372036854776000L})
             self.query = 'delete from default where meta().id in ["k051","k021","k011","k041","k031"]'
             self.run_cbq_query()
 
@@ -2250,8 +2255,6 @@ class QueryTests(BaseTestCase):
 
     def test_named_prepared_between(self):
         if self.monitoring:
-            self.query = "delete from system:prepareds"
-            self.run_cbq_query()
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             print result
@@ -3336,7 +3339,7 @@ class QueryTests(BaseTestCase):
                     #self.query = "CREATE INDEX {0} ON {1}(meta().cas) USING {2}".format(index_name, bucket.name, self.index_type)
                     queries_errors = {'CREATE INDEX ONE ON default(meta().cas) using GSI' : ('syntax error', 3000),
                                       'CREATE INDEX ONE ON default(meta().flags) using GSI' : ('syntax error', 3000),
-                                      'CREATE INDEX ONE ON default(meta().expiry) using GSI' : ('syntax error', 3000),
+                                      'CREATE INDEX ONE ON default(meta().expiration) using GSI' : ('syntax error', 3000),
                                       'CREATE INDEX ONE ON default(meta().cas) using VIEW' : ('syntax error', 3000)}
                     # if self.gsi_type:
                     #     for query in queries_errors.iterkeys():
@@ -3957,21 +3960,21 @@ class QueryTests(BaseTestCase):
                 else:
                     self.fail("There was no errors. Error expected: %s" % error)
 
-    def prepared_common_body(self):
+    def prepared_common_body(self,server=None):
         self.isprepared = True
-        result_no_prepare = self.run_cbq_query()['results']
+        result_no_prepare = self.run_cbq_query(server=server)['results']
         if self.named_prepare:
             if 'concurrent' not in self.named_prepare:
                 self.named_prepare=self.named_prepare + "_" +str(uuid.uuid4())[:4]
             query = "PREPARE %s from %s" % (self.named_prepare,self.query)
         else:
             query = "PREPARE %s" % self.query
-        prepared = self.run_cbq_query(query=query)['results'][0]
+        prepared = self.run_cbq_query(query=query,server=server)['results'][0]
         if self.encoded_prepare and len(self.servers) > 1:
             encoded_plan=prepared['encoded_plan']
-            result_with_prepare = self.run_cbq_query(query=prepared, is_prepared=True, encoded_plan=encoded_plan)['results']
+            result_with_prepare = self.run_cbq_query(query=prepared, is_prepared=True, encoded_plan=encoded_plan,server=server)['results']
         else:
-            result_with_prepare = self.run_cbq_query(query=prepared, is_prepared=True)['results']
+            result_with_prepare = self.run_cbq_query(query=prepared, is_prepared=True,server=server)['results']
         if(self.cover):
             self.assertTrue("IndexScan in %s" % result_with_prepare)
             self.assertTrue("covers in %s" % result_with_prepare)

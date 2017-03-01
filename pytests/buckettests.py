@@ -37,6 +37,11 @@ class CreateBucketTests(BaseTestCase):
         shell.disconnect()
         self.sample_path = LINUX_COUCHBASE_SAMPLE_PATH
         self.bin_path = LINUX_COUCHBASE_BIN_PATH
+        if self.nonroot:
+            self.sample_path = "/home/%s%s" % (self.master.ssh_username,
+                                               LINUX_COUCHBASE_SAMPLE_PATH)
+            self.bin_path = "/home/%s%s" % (self.master.ssh_username,
+                                            LINUX_COUCHBASE_BIN_PATH)
         if type.lower() == 'windows':
             self.sample_path = WIN_COUCHBASE_SAMPLE_PATH
             self.bin_path = WIN_COUCHBASE_BIN_PATH
@@ -82,9 +87,13 @@ class CreateBucketTests(BaseTestCase):
 
     def test_create_bucket_used_port(self):
         ports = [25, 68, 80, 135, 139, 143, 500]
+
+        bucket_params = self._create_bucket_params(server=self.server, size=self.bucket_size,
+                                                          replicas=self.num_replicas)
         for port in ports:
             try:
-                self.cluster.create_standard_bucket(self.server, self.bucket_name + str(port), port, self.bucket_size, self.num_replicas)
+                self.cluster.create_standard_bucket(name=self.bucket_name+str(port), port=port,
+                                                    bucket_params=bucket_params)
             except:
                 self.log.info('Error appears as expected')
                 rest = RestConnection(self.master)
@@ -95,19 +104,25 @@ class CreateBucketTests(BaseTestCase):
     # Bucket creation with names as mentioned in MB-5844(isasl.pw, ns_log)
     def test_valid_bucket_name(self, password='password'):
             tasks = []
+            shared_params = self._create_bucket_params(server=self.server, size=self.bucket_size,
+                                                              replicas=self.num_replicas)
             if self.bucket_type == 'sasl':
-                self.cluster.create_sasl_bucket(self.server, self.bucket_name, password, self.num_replicas, self.bucket_size)
+                self.cluster.create_sasl_bucket(name=self.bucket_name, password=password,bucket_params=shared_params)
                 self.buckets.append(Bucket(name=self.bucket_name, authType="sasl", saslPassword=password, num_replicas=self.num_replicas,
                                            bucket_size=self.bucket_size, master_id=self.server))
             elif self.bucket_type == 'standard':
-                self.cluster.create_standard_bucket(self.server, self.bucket_name, STANDARD_BUCKET_PORT + 1, self.bucket_size, self.num_replicas)
+                self.cluster.create_standard_bucket(name=self.bucket_name, port=STANDARD_BUCKET_PORT+1,
+                                                    bucket_params=shared_params)
                 self.buckets.append(Bucket(name=self.bucket_name, authType=None, saslPassword=None, num_replicas=self.num_replicas,
                                            bucket_size=self.bucket_size, port=STANDARD_BUCKET_PORT + 1, master_id=self.server))
             elif self.bucket_type == "memcached":
-                tasks.append(self.cluster.async_create_memcached_bucket(self.server, self.bucket_name, STANDARD_BUCKET_PORT + 1,
-                                                                        self.bucket_size, self.num_replicas))
-                self.buckets.append(Bucket(name=self.bucket_name, authType=None, saslPassword=None, num_replicas=self.num_replicas,
-                                           bucket_size=self.bucket_size, port=STANDARD_BUCKET_PORT + 1 , master_id=self.server, type='memcached'))
+                tasks.append(self.cluster.async_create_memcached_bucket(name=self.bucket_name,
+                                                                        port=STANDARD_BUCKET_PORT+1,
+                                                                        bucket_params=shared_params))
+
+                self.buckets.append(Bucket(name=self.bucket_name, authType=None, saslPassword=None,
+                                           num_replicas=self.num_replicas, bucket_size=self.bucket_size,
+                                           port=STANDARD_BUCKET_PORT + 1 , master_id=self.server, type='memcached'))
                 for task in tasks:
                     task.result()
             else:
@@ -261,9 +276,21 @@ class CreateBucketTests(BaseTestCase):
             self.assertEqual(o[0], "SUCCESS: init/edit localhost")
 
         shell = RemoteMachineShellConnection(self.master)
+        cluster_flag = "-n"
+        bucket_quota_flag = "-s"
+        data_set_location_flag = " "
+        if self.node_version[:5] in COUCHBASE_FROM_SPOCK:
+            cluster_flag = "-c"
+            bucket_quota_flag = "-m"
+            data_set_location_flag = "-d"
         shell.execute_command("{0}cbdocloader -u Administrator -p password \
-                      -n {1} -b travel-sample -s 100 {2}travel-sample.zip" \
-                   .format(self.bin_path, self.master.ip, self.sample_path))
+                      {3} {1} -b travel-sample {4} 100 {5} {2}travel-sample.zip" \
+                                                      .format(self.bin_path,
+                                                       self.master.ip,
+                                                       self.sample_path,
+                                                       cluster_flag,
+                                                       bucket_quota_flag,
+                                                       data_set_location_flag))
         shell.disconnect()
 
         buckets = RestConnection(self.master).get_buckets()
@@ -314,6 +341,25 @@ class CreateBucketTests(BaseTestCase):
                                        .format(index_name))
         else:
             self.log.info("There is extra index %s" % index_name)
+
+    # Start of tests for ephemeral buckets
+    #
+    def test_ephemeral_buckets(self):
+        shared_params = self._create_bucket_params(server=self.server, size=100,
+                                                              replicas=self.num_replicas, bucket_type='ephemeral')
+        # just do sasl for now, pending decision on support of non-sasl buckets in 5.0
+        self.cluster.create_sasl_bucket(name=self.bucket_name, password=self.sasl_password,bucket_params=shared_params)
+        self.buckets.append(Bucket(name=self.bucket_name, authType="sasl", saslPassword=self.sasl_password,
+                                           num_replicas=self.num_replicas,
+                                           bucket_size=self.bucket_size, master_id=self.server))
+
+        self.assertTrue(BucketOperationHelper.wait_for_bucket_creation(self.bucket_name, self.rest),
+                            msg='failed to start up bucket with name "{0}'.format(self.bucket_name))
+        gen_load = BlobGenerator('buckettest', 'buckettest-', self.value_size, start=0, end=self.num_items)
+        self._load_all_buckets(self.server, gen_load, "create", 0)
+        self.cluster.bucket_delete(self.server, self.bucket_name)
+        self.assertTrue(BucketOperationHelper.wait_for_bucket_deletion(self.bucket_name, self.rest, timeout_in_seconds=60),
+                            msg='bucket "{0}" was not deleted even after waiting for 30 seconds'.format(self.bucket_name))
 
     def _get_cb_version(self):
         rest = RestConnection(self.master)

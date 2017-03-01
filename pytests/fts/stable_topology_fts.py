@@ -384,6 +384,54 @@ class StableTopFTS(FTSBaseTest):
         _, defn = index.get_index_defn()
         self.log.info(defn['indexDef'])
 
+    def update_index_during_large_indexing(self):
+        """
+            MB-22410 - Updating index with a large dirty write queue
+            items = 5M
+        """
+        self.load_employee_dataset()
+        bucket = self._cb_cluster.get_bucket_by_name('default')
+        index = self.create_index(bucket, 'sample_index')
+        # wait till half the keys are indexed
+        self.wait_for_indexing_complete(self._num_items/2)
+        new_plan_param = {"maxPartitionsPerPIndex": 2}
+        index.index_definition['planParams'] = \
+            index.build_custom_plan_params(new_plan_param)
+        index.index_definition['uuid'] = index.get_uuid()
+        index.update()
+        _, defn = index.get_index_defn()
+        self.log.info(defn['indexDef'])
+        # see if the index is query-able with half items
+        self.wait_for_indexing_complete(self._num_items/2)
+        hits, _, _, _ = index.execute_query(self.sample_query,
+                                         zero_results_ok=False)
+        self.log.info("Hits: %s" % hits)
+        # see if the index is still query-able with all 5M
+        self.wait_for_indexing_complete()
+        hits, _, _, _ = index.execute_query(self.sample_query,
+                                         zero_results_ok=False)
+        self.log.info("Hits: %s" % hits)
+
+    def delete_index_during_large_indexing(self):
+        """
+            MB-22410 - Deleting index with a large dirty write queue is slow
+            items = 5M
+        """
+        self.load_employee_dataset()
+        bucket = self._cb_cluster.get_bucket_by_name('default')
+        index = self.create_index(bucket, 'sample_index')
+        # wait till half the keys are indexed
+        self.wait_for_indexing_complete(self._num_items/2)
+        index.delete()
+        self.sleep(5)
+        try:
+            _, defn = index.get_index_defn()
+            self.log.info(defn)
+            self.fail("ERROR: Index definition still exists after deletion! "
+                      "%s" %defn['indexDef'])
+        except Exception as e:
+            self.log.info("Expected exception caught: %s" % e)
+
     def edit_index_negative(self):
         self.load_employee_dataset()
         bucket = self._cb_cluster.get_bucket_by_name('default')
@@ -436,6 +484,78 @@ class StableTopFTS(FTSBaseTest):
             self.wait_for_indexing_complete()
         self.generate_random_queries(index, self.num_queries, self.query_types)
         self.run_query_and_compare(index)
+
+    def test_query_string_combinations(self):
+        """
+        uses RQG framework minus randomness for testing query-string combinations of '', '+', '-'
+        {
+
+            mterms := [
+                [],                         // none
+                ["+Wikipedia"],             // one term
+                ["+Wikipedia", "+English"], // two terms
+                ["+the"],                   // one term (stop word)
+                ["+the", "+English"],       // two terms (one stop)
+                ["+the", "+and"],           // two terms (both stop)
+            ]
+
+            sterms = [
+                [],                         // none
+                ["Category"],               // one term
+                ["Category", "United"],     // two terms
+                ["of"],                     // one term (stop word)
+                ["of", "United"],           // two terms (one stop)
+                ["of", "at"],               // two terms (both stop)
+            ]
+
+            nterms = [
+                [],                         // none
+                ["-language"],              // one term
+                ["-language", "-States"],   // two terms
+                ["-for"],                   // one term (stop word)
+                ["-for", "-States"],        // two terms (one stop)
+                ["-for", "-with"],          // two terms (both stop)
+            ]
+        }
+
+        """
+        self.load_data()
+
+        index = self.create_index(
+            self._cb_cluster.get_bucket_by_name('default'),
+            "default_index")
+        self.wait_for_indexing_complete()
+
+        index.fts_queries = []
+        mterms = [[],
+                  ["+revision.text.#text:\"Wikipedia\""],
+                  ["+revision.text.#text:\"Wikipedia\"", "+revision.text.#text:\"English\""],
+                  ["+revision.text.#text:\"the\""],
+                  ["+revision.text.#text:\"the\"", "+revision.text.#text:\"English\""],
+                  ["+revision.text.#text:\"the\"", "+revision.text.#text:\"and\""]]
+        sterms = [[],
+                  ["revision.text.#text:\"Category\""],
+                  ["revision.text.#text:\"Category\"", "revision.text.#text:\"United\""],
+                  ["revision.text.#text:\"of\""],
+                  ["revision.text.#text:\"of\"", "revision.text.#text:\"United\""],
+                  ["revision.text.#text:\"of\"", "revision.text.#text:\"at\""]]
+        nterms = [[],
+                  ["-revision.text.#text:\"language\""],
+                  ["-revision.text.#text:\"language\"", "-revision.text.#text:\"States\""],
+                  ["-revision.text.#text:\"for\""],
+                  ["-revision.text.#text:\"for\"", "-revision.text.#text:\"States\""],
+                  ["-revision.text.#text:\"for\"", "-revision.text.#text:\"with\""]]
+        for mterm in mterms:
+            for sterm in sterms:
+                for nterm in nterms:
+                    clause  = (' '.join(mterm) + ' ' + ' '.join(sterm) + ' ' + ' '.join(nterm)).strip()
+                    query = {"query": clause}
+                    index.fts_queries.append(json.loads(json.dumps(query,ensure_ascii=False)))
+                    if self.compare_es:
+                        self.es.es_queries.append(json.loads(json.dumps({"query": {"query_string": query}},
+                                                                     ensure_ascii=False)))
+        self.run_query_and_compare(index)
+
 
     def index_edit_and_query_custom_mapping(self):
         """
@@ -967,7 +1087,7 @@ class StableTopFTS(FTSBaseTest):
                 hits, raw_hits, _, _ = index.execute_query(query=query,
                                                            zero_results_ok=zero_results_ok,
                                                            expected_hits=expected_hits,
-                                                           sort_fields=self.sort_fields,
+                                                           sort_fields=self.sort_fields_list,
                                                            return_raw_hits=True)
 
                 self.log.info("Hits: %s" % hits)

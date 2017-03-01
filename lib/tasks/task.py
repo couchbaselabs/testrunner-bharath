@@ -207,21 +207,22 @@ class NodeInitializeTask(Task):
 
 
 class BucketCreateTask(Task):
-    def __init__(self, server, bucket='default', replicas=1, size=0, port=11211, password=None, bucket_type='membase',
-                 enable_replica_index=1, eviction_policy='valueOnly', bucket_priority=None,lww=False):
+    def __init__(self, bucket_params):
         Task.__init__(self, "bucket_create_task")
-        self.server = server
-        self.bucket = bucket
-        self.replicas = replicas
-        self.port = port
-        self.size = size
-        self.password = password
-        self.bucket_type = bucket_type
-        self.enable_replica_index = enable_replica_index
-        self.eviction_policy = eviction_policy
-        self.bucket_priority = None
-        self.lww = lww
-        if bucket_priority is not None:
+        self.server = bucket_params['server']
+        self.bucket = bucket_params['bucket_name']
+        self.replicas = bucket_params['replicas']
+        self.port = bucket_params['port']
+        self.size = bucket_params['size']
+        self.password = bucket_params['password']
+        self.bucket_type = bucket_params['bucket_type']
+        self.enable_replica_index = bucket_params['enable_replica_index']
+        self.eviction_policy = bucket_params['eviction_policy']
+        self.lww = bucket_params['lww']
+        self.flush_enabled = bucket_params['flush_enabled']
+        if bucket_params['bucket_priority'] is None or bucket_params['bucket_priority'].lower() is 'low':
+            self.bucket_priority = 3
+        else:
             self.bucket_priority = 8
 
     def execute(self, task_manager):
@@ -261,6 +262,7 @@ class BucketCreateTask(Task):
                                saslPassword=self.password,
                                bucketType=self.bucket_type,
                                replica_index=self.enable_replica_index,
+                               flushEnabled=self.flush_enabled,
                                evictionPolicy=self.eviction_policy,
                                threadsNumber=self.bucket_priority,
                                lww=self.lww
@@ -274,6 +276,7 @@ class BucketCreateTask(Task):
                                saslPassword=self.password,
                                bucketType=self.bucket_type,
                                replica_index=self.enable_replica_index,
+                               flushEnabled=self.flush_enabled,
                                evictionPolicy=self.eviction_policy,
                                lww=self.lww)
             self.state = CHECKING
@@ -458,6 +461,7 @@ class RebalanceTask(Task):
         self.start_time = time.time()
 
     def check(self, task_manager):
+        status = None
         progress = -100
         try:
             if self.monitor_vbuckets_shuffling:
@@ -475,7 +479,8 @@ class RebalanceTask(Task):
                             self.log.error(msg)
                             self.log.error("Old vbuckets: %s, new vbuckets %s" % (self.old_vbuckets, new_vbuckets))
                             raise Exception(msg)
-            progress = self.rest._rebalance_progress()
+            (status, progress) = self.rest._rebalance_status_and_progress()
+            self.log.info("Rebalance - status: %s, progress: %s", status, progress)
             # if ServerUnavailableException
             if progress == -100:
                 self.retry_get_progress += 1
@@ -499,7 +504,9 @@ class RebalanceTask(Task):
             """ for mix cluster, rebalance takes longer """
             self.log.info("rebalance in mix cluster")
             retry_get_process_num = 40
-        if progress != -1 and progress != 100:
+        # we need to wait for status to be 'none' (i.e. rebalance actually finished and
+        # not just 'running' and at 100%) before we declare ourselves done
+        if progress != -1 and status != 'none':
             if self.retry_get_progress < retry_get_process_num:
                 task_manager.schedule(self, 10)
             else:
@@ -4455,6 +4462,78 @@ class EnterpriseCompactTask(Task):
             self.remote_client.log_command_output(self.output, self.error)
         else:
             task_manager.schedule(self, 10)
+
+class CBASQueryExecuteTask(Task):
+    def __init__(self, server, cbas_endpoint, statement, mode=None, pretty=True):
+        Task.__init__(self, "cbas_query_execute_task")
+        self.server = server
+        self.cbas_endpoint = cbas_endpoint
+        self.statement = statement
+        self.mode = mode
+        self.pretty = pretty
+        self.response = {}
+        self.passed = True
+
+    def execute(self, task_manager):
+        try:
+            rest = RestConnection(self.server)
+            self.response = json.loads(rest.execute_statement_on_cbas(self.cbas_endpoint, self.statement,
+                                           self.mode, self.pretty))
+            if self.response:
+                self.state = CHECKING
+                task_manager.schedule(self)
+            else:
+                self.log.info("Some error")
+                self.state = FINISHED
+                self.passed = False
+                self.set_result(False)
+        # catch and set all unexpected exceptions
+
+        except Exception as e:
+            self.state = FINISHED
+            self.log.error("Unexpected Exception Caught")
+            self.passed = False
+            self.set_exception(e)
+
+    def check(self, task_manager):
+        try:
+            if "errors" in self.response:
+                errors = self.response["errors"]
+            else:
+                errors = None
+
+            if "results" in self.response:
+                results = self.response["results"]
+            else:
+                results = None
+
+            if "handle" in self.response:
+                handle = self.response["handle"]
+            else:
+                handle = None
+
+            if self.mode != "async":
+                if self.response["status"] == "success":
+                    self.set_result(True)
+                    self.passed = True
+                else:
+                    self.log.info(errors)
+                    self.passed = False
+                    self.set_result(False)
+            else:
+                if self.response["status"] == "started":
+                    self.set_result(True)
+                    self.passed = True
+                else:
+                    self.log.info(errors)
+                    self.passed = False
+                    self.set_result(False)
+            self.state = FINISHED
+        # catch and set all unexpected exceptions
+        except Exception as e:
+            self.state = FINISHED
+            self.log.error("Unexpected Exception Caught")
+            self.set_exception(e)
 
 
 class AutoFailoverNodesFailureTask(Task):

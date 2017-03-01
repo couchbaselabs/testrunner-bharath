@@ -300,6 +300,19 @@ class RestConnection(object):
             self.baseUrl = "http://{0}:{1}/".format(self.hostname, self.port)
             self.capiBaseUrl = "http://{0}:{1}/".format(self.hostname, 8092)
             self.query_baseUrl = "http://{0}:{1}/".format(self.hostname, 8093)
+
+        # Initialization of CBAS related params
+        self.cbas_base_url = ""
+        if hasattr(self.input, 'cbas'):
+            if self.input.cbas:
+                self.cbas_node = self.input.cbas
+                self.cbas_port = 8095
+                if hasattr(self.cbas_node, 'port'):
+                    self.cbas_port = self.cbas_node.port
+                self.cbas_base_url = "http://{0}:{1}".format(
+                    self.cbas_node.ip,
+                    self.cbas_port)
+
         # for Node is unknown to this cluster error
         for iteration in xrange(5):
             http_res, success = self.init_http_request(self.baseUrl + 'nodes/self')
@@ -930,6 +943,25 @@ class RestConnection(object):
             log.info(content)
         return status
 
+    def execute_statement_on_cbas(self, statement, mode, pretty=True, timeout=70):
+        api = self.cbas_base_url + "/analytics/service"
+        headers = {'Content-type': 'application/json'}
+        params = {'statement': statement, 'mode': mode, 'pretty': pretty}
+        params = json.dumps(params)
+        status, content, header = self._http_request(api, 'POST',
+                                                     headers=headers,
+                                                     params=params,
+                                                     timeout=timeout)
+        if status:
+            return content
+        elif str(header['status']) == '503':
+            log.info("Request Rejected")
+            raise Exception("Request Rejected")
+        else:
+            log.error("/analytics/service status:{0},content:{1}".format(
+                status, content))
+            raise Exception("Analytics Service API failed")
+
     def get_cluster_ceritificate(self):
         api = self.baseUrl + 'pools/default/certificate'
         status, content, _ = self._http_request(api, 'GET')
@@ -1404,23 +1436,39 @@ class RestConnection(object):
         else:
             return None
 
-    def _rebalance_progress(self):
+    def _rebalance_status_and_progress(self):
+        """
+        Returns a 2-tuple capturing the rebalance status and progress, as follows:
+            ('running', progress) - if rebalance is running
+            ('none', 100)         - if rebalance is not running (i.e. assumed done)
+            (None, -100)          - if there's an error getting the rebalance progress
+                                    from the server
+            (None, -1)            - if the server responds but there's no information on
+                                    what the status of rebalance is
+
+        The progress is computed as a average of the progress of each node
+        rounded to 2 decimal places.
+
+        Throws RebalanceFailedException if rebalance progress returns an error message
+        """
         avg_percentage = -1
+        rebalance_status = None
         api = self.baseUrl + "pools/default/rebalanceProgress"
         try:
             status, content, header = self._http_request(api)
         except ServerUnavailableException as e:
             log.error(e)
-            return -100
+            return None, -100
         json_parsed = json.loads(content)
         if status:
             if "status" in json_parsed:
+                rebalance_status = json_parsed["status"]
                 if "errorMessage" in json_parsed:
                     msg = '{0} - rebalance failed'.format(json_parsed)
                     log.error(msg)
                     self.print_UI_logs()
                     raise RebalanceFailedException(msg)
-                elif json_parsed["status"] == "running":
+                elif rebalance_status == "running":
                     total_percentage = 0
                     count = 0
                     for key in json_parsed:
@@ -1439,8 +1487,10 @@ class RestConnection(object):
                     avg_percentage = 100
         else:
             avg_percentage = -100
-        return avg_percentage
+        return rebalance_status, avg_percentage
 
+    def _rebalance_progress(self):
+        return self._rebalance_status_and_progress()[1]
 
     def log_client_error(self, post):
         api = self.baseUrl + 'logClientError'
@@ -1893,8 +1943,11 @@ class RestConnection(object):
                       evictionPolicy='valueOnly',
                       lww=False):
 
+
         api = '{0}{1}'.format(self.baseUrl, 'pools/default/buckets')
         params = urllib.urlencode({})
+
+
 
         # this only works for default bucket ?
         if bucket == 'default':
@@ -1935,6 +1988,11 @@ class RestConnection(object):
                            'evictionPolicy': evictionPolicy}
         if lww:
             init_params['conflictResolutionType'] = 'lww'
+
+
+        if bucketType == 'ephemeral':
+            del init_params['replicaIndex']     # does not apply to ephemeral buckets, and is even rejected
+
         params = urllib.urlencode(init_params)
 
         log.info("{0} with param: {1}".format(api, params))
@@ -1956,6 +2014,9 @@ class RestConnection(object):
             log.error("Tried to create the bucket for {0} secs.. giving up".
                       format(maxwait))
             raise BucketCreationException(ip=self.ip, bucket_name=bucket)
+
+
+
 
         create_time = time.time() - create_start_time
         log.info("{0:.02f} seconds to create bucket {1}".
@@ -2725,6 +2786,61 @@ class RestConnection(object):
         status, content, header = self._http_request(api, 'PUT', params)
         return status
 
+    '''Start Monitoring/Profiling Rest Calls'''
+    def set_completed_requests_collection_duration(self, server, min_time):
+        http = httplib2.Http()
+        n1ql_port = 8093
+        api = "http://%s:%s/" % (server.ip, n1ql_port) + "admin/settings"
+        body = {"completed-threshold": min_time}
+        headers = self._create_headers_with_auth('Administrator','password')
+        response,content = http.request(api, "POST", headers=headers, body=json.dumps(body))
+        return response,content
+
+    def set_completed_requests_max_entries(self, server, no_entries):
+        http = httplib2.Http()
+        n1ql_port = 8093
+        api = "http://%s:%s/" % (server.ip, n1ql_port) + "admin/settings"
+        body = {"completed-limit": no_entries}
+        headers = self._create_headers_with_auth('Administrator','password')
+        response,content = http.request(api, "POST", headers=headers, body=json.dumps(body))
+        return response,content
+
+    def set_profiling(self, server, setting):
+        http = httplib2.Http()
+        n1ql_port = 8093
+        api = "http://%s:%s/" % (server.ip, n1ql_port) + "admin/settings"
+        body = {"profile": setting}
+        headers = self._create_headers_with_auth('Administrator','password')
+        response,content = http.request(api, "POST", headers=headers, body=json.dumps(body))
+        return response,content
+
+    def set_profiling_controls(self, server, setting):
+        http = httplib2.Http()
+        n1ql_port = 8093
+        api = "http://%s:%s/" % (server.ip, n1ql_port) + "admin/settings"
+        body = {"controls": setting}
+        headers = self._create_headers_with_auth('Administrator','password')
+        response,content = http.request(api, "POST", headers=headers, body=json.dumps(body))
+        return response,content
+
+    def get_query_admin_settings(self,server):
+        http = httplib2.Http()
+        n1ql_port = 8093
+        api = "http://%s:%s/" % (server.ip, n1ql_port) + "admin/settings"
+        headers = self._create_headers_with_auth('Administrator', 'password')
+        response, content = http.request(api, "GET", headers=headers)
+        result = json.loads(content)
+        return result
+
+    def get_query_vitals(self,server):
+        http = httplib2.Http()
+        n1ql_port = 8093
+        api = "http://%s:%s/" % (server.ip, n1ql_port) + "admin/vitals"
+        headers = self._create_headers_with_auth('Administrator', 'password')
+        response, content = http.request(api, "GET", headers=headers)
+        return response, content
+    '''End Monitoring/Profiling Rest Calls'''
+
     def query_tool(self, query, port=8093, timeout=650, query_params={}, is_prepared=False, named_prepare=None,
                    verbose = True, encoded_plan=None, servers=None):
         key = 'prepared' if is_prepared else 'statement'
@@ -3212,41 +3328,31 @@ class RestConnection(object):
     Returns - status, content and header for the command executed
     '''
     def executeLDAPCommand(self, authOperation, currAdmins, currROAdmins, exclude=None):
-        log.info ("Executing LDAP command")
         api = self.baseUrl + "settings/saslauthdAuth"
 
         if (exclude is None):
-            log.info ("into execlude is None")
+            log.info ("into exclude is None")
             params = urllib.urlencode({
                                             'enabled': authOperation,
                                             'admins': '{0}'.format(currAdmins),
                                             'roAdmins':'{0}'.format(currROAdmins),
-            #                                'username': '{0}'.format(self.username),
-            #                                'password': '{0}'.format(self.password)
                                             })
         else:
-            log.info ("Into execlude for value of fullAdmin {0}".format(exclude))
+            log.info ("Into exclude for value of fullAdmin {0}".format(exclude))
             if (exclude == 'fullAdmin'):
                 params = urllib.urlencode({
                                             'enabled': authOperation,
                                             'roAdmins':'{0}'.format(currROAdmins),
-            #                                'username': '{0}'.format(self.username),
-            #                                'password': '{0}'.format(self.password)
                                             })
             else:
-                log.info ("Into execlude for value of fullAdmin {0}".format(exclude))
+                log.info ("Into exclude for value of fullAdmin {0}".format(exclude))
                 params = urllib.urlencode({
                                             'enabled': authOperation,
                                             'admins': '{0}'.format(currAdmins),
-            #                                'username': '{0}'.format(self.username),
-            #                                'password': '{0}'.format(self.password)
                                             })
 
 
         status, content, header = self._http_request(api, 'POST', params)
-        log.info (" Status of LDAP Command is - {0}".format(status))
-        log.info (" Content of LDAP Command is - {0}".format(content))
-        log.info (" Header of LDAP Command is - {0}".format(header))
         return content
     '''
     validateLogin - Validate if user can login using a REST API
@@ -3297,19 +3403,6 @@ class RestConnection(object):
         log.info ("Status of executeValidateCredentials command - {0}".format(status))
         return status, json.loads(content)
 
-    def _set_user_roles(self,rest,user_name,payload):
-        url = "settings/rbac/users/" + user_name
-        param = payload
-        api = rest.baseUrl + url
-        status, content, header = rest._http_request(api, 'PUT', param)
-        return status, content, header
-
-    def _delete_user(self,rest,user_name):
-        url = "/settings/rbac/users/" + user_name
-        api = rest.baseUrl + url
-        status, content, header = rest._http_request(api, 'DELETE')
-        return status, content, header
-
     '''
     Audit Commands
     '''
@@ -3350,6 +3443,7 @@ class RestConnection(object):
             return status, json.loads(content)
 
     def create_index_with_rest(self, create_info):
+        log.info("CREATE INDEX USING REST WITH PARAMETERS: " + str(create_info))
         authorization = base64.encodestring('%s:%s' % (self.username, self.password))
         api = self.index_baseUrl + 'api/indexes?create=true'
         headers = {'Content-type': 'application/json','Authorization': 'Basic %s' % authorization}
@@ -3403,16 +3497,141 @@ class RestConnection(object):
         return json.loads(content)
 
     def full_table_scan_gsi_index_with_rest(self, id, body):
+        if "limit" not in body.keys():
+            body["limit"] = 30000
         authorization = base64.encodestring('%s:%s' % (self.username, self.password))
         url = 'api/index/{0}?scanall=true'.format(id)
         api = self.index_baseUrl + url
         headers = {'Content-type': 'application/json','Authorization': 'Basic %s' % authorization}
         params = json.loads("{0}".format(body).replace('\'', '"').replace('True', 'true').replace('False', 'false'))
-        status, content, header = self._http_request(api, 'GET', headers=headers,
-                                                     params=json.dumps(params).encode("ascii", "ignore"))
+        status, content, header = self._http_request(
+            api, 'GET', headers=headers,
+            params=json.dumps(params).encode("ascii", "ignore"))
         if not status:
             raise Exception(content)
-        return json.loads(json.dumps(content))
+        #Below line is there because of MB-20758
+        content = content.split("[]")[0]
+        # Following line is added since the content uses chunked encoding
+        chunkless_content = content.replace("][", ", \n")
+        return json.loads(chunkless_content)
+
+    def multiscan_for_gsi_index_with_rest(self, id, body):
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        url = 'api/index/{0}?multiscan=true'.format(id)
+        api = self.index_baseUrl + url
+        headers = {'Accept': 'application/json','Authorization': 'Basic %s' % authorization}
+        params = json.loads("{0}".format(body).replace('\'', '"').replace(
+            'True', 'true').replace('False', 'false'))
+        params = json.dumps(params).encode("ascii", "ignore").replace("\\\\", "\\")
+        log.info(json.dumps(params).encode("ascii", "ignore"))
+        status, content, header = self._http_request(api, 'GET', headers=headers,
+                                                     params=params)
+        if not status:
+            raise Exception(content)
+        #Below line is there because of MB-20758
+        content = content.split("[]")[0]
+        # Following line is added since the content uses chunked encoding
+        chunkless_content = content.replace("][", ", \n")
+        if chunkless_content:
+            return json.loads(chunkless_content)
+        else:
+            return content
+
+    'Get list of all roles that exist in the system'
+    def retrive_all_user_role(self):
+        url = "/settings/rbac/roles"
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, 'GET')
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    'Get list of current users and rols assigned to them'
+    def retrieve_user_roles(self):
+        url = "/settings/rbac/users"
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, 'GET')
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    '''
+    Add/Update user role assignment
+    user_id=userid of the user to act on
+    payload=name=<nameofuser>&roles=admin,cluster_admin'''
+    def set_user_roles(self, user_id, payload):
+        url = "settings/rbac/users/" + user_id
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, 'PUT', payload)
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    '''
+    Delete user from couchbase role assignment
+    user_id=userid of user to act on'''
+    def delete_user_roles(self, user_id):
+        url = "/settings/rbac/users/" + user_id
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, 'DELETE')
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    '''
+    Return list of permission with True/False if user has permission or not
+    user_id = userid for checking permission
+    password = password for userid
+    permission_set=cluster.bucket[default].stats!read,cluster.bucket[default]!write
+    '''
+    def check_user_permission(self, user_id, password, permission_set):
+        url = "pools/default/checkPermissions/"
+        api = self.baseUrl + url
+        authorization = base64.encodestring('%s:%s' % (user_id, password))
+        header = {'Content-Type': 'application/x-www-form-urlencoded',
+              'Authorization': 'Basic %s' % authorization,
+              'Accept': '*/*'}
+        status, content, header = self._http_request(api, 'POST', params=permission_set, headers=header)
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    '''
+    Add/Update user role assignment
+    user_id=userid of the user to act on
+    payload=name=<nameofuser>&roles=admin,cluster_admin&password=<password>
+    if roles=<empty> user will be created with no roles'''
+    def add_set_builtin_user(self, user_id, payload):
+        url = "settings/rbac/users/builtin/" + user_id
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, 'PUT', payload)
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    '''
+    Delete built-in user
+    '''
+    def delete_builtin_user(self, user_id):
+        url = "settings/rbac/users/builtin/" + user_id
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, 'DELETE')
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    '''
+    Add/Update user role assignment
+    user_id=userid of the user to act on
+    password=<new password>'''
+    def change_password_builtin_user(self, user_id, password):
+        url = "controller/changePassword/" + user_id
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, 'POST', password)
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
 
 
 class MembaseServerVersion:
@@ -3494,6 +3713,7 @@ class Bucket(object):
         self.bucket_priority = bucket_priority
         self.uuid = uuid
         self.lww = lww
+
 
     def __str__(self):
         return self.name
