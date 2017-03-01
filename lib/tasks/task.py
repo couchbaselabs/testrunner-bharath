@@ -4490,17 +4490,19 @@ class AutoFailoverNodesFailureTask(Task):
         if not self.check_for_autofailover:
             self.state = EXECUTING
             return
+        rest = RestConnection(self.master)
         max_timeout = self.timeout + self.timeout_buffer
         autofailover_initiated, time_taken = \
             self._wait_for_autofailover_initiation(
                 self.max_time_to_wait_for_failover)
         if self.expect_auto_failover:
             if autofailover_initiated:
-                if time_taken < max_timeout:
+                if time_taken < max_timeout + 1:
                     if time_taken > self.timeout - 2:
                         self.log.info("Autofailover of node {0} successfully "
                                       "initiated in {1} sec".format(
                             self.current_failure_node.ip, time_taken))
+                        rest.print_UI_logs(10)
                         self.state = EXECUTING
                     else:
                         message = "Autofailover of node {0} was initiated " \
@@ -4508,6 +4510,7 @@ class AutoFailoverNodesFailureTask(Task):
                                   "timeout: {1} Actual time: {2}".format(
                             self.current_failure_node.ip, self.timeout,
                             time_taken)
+                        rest.print_UI_logs(10)
                         self.log.error(message)
                         self.state = FINISHED
                         self.set_result(False)
@@ -4518,6 +4521,7 @@ class AutoFailoverNodesFailureTask(Task):
                               "Actual time taken: {2}".format(
                         self.current_failure_node.ip, self.timeout, time_taken)
                     self.log.error(message)
+                    rest.print_UI_logs(10)
                     self.state = FINISHED
                     self.set_result(False)
                     self.set_exception(AutoFailoverException(message))
@@ -4525,6 +4529,7 @@ class AutoFailoverNodesFailureTask(Task):
                 message = "Autofailover of node {0} was not initiated after " \
                           "the expected timeout period of {1}".format(
                     self.current_failure_node.ip, self.timeout)
+                rest.print_UI_logs(10)
                 self.log.error(message)
                 self.state = FINISHED
                 self.set_result(False)
@@ -4534,12 +4539,14 @@ class AutoFailoverNodesFailureTask(Task):
                 message = "Node {0} was autofailed over but no autofailover " \
                           "of the node was expected".format(
                     self.current_failure_node.ip)
+                rest.print_UI_logs(10)
                 self.log.error(message)
                 self.state = FINISHED
                 self.set_result(False)
                 self.set_exception(AutoFailoverException(message))
             else:
                 self.log.info("Node not autofailed over as expected")
+                rest.print_UI_logs(10)
                 self.state = EXECUTING
 
     def has_next(self):
@@ -4570,7 +4577,8 @@ class AutoFailoverNodesFailureTask(Task):
         elif self.failure_type == "start_couchbase":
             self._start_couchbase_server(self.current_failure_node)
         elif self.failure_type == "restart_network":
-            self._stop_restart_network(self.current_failure_node, self.timeout)
+            self._stop_restart_network(self.current_failure_node,
+                                       self.timeout + self.timeout_buffer)
         elif self.failure_type == "restart_machine":
             self._restart_machine(self.current_failure_node)
         elif self.failure_type == "stop_memcached":
