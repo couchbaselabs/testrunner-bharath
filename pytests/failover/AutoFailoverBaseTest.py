@@ -30,9 +30,14 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.delete_load_gen = BlobGenerator('auto-failover',
                                              'auto-failover-',
                                              self.value_size,
+                                             start=self.update_items,
                                              end=self.delete_items)
         self._load_all_buckets(self.servers[0], self.initial_load_gen,
                                "create", 0)
+        self._async_load_all_buckets(self.orchestrator,
+                                     self.update_load_gen, "update", 0)
+        self._async_load_all_buckets(self.orchestrator,
+                                     self.delete_load_gen, "delete", 0)
         self.server_to_fail = self._servers_to_fail()
         self.servers_to_add = self.servers[self.nodes_init:self.nodes_init +
                                                            self.nodes_in]
@@ -515,9 +520,9 @@ class AutoFailoverBaseTest(BaseTestCase):
                                                       False)
         self.multiple_node_failure = self.input.param("multiple_nodes_failure",
                                                       False)
-        self.num_items = self.input.param("num_items", 10000)
-        self.update_items = self.input.param("update_items", 1000)
-        self.delete_items = self.input.param("delete_items", 1000)
+        self.num_items = self.input.param("num_items", 1000000)
+        self.update_items = self.input.param("update_items", 100000)
+        self.delete_items = self.input.param("delete_items", 100000)
         self.add_back_node = self.input.param("add_back_node", True)
         self.recovery_strategy = self.input.param("recovery_strategy",
                                                   "delta")

@@ -1,14 +1,14 @@
-from threading import Thread
 import copy
+from threading import Thread
 
 from couchbase_helper.documentgenerator import BlobGenerator
-from remote.remote_util import RemoteMachineShellConnection
 from membase.api.rest_client import RestConnection
 from memcached.helper.data_helper import LoadWithMcsoda
-from xdcrnewbasetests import XDCRNewBaseTest
+from remote.remote_util import RemoteMachineShellConnection
+from scripts.install import InstallerJob
 from xdcrnewbasetests import NodeHelper
 from xdcrnewbasetests import Utility, BUCKET_NAME, OPS
-from scripts.install import InstallerJob
+from xdcrnewbasetests import XDCRNewBaseTest
 
 
 # Assumption that at least 2 nodes on every cluster
