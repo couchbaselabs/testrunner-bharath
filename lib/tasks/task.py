@@ -4644,7 +4644,6 @@ class AutoFailoverNodesFailureTask(Task):
                     self.set_exception(Exception("Reset of autofailover "
                                                  "count failed"))
         self.current_failure_node = self.servers_to_fail[self.itr]
-        self.start_time = time.time()
         if self.failure_type == "enable_firewall":
             self._enable_firewall(self.current_failure_node)
         elif self.failure_type == "disable_firewall":
@@ -4667,6 +4666,7 @@ class AutoFailoverNodesFailureTask(Task):
                                                    self.servers_to_fail[
                                                        self.itr + 1])
             self.itr += 1
+        self.start_time = time.time()
         self.itr += 1
 
     def _enable_firewall(self, node):
