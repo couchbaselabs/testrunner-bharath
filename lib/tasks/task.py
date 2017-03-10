@@ -4668,7 +4668,7 @@ class AutoFailoverNodesFailureTask(Task):
                                                        self.itr + 1])
             self.itr += 1
         self.start_time = time.time()
-        self.log.info("Start time = {}".format(time.ctime(self.start_time))
+        self.log.info("Start time = {}".format(time.ctime(self.start_time)))
         self.itr += 1
 
     def _enable_firewall(self, node):
