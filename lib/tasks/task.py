@@ -9,27 +9,28 @@ import string
 import time
 import traceback
 from httplib import IncompleteRead
+from multiprocessing import Process, Manager, Semaphore
 from threading import Thread
 
 import crc32
 import logger
 import testconstants
+from TestInput import TestInputServer
 from couchbase_helper.document import DesignDocument
+from couchbase_helper.documentgenerator import BatchedDocumentGenerator
 from couchbase_helper.stats_tools import StatsCommon
 from mc_bin_client import MemcachedError
 from membase.api.exception import BucketCreationException
 from membase.api.exception import N1QLQueryException, DropIndexException, CreateIndexException, DesignDocCreationException, QueryViewException, ReadDocumentException, RebalanceFailedException, \
                                     GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, FailoverFailedException, \
-                                    ServerUnavailableException, \
-    BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException,\
-    AutoFailoverException
+                                    ServerUnavailableException,BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException,AutoFailoverException
 from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from memcacheConstants import ERR_NOT_FOUND,NotFoundError
 from memcached.helper.data_helper import MemcachedClientHelper
-from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+from remote.remote_util import RemoteMachineShellConnection
 from tasks.future import Future
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY
 
 try:
     CHECK_FLAG = False
