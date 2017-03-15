@@ -5,7 +5,8 @@ from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
 from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
-from tasks.task import AutoFailoverNodesFailureTask, NodeMonitorsAnalyserTask
+from tasks.task import AutoFailoverNodesFailureTask, \
+    NodeMonitorsAnalyserTask, NodeDownTimerTask
 from tasks.taskmanager import TaskManager
 
 
@@ -19,6 +20,9 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.rest = RestConnection(self.orchestrator)
         self.task_manager = TaskManager("Autofailover_thread")
         self.task_manager.start()
+        self.node_failure_task_manager = TaskManager(
+            "Nodes_failure_detector_thread")
+        self.node_failure_task_manager.start()
         self.initial_load_gen = BlobGenerator('auto-failover',
                                               'auto-failover-',
                                               self.value_size,
@@ -35,15 +39,15 @@ class AutoFailoverBaseTest(BaseTestCase):
         self._load_all_buckets(self.servers[0], self.initial_load_gen,
                                "create", 0)
         self._async_load_all_buckets(self.orchestrator,
-                                     self.update_load_gen, "update", 0)
+                                    self.update_load_gen, "update", 0)
         self._async_load_all_buckets(self.orchestrator,
-                                     self.delete_load_gen, "delete", 0)
+                                    self.delete_load_gen, "delete", 0)
         self.server_to_fail = self._servers_to_fail()
         self.servers_to_add = self.servers[self.nodes_init:self.nodes_init +
                                                            self.nodes_in]
         self.servers_to_remove = self.servers[self.nodes_init -
                                               self.nodes_out:self.nodes_init]
-        #self.node_monitor_task = self.start_node_monitors_task()
+        # self.node_monitor_task = self.start_node_monitors_task()
 
     def tearDown(self):
         self.log.info("============AutoFailoverBaseTest teardown============")
@@ -124,13 +128,19 @@ class AutoFailoverBaseTest(BaseTestCase):
         return node_monitor_task
 
     def enable_firewall(self):
-        self.time_start = time.time()
+        node_down_timer_tasks = []
+        for node in self.server_to_fail:
+            node_failure_timer_task = NodeDownTimerTask(node.ip, node.port)
+            node_down_timer_tasks.append(node_failure_timer_task)
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
                                             "enable_firewall", self.timeout,
                                             self.pause_between_failover_action,
                                             self.failover_expected,
-                                            self.timeout_buffer)
+                                            self.timeout_buffer,
+                                            failure_timers=node_down_timer_tasks)
+        for node_down_timer_task in node_down_timer_tasks:
+            self.node_failure_task_manager.schedule(node_down_timer_task, 1)
         self.task_manager.schedule(task)
         try:
             task.result()
@@ -153,6 +163,10 @@ class AutoFailoverBaseTest(BaseTestCase):
             self.fail("Exception: {}".format(e))
 
     def restart_couchbase_server(self):
+        node_down_timer_tasks = []
+        for node in self.server_to_fail:
+            node_failure_timer_task = NodeDownTimerTask(node.ip, node.port)
+            node_down_timer_tasks.append(node_failure_timer_task)
         self.time_start = time.time()
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
@@ -160,7 +174,10 @@ class AutoFailoverBaseTest(BaseTestCase):
                                             self.timeout,
                                             self.pause_between_failover_action,
                                             self.failover_expected,
-                                            self.timeout_buffer)
+                                            self.timeout_buffer,
+                                            failure_timers=node_down_timer_tasks)
+        for node_down_timer_task in node_down_timer_tasks:
+            self.node_failure_task_manager.schedule(node_down_timer_task, 1)
         self.task_manager.schedule(task)
         try:
             task.result()
@@ -168,21 +185,27 @@ class AutoFailoverBaseTest(BaseTestCase):
             self.fail("Exception: {}".format(e))
 
     def stop_couchbase_server(self):
-        self.time_start = time.time()
+        node_down_timer_tasks = []
+        for node in self.server_to_fail:
+            node_failure_timer_task = NodeDownTimerTask(node.ip, node.port)
+            node_down_timer_tasks.append(node_failure_timer_task)
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
-                                            "stop_couchbase", self.timeout,
+                                            "stop_couchbase",
+                                            self.timeout,
                                             self.pause_between_failover_action,
                                             self.failover_expected,
-                                            self.timeout_buffer)
+                                            self.timeout_buffer,
+                                            failure_timers=node_down_timer_tasks)
+        for node_down_timer_task in node_down_timer_tasks:
+            self.node_failure_task_manager.schedule(node_down_timer_task, 2)
         self.task_manager.schedule(task)
         try:
             task.result()
-        except Exception, e:
+        except Exception as e:
             self.fail("Exception: {}".format(e))
 
     def start_couchbase_server(self):
-        self.time_start = time.time()
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
                                             "start_couchbase", self.timeout,
@@ -195,13 +218,19 @@ class AutoFailoverBaseTest(BaseTestCase):
             self.fail("Exception: {}".format(e))
 
     def stop_restart_network(self):
-        self.time_start = time.time()
+        node_down_timer_tasks = []
+        for node in self.server_to_fail:
+            node_failure_timer_task = NodeDownTimerTask(node.ip, node.port)
+            node_down_timer_tasks.append(node_failure_timer_task)
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
                                             "restart_network", self.timeout,
                                             self.pause_between_failover_action,
                                             self.failover_expected,
-                                            self.timeout_buffer)
+                                            self.timeout_buffer,
+                                            failure_timers=node_down_timer_tasks)
+        for node_down_timer_task in node_down_timer_tasks:
+            self.node_failure_task_manager.schedule(node_down_timer_task, 2)
         self.task_manager.schedule(task)
         try:
             task.result()
@@ -209,14 +238,19 @@ class AutoFailoverBaseTest(BaseTestCase):
             self.fail("Exception: {}".format(e))
 
     def restart_machine(self):
-        self.time_start = time.time()
+        node_down_timer_tasks = []
+        for node in self.server_to_fail:
+            node_failure_timer_task = NodeDownTimerTask(node.ip)
+            node_down_timer_tasks.append(node_failure_timer_task)
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
                                             "restart_machine", self.timeout,
                                             self.pause_between_failover_action,
                                             self.failover_expected,
-                                            self.timeout_buffer)
-
+                                            self.timeout_buffer,
+                                            failure_timers=node_down_timer_tasks)
+        for node_down_timer_task in node_down_timer_tasks:
+            self.node_failure_task_manager.schedule(node_down_timer_task, 2)
         self.task_manager.schedule(task)
         try:
             task.result()
@@ -237,13 +271,19 @@ class AutoFailoverBaseTest(BaseTestCase):
                                        "again")
 
     def stop_memcached(self):
-        self.time_start = time.time()
+        node_down_timer_tasks = []
+        for node in self.server_to_fail:
+            node_failure_timer_task = NodeDownTimerTask(node.ip, 11211)
+            node_down_timer_tasks.append(node_failure_timer_task)
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
                                             "stop_memcached", self.timeout,
                                             self.pause_between_failover_action,
                                             self.failover_expected,
-                                            self.timeout_buffer)
+                                            self.timeout_buffer,
+                                            failure_timers=node_down_timer_tasks)
+        for node_down_timer_task in node_down_timer_tasks:
+            self.node_failure_task_manager.schedule(node_down_timer_task, 2)
         self.task_manager.schedule(task)
         try:
             task.result()
@@ -251,7 +291,6 @@ class AutoFailoverBaseTest(BaseTestCase):
             self.fail("Exception: {}".format(e))
 
     def split_network(self):
-        self.time_start = time.time()
         if self.server_to_fail.__len__() < 2:
             self.fail("Need atleast 2 servers to fail")
         task = AutoFailoverNodesFailureTask(self.orchestrator,

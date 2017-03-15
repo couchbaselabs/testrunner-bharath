@@ -4539,7 +4539,7 @@ class CBASQueryExecuteTask(Task):
 class AutoFailoverNodesFailureTask(Task):
     def __init__(self, master, servers_to_fail, failure_type, timeout,
                  pause=0, expect_auto_failover=True, timeout_buffer=3,
-                 check_for_failover=True):
+                 check_for_failover=True, failure_timers=[]):
         Task.__init__(self, "AutoFailoverNodesFailureTask")
         self.master = master
         self.servers_to_fail = servers_to_fail
@@ -4554,8 +4554,11 @@ class AutoFailoverNodesFailureTask(Task):
         self.timeout_buffer = timeout_buffer
         self.current_failure_node = self.servers_to_fail[0]
         self.max_time_to_wait_for_failover = self.timeout + 60
+        self.failure_timers = failure_timers
+        self.taskmanager = None
 
     def execute(self, task_manager):
+        self.taskmanager = task_manager
         while self.has_next() and not self.done():
             self.next()
             if self.pause > 0 and self.pause > self.timeout:
@@ -4667,28 +4670,40 @@ class AutoFailoverNodesFailureTask(Task):
                                                    self.servers_to_fail[
                                                        self.itr + 1])
             self.itr += 1
-        self.start_time = time.time()
         self.log.info("Start time = {}".format(time.ctime(self.start_time)))
         self.itr += 1
 
     def _enable_firewall(self, node):
+        node_failure_timer = self.failure_timers[self.itr]
+        time.sleep(1)
         RemoteUtilHelper.enable_firewall(node)
+        self.log.info("Enabled firewall on {}".format(node))
+        node_failure_timer.result()
+        self.start_time = node_failure_timer.start_time
 
     def _disable_firewall(self, node):
         shell = RemoteMachineShellConnection(node)
         shell.disable_firewall()
 
     def _restart_couchbase_server(self, node):
+        node_failure_timer = self.failure_timers[self.itr]
+        time.sleep(1)
         shell = RemoteMachineShellConnection(node)
         shell.restart_couchbase()
         shell.disconnect()
         self.log.info("Restarted the couchbase server on {}".format(node))
+        node_failure_timer.result()
+        self.start_time = node_failure_timer.start_time
 
     def _stop_couchbase_server(self, node):
+        node_failure_timer = self.failure_timers[self.itr]
+        time.sleep(1)
         shell = RemoteMachineShellConnection(node)
         shell.stop_couchbase()
         shell.disconnect()
         self.log.info("Stopped the couchbase server on {}".format(node))
+        node_failure_timer.result()
+        self.start_time = node_failure_timer.start_time
 
     def _start_couchbase_server(self, node):
         shell = RemoteMachineShellConnection(node)
@@ -4697,21 +4712,33 @@ class AutoFailoverNodesFailureTask(Task):
         self.log.info("Started the couchbase server on {}".format(node))
 
     def _stop_restart_network(self, node, stop_time):
+        node_failure_timer = self.failure_timers[self.itr]
+        time.sleep(1)
         shell = RemoteMachineShellConnection(node)
         shell.stop_network(stop_time)
         shell.disconnect()
         self.log.info("Stopped the network for {0} sec and restarted the "
                       "network on {1}".format(stop_time, node))
+        node_failure_timer.result()
+        self.start_time = node_failure_timer.start_time
 
     def _restart_machine(self, node):
+        node_failure_timer = self.failure_timers[self.itr]
+        time.sleep(1)
         shell = RemoteMachineShellConnection(node)
         command = "/sbin/reboot"
         shell.execute_command(command=command)
+        node_failure_timer.result()
+        self.start_time = node_failure_timer.start_time
 
     def _stop_memcached(self, node):
+        node_failure_timer = self.failure_timers[self.itr]
+        time.sleep(1)
         shell = RemoteMachineShellConnection(node)
         o, r = shell.kill_memcached()
         self.log.info("Killed memcached. {0} {1}".format(o, r))
+        node_failure_timer.result()
+        self.start_time = node_failure_timer.start_time
 
     def _block_incoming_network_from_node(self, node1, node2):
         shell = RemoteMachineShellConnection(node1)
@@ -4719,6 +4746,7 @@ class AutoFailoverNodesFailureTask(Task):
             node1.ip, node2.ip))
         command = "iptables -A INPUT -s {0} -j DROP".format(node2.ip)
         shell.execute_command(command)
+        self.start_time = time.time()
 
     def _check_for_autofailover_initiation(self, failed_over_node):
         rest = RestConnection(self.master)
@@ -4750,6 +4778,50 @@ class AutoFailoverNodesFailureTask(Task):
             self.set_result(False)
             self.state = FINISHED
             self.set_exception(Exception("Failed to rebalance after failover"))
+
+
+class NodeDownTimerTask(Task):
+    def __init__(self, node, port=None, timeout=60):
+        Task.__init__(self, "NodeDownTimerTask")
+        self.log.info("Initializing NodeDownTimerTask")
+        self.node = node
+        self.port = port
+        self.timeout = timeout
+        self.start_time = 0
+
+    def execute(self, task_manager):
+        self.log.info("Starting execution of NodeDownTimerTask")
+        end_task = time.time() + self.timeout
+        while not self.done() and time.time() < end_task:
+            if not self.port:
+                try:
+                    self.start_time = time.time()
+                    response = os.system("ping -c 1 {}".format(self.node))
+                    if response == 0:
+                        continue
+                    else:
+                        self.log.info("Injected failure in {}".format(
+                            self.node))
+                        self.state = FINISHED
+                        self.set_result(True)
+                except Exception, e:
+                    self.log.warning("Unexpected exception caught {"
+                                     "}".format(e))
+                    self.state = FINISHED
+                    self.set_result(True)
+            else:
+                try:
+                    self.start_time = time.time()
+                    socket.socket().connect(("{}".format(self.node),
+                                             int(self.port)))
+                    socket.socket().close()
+                except socket.error:
+                    self.log.info("Injected failure in {}".format(self.node))
+                    self.state = FINISHED
+                    self.set_result(True)
+
+    def check(self, task_manager):
+        pass
 
 
 class NodeMonitorsAnalyserTask(Task):
