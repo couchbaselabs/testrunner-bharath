@@ -14,9 +14,7 @@ from threading import Thread
 import crc32
 import logger
 import testconstants
-from TestInput import TestInputServer
 from couchbase_helper.document import DesignDocument
-from couchbase_helper.documentgenerator import BatchedDocumentGenerator
 from couchbase_helper.stats_tools import StatsCommon
 from mc_bin_client import MemcachedError
 from membase.api.exception import BucketCreationException
@@ -51,6 +49,7 @@ except Exception as e:
 # stacktracer.trace_start("trace.html",interval=30,auto=True) # Set auto flag to always update file!
 
 
+CONCURRENCY_LOCK = Semaphore(THROUGHPUT_CONCURRENCY)
 PENDING = 'PENDING'
 EXECUTING = 'EXECUTING'
 CHECKING = 'CHECKING'
@@ -92,7 +91,8 @@ class NodeInitializeTask(Task):
                  maxParallelReplicaIndexers=None,
                  port=None, quota_percent=None,
                  index_quota_percent=None,
-                 services = None, gsi_type='forestdb'):
+                 services = None, gsi_type='forestdb',
+                 is_container = False):
         Task.__init__(self, "node_init_task")
         self.server = server
         self.port = port or server.port
@@ -107,6 +107,7 @@ class NodeInitializeTask(Task):
         self.maxParallelReplicaIndexers = maxParallelReplicaIndexers
         self.services = services
         self.gsi_type = gsi_type
+        self.is_container = is_container
 
     def execute(self, task_manager):
         try:
@@ -126,6 +127,11 @@ class NodeInitializeTask(Task):
             self.state = FINISHED
             self.set_result(True)
             return
+
+        if self.is_container:
+           # the storage total values are more accurate than
+           # mcdMemoryReserved - which is container host memory
+           info.mcdMemoryReserved = info.storageTotalRam
 
         self.quota = int(info.mcdMemoryReserved * 2/3)
         if self.index_quota_percent:
@@ -603,16 +609,18 @@ class StatsWaitTask(Task):
     def _stringify_servers(self):
         return ''.join([`server.ip + ":" + str(server.port)` for server in self.servers])
 
-    def _get_connection(self, server):
+    def _get_connection(self, server, admin_user='cbadminbucket',admin_pass='password'):
         if not self.conns.has_key(server):
             for i in xrange(3):
                 try:
-                    self.conns[server] = MemcachedClientHelper.direct_client(server, self.bucket)
+                    self.conns[server] = MemcachedClientHelper.direct_client(server, self.bucket, admin_user=admin_user,
+                                                                             admin_pass=admin_pass)
                     return self.conns[server]
                 except (EOFError, socket.error):
                     self.log.error("failed to create direct client, retry in 1 sec")
                     time.sleep(1)
-            self.conns[server] = MemcachedClientHelper.direct_client(server, self.bucket)
+            self.conns[server] = MemcachedClientHelper.direct_client(server, self.bucket, admin_user=admin_user,
+                                                                     admin_pass=admin_pass)
         return self.conns[server]
 
     def _compare(self, cmp_type, a, b):
@@ -668,7 +676,14 @@ class GenericLoadingTask(Thread, Task):
         self.batch_size = batch_size
         self.pause = pause_secs
         self.timeout = timeout_secs
+        self.server = server
+        self.bucket = bucket
         self.client = VBucketAwareMemcached(RestConnection(server), bucket)
+        self.process_concurrency = THROUGHPUT_CONCURRENCY
+        # task queue's for synchronization
+        process_manager = Manager()
+        self.wait_queue = process_manager.Queue()
+        self.shared_kvstore_queue = process_manager.Queue()
 
     def execute(self, task_manager):
         self.start()
@@ -689,7 +704,7 @@ class GenericLoadingTask(Thread, Task):
     def next(self):
         raise NotImplementedError
 
-    def _unlocked_create(self, partition, key, value, is_base64_value=False):
+    def _unlocked_create(self, partition, key, value, is_base64_value=False, shared_client = None):
         try:
             value_json = json.loads(value)
             if isinstance(value_json, dict):
@@ -703,7 +718,8 @@ class GenericLoadingTask(Thread, Task):
             value = json.dumps(value)
 
         try:
-            self.client.set(key, self.exp, self.flag, value)
+            client = shared_client or self.client
+            client.set(key, self.exp, self.flag, value)
             if self.only_store_hash:
                 value = str(crc32.crc32_hash(value))
             partition.set(key, value, self.exp, self.flag)
@@ -817,10 +833,11 @@ class GenericLoadingTask(Thread, Task):
             self.set_exception(error)
 
     # start of batch methods
-    def _create_batch(self, partition_keys_dic, key_val):
+    def _create_batch(self, partition_keys_dic, key_val, shared_client = None):
         try:
             self._process_values_for_create(key_val)
-            self.client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False)
+            client = shared_client or self.client
+            client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False)
             self._populate_kvstore(partition_keys_dic, key_val)
         except (MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError, RuntimeError) as error:
             self.state = FINISHED
@@ -920,6 +937,7 @@ class LoadDocumentsTask(GenericLoadingTask):
         self.exp = exp
         self.flag = flag
         self.only_store_hash = only_store_hash
+
         if proxy_client:
             self.log.info("Changing client to proxy %s:%s..." % (proxy_client.host,
                                                               proxy_client.port))
@@ -928,13 +946,13 @@ class LoadDocumentsTask(GenericLoadingTask):
     def has_next(self):
         return self.generator.has_next()
 
-    def next(self):
+    def next(self, override_generator = None, shared_client = None):
         if self.batch_size == 1:
             key, value = self.generator.next()
             partition = self.kv_store.acquire_partition(key)
             if self.op_type == 'create':
                 is_base64_value = (self.generator.__class__.__name__ == 'Base64Generator')
-                self._unlocked_create(partition, key, value, is_base64_value=is_base64_value)
+                self._unlocked_create(partition, key, value, is_base64_value=is_base64_value, shared_client = shared_client)
             elif self.op_type == 'read':
                 self._unlocked_read(partition, key)
             elif self.op_type == 'read_replica':
@@ -951,11 +969,11 @@ class LoadDocumentsTask(GenericLoadingTask):
             self.kv_store.release_partition(key)
 
         else:
-            # do batch things
-            key_value = self.generator.next_batch()
+            doc_gen = override_generator or self.generator
+            key_value = doc_gen.next_batch()
             partition_keys_dic = self.kv_store.acquire_partitions(key_value.keys())
             if self.op_type == 'create':
-                self._create_batch(partition_keys_dic, key_value)
+                self._create_batch(partition_keys_dic, key_value, shared_client)
             elif self.op_type == 'update':
                 self._update_batch(partition_keys_dic, key_value)
             elif self.op_type == 'delete':
@@ -982,6 +1000,14 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
             for i in generators:
                 self.generators.append(BatchedDocumentGenerator(i, batch_size))
 
+        # only run high throughput for batch-create workloads
+        # also check number of input generators isn't greater than
+        # process_concurrency as too many generators become inefficient
+        self.is_high_throughput_mode = self.op_type == "create" and \
+            self.batch_size > 1 and \
+            len(self.generators) < self.process_concurrency
+        self.input_generators = generators
+
         self.op_types = None
         self.buckets = None
         if isinstance(op_type, list):
@@ -998,6 +1024,17 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
             if len(self.op_types) != len(self.buckets):
                 self.state = FINISHED
                 self.set_exception(Exception("not all generators have bucket specified!"))
+
+        # check if running in high throughput mode or normal
+        if self.is_high_throughput_mode:
+            self.run_high_throughput_mode()
+        else:
+            self.run_normal_throughput_mode()
+
+        self.state = FINISHED
+        self.set_result(True)
+
+    def run_normal_throughput_mode(self):
         iterator = 0
         for generator in self.generators:
             self.generator = generator
@@ -1008,8 +1045,93 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
             while self.has_next() and not self.done():
                 self.next()
             iterator += 1
-        self.state = FINISHED
-        self.set_result(True)
+
+    def run_high_throughput_mode(self):
+
+
+        # high throughput mode requires partitioning the doc generators
+        self.generators = []
+        for gen in self.input_generators:
+            gen_start = int(gen.start)
+            gen_end = max(int(gen.end), 1)
+            gen_range = max(int(gen.end/self.process_concurrency), 1)
+            for pos in range(gen_start, gen_end, gen_range):
+                partition_gen = copy.deepcopy(gen)
+                partition_gen.start = pos
+                partition_gen.itr = pos
+                partition_gen.end = pos+gen_range
+                if partition_gen.end > gen.end:
+                    partition_gen.end = gen.end
+                batch_gen = BatchedDocumentGenerator(
+                        partition_gen,
+                        self.batch_size)
+                self.generators.append(batch_gen)
+
+
+        # run generator processes
+        iterator = 0
+        all_processes = []
+        for generator in self.generators:
+
+            # only start processing when there resources available
+            CONCURRENCY_LOCK.acquire()
+
+            generator_process = Process(
+                target=self.run_generator,
+                args=(generator, iterator))
+            generator_process.start()
+            iterator += 1
+            all_processes.append(generator_process)
+
+            # add child process to wait queue
+            self.wait_queue.put(iterator)
+
+        # wait for all child processes to finish
+        self.wait_queue.join()
+
+        # merge kvstore partitions
+        while self.shared_kvstore_queue.empty() is False:
+
+            # get partitions created by child process
+            rv =  self.shared_kvstore_queue.get()
+            if rv["err"] is not None:
+                raise Exception(rv["err"])
+
+            # merge child partitions with parent
+            generator_partitions = rv["partitions"]
+            count = \
+                sum([len(p['partition'].valid_key_set()) for p in generator_partitions])
+            self.kv_store.merge_all_partitions(generator_partitions)
+
+            # terminate child process
+            iterator-=1
+            all_processes[iterator].terminate()
+
+
+    def run_generator(self, generator, iterator):
+
+        rv = {"err": None, "partitions": None}
+        try:
+            client = VBucketAwareMemcached(
+                    RestConnection(self.server),
+                    self.bucket)
+            if self.op_types:
+                self.op_type = self.op_types[iterator]
+            if self.buckets:
+                self.bucket = self.buckets[iterator]
+            while generator.has_next() and not self.done():
+                self.next(generator, client)
+        except Exception as ex:
+            rv["err"] = ex
+        else:
+            process_partitions = self.kv_store.get_partitions()
+            rv["partitions"] = process_partitions
+        finally:
+            # share the kvstore from this generator
+            self.shared_kvstore_queue.put(rv)
+            self.wait_queue.task_done()
+            # release concurrency lock
+            CONCURRENCY_LOCK.release()
 
 
 class ESLoadGeneratorTask(Task):
@@ -1240,7 +1362,6 @@ class BatchedLoadDocumentsTask(GenericLoadingTask):
             self.state = FINISHED
             self.set_exception(Exception("Bad operation type: %s" % self.op_type))
         self.kv_store.release_partitions(partition_keys_dic.keys())
-
 
     def _create_batch(self, partition_keys_dic, key_val):
         try:
@@ -4477,8 +4598,8 @@ class CBASQueryExecuteTask(Task):
     def execute(self, task_manager):
         try:
             rest = RestConnection(self.server)
-            self.response = json.loads(rest.execute_statement_on_cbas(self.cbas_endpoint, self.statement,
-                                           self.mode, self.pretty))
+            self.response = json.loads(rest.execute_statement_on_cbas(self.statement,
+                                           self.mode, self.pretty, 70))
             if self.response:
                 self.state = CHECKING
                 task_manager.schedule(self)

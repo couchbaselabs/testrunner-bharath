@@ -943,10 +943,12 @@ class RestConnection(object):
             log.info(content)
         return status
 
-    def execute_statement_on_cbas(self, statement, mode, pretty=True, timeout=70):
+    def execute_statement_on_cbas(self, statement, mode, pretty=True,
+                                  timeout=70, client_context_id=None):
         api = self.cbas_base_url + "/analytics/service"
         headers = {'Content-type': 'application/json'}
-        params = {'statement': statement, 'mode': mode, 'pretty': pretty}
+        params = {'statement': statement, 'mode': mode, 'pretty': pretty,
+                  'client_context_id': client_context_id}
         params = json.dumps(params)
         status, content, header = self._http_request(api, 'POST',
                                                      headers=headers,
@@ -957,10 +959,35 @@ class RestConnection(object):
         elif str(header['status']) == '503':
             log.info("Request Rejected")
             raise Exception("Request Rejected")
+        elif str(header['status']) == '500':
+            json_content = json.loads(content)
+            if "Job requirement capacity" in json_content['errors'][0]['msg']:
+                raise Exception("Capacity cannot meet job requirement")
+            else:
+                return content
         else:
             log.error("/analytics/service status:{0},content:{1}".format(
                 status, content))
             raise Exception("Analytics Service API failed")
+
+    def delete_active_request_on_cbas(self, client_context_id):
+        api = self.cbas_base_url + "/analytics/admin/active_requests?client_context_id={0}".format(
+            client_context_id)
+        headers = {'Content-type': 'application/json'}
+
+        status, content, header = self._http_request(api, 'DELETE',
+                                                     headers=headers,
+                                                     timeout=60)
+        if status:
+            return header['status']
+        elif str(header['status']) == '404':
+            log.info("Request Not Found")
+            return header['status']
+        else:
+            log.error(
+                "/analytics/admin/active_requests status:{0},content:{1}".format(
+                    status, content))
+            raise Exception("Analytics Admin API failed")
 
     def get_cluster_ceritificate(self):
         api = self.baseUrl + 'pools/default/certificate'
@@ -1263,7 +1290,7 @@ class RestConnection(object):
                 count_cbserver_up = 1
                 pass
         if break_out >= 60:
-            raise Exception("Couchbase server did not start after 120 seconds")
+            raise Exception("Couchbase server did not start after 60 seconds")
 
     def fail_over(self, otpNode=None, graceful=False):
         if otpNode is None:
@@ -2635,6 +2662,17 @@ class RestConnection(object):
         log.info("'%s' bucket's settings will be changed with parameters: %s" % (bucket, params))
         return self._http_request(api, "POST", params)
 
+    def disable_auto_compaction(self):
+        """
+           Cluster-wide Setting
+              Disable autocompaction on doc and view
+        """
+        api = self.baseUrl + "controller/setAutoCompaction"
+        log.info("Disable autocompaction in cluster-wide setting")
+        status, content, header = self._http_request(api, "POST",
+                                  "parallelDBAndViewCompaction=false")
+        return status
+
     def set_indexer_compaction(self, mode="circular", indexDayOfWeek=None, indexFromHour=0,
                                 indexFromMinute=0, abortOutside=False,
                                 indexToHour=0, indexToMinute=0, fragmentation=30):
@@ -3744,6 +3782,7 @@ class Node(object):
         self.rest_password = ""
         self.port = 8091
         self.services = []
+        self.storageTotalRam = 0
 
 
 class AutoFailoverSettings(object):
@@ -3871,6 +3910,14 @@ class RestParser(object):
                 node.moxi = ports["proxy"]
             if "direct" in ports:
                 node.memcached = ports["direct"]
+
+        if "storageTotals" in parsed:
+            storageTotals = parsed["storageTotals"]
+            if storageTotals.get("ram"):
+                if storageTotals["ram"].get("total"):
+                    ramKB = storageTotals["ram"]["total"]
+                    node.storageTotalRam = ramKB/(1024*1024)
+
         return node
 
     def parse_get_bucket_response(self, response):

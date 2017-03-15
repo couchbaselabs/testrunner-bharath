@@ -211,6 +211,8 @@ class BuildQuery(object):
                         os_name = "ubuntu12.04"
                         if  "ubuntu 14.04" in os_version:
                             os_name = "ubuntu14.04"
+                        elif "ubuntu 16.04" in os_version:
+                            os_name = "ubuntu16.04"
                         build.url = "{6}{0}/{1}_{4}-{5}_{2}.{3}"\
                                 .format(build_version[:build_version.find('-')],
                                  product, os_architecture, deliverable_type,
@@ -237,6 +239,8 @@ class BuildQuery(object):
                         os_name = "ubuntu12.04"
                         if  "ubuntu 14.04" in os_version:
                             os_name = "ubuntu14.04"
+                        elif "ubuntu 16.04" in os_version:
+                            os_name = "ubuntu16.04"
                         build.url = "{6}{0}/{1}_{4}-{5}_{2}.{3}"\
                             .format(build_version, product, os_architecture,
                             deliverable_type, build_details[:5], os_name,
@@ -259,7 +263,8 @@ class BuildQuery(object):
         return build
 
     def find_couchbase_release_build(self, product, deliverable_type, os_architecture,
-                                    build_version, is_amazon=False, os_version=""):
+                                    build_version, is_amazon=False, os_version="",
+                                    direct_build_url=None):
         build_details = build_version
         if build_version[:5] in COUCHBASE_VERSION_2_WITH_REL:
             if build_version[-4:] != "-rel":
@@ -347,6 +352,8 @@ class BuildQuery(object):
                         os_name = "ubuntu12.04"
                         if  "ubuntu 14.04" in os_version:
                             os_name = "ubuntu14.04"
+                        elif "ubuntu 16.04" in os_version:
+                            os_name = "ubuntu16.04"
                         build.url = "{6}{0}/{1}_{4}-{5}_{2}.{3}"\
                                 .format(build_version[:build_version.find('-')],
                                  product, os_architecture, deliverable_type,
@@ -397,6 +404,8 @@ class BuildQuery(object):
                         os_name = "ubuntu12.04"
                         if  "ubuntu 14.04" in os_version:
                             os_name = "ubuntu14.04"
+                        elif "ubuntu 16.04" in os_version:
+                            os_name = "ubuntu16.04"
                         build.url = "{6}{0}/{1}_{4}-{5}_{2}.{3}"\
                             .format(build_version, product, os_architecture,
                             deliverable_type, build_details[:5], os_name,
@@ -424,6 +433,8 @@ class BuildQuery(object):
                                                        deliverable_type)
             build.url = build.url.replace("enterprise", "community")
             build.name = build.name.replace("enterprise", "community")
+        if direct_build_url is not None and deliverable_type != "exe":
+            build.url = direct_build_url
         return build
 
     def sort_builds_by_version(self, builds):
@@ -582,7 +593,7 @@ class BuildQuery(object):
 
             if any( x + "-" in build_info for x in COUCHBASE_FROM_VERSION_3):
                 deb_words = ["debian7", "debian8", "ubuntu12.04", "ubuntu14.04",
-                             "windows", "macos"]
+                             "ubuntu16.04", "windows", "macos"]
                 if "centos" not in build_info:
                     tmp_str = build_info.split("_")
                     product_version = tmp_str[1].split("-")
@@ -612,8 +623,9 @@ class BuildQuery(object):
                 elif "-amd64" in build_info:
                     build.architecture_type = "x86_64"
                     build_info = build_info.replace("-amd64", "")
-                del_words = ["centos6", "debian7", "debian8", "ubuntu12.04", \
-                             "ubuntu14.04", "windows", "macos", "centos7"]
+                del_words = ["centos6", "debian7", "debian8", "ubuntu12.04",
+                             "ubuntu14.04", "ubuntu16.04", "windows", "macos",
+                             "centos7"]
                 if build_info.startswith("couchbase-server"):
                     build.product = build_info.split("-")
                     build.product = "-".join([i for i in build.product \
@@ -782,6 +794,8 @@ class BuildQuery(object):
                     os_name = "ubuntu12.04"
                 elif "ubuntu 14.04" in distribution_version:
                     os_name = "ubuntu14.04"
+                elif "ubuntu 16.04" in distribution_version:
+                    os_name = "ubuntu16.04"
                 elif "debian gnu/linux 7" in distribution_version:
                     build.distribution_version = "debian7"
                     os_name = "debian7"

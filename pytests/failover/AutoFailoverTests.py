@@ -11,22 +11,30 @@ class AutoFailoverTests(AutoFailoverBaseTest):
     def tearDown(self):
         super(AutoFailoverTests, self).tearDown()
 
-    def test_enable(self):
-        self.enable_autofailover()
-        settings = self.rest.get_autofailover_settings()
-        self.assertTrue(settings.enabled)
-
-    def test_disable(self):
-        self.disable_autofailover()
-        settings = self.rest.get_autofailover_settings()
-        self.assertFalse(settings.enabled)
-
     def test_autofailover(self):
+        """
+        Test the basic autofailover for different failure scenarios.
+        1. Enable autofailover and validate
+        2. Fail a node and validate if node is failed over if required.
+        3. Disable autofailover and validate.
+        :return: Nothing
+        """
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
+        self.disable_autofailover_and_validate()
 
     def test_autofailover_during_rebalance(self):
+        """
+        Test autofailover for different failure scenarios while rebalance
+        of nodes in progress
+        1. Enable autofailover and validate
+        2. Start rebalance of nodes by either adding or removing nodes.
+        3. Fail a node and validate if node is failed over if required.
+        4. Disable autofailover and validate.
+
+        :return: Nothing
+        """
         self.enable_autofailover_and_validate()
         self.sleep(5)
         rebalance_task = self.cluster.async_rebalance(self.servers,
@@ -42,8 +50,19 @@ class AutoFailoverTests(AutoFailoverBaseTest):
             pass
         else:
             self.fail("Rebalance should fail since a node went down")
+        self.disable_autofailover_and_validate()
 
     def test_autofailover_after_rebalance(self):
+        """
+        Test autofailover for different failure scenarios after rebalance
+        of nodes
+        1. Enable autofailover and validate
+        2. Start rebalance of nodes by either adding or removing nodes and
+        wait for the rebalance to be completed
+        3. Fail a node and validate if node is failed over if required.
+        4. Disable autofailover and validate.
+        :return: Nothing
+        """
         self.enable_autofailover_and_validate()
         self.sleep(5)
         rebalance_success = self.cluster.rebalance(self.servers,
@@ -53,8 +72,19 @@ class AutoFailoverTests(AutoFailoverBaseTest):
             self.disable_firewall()
             self.fail("Rebalance failed. Check logs")
         self.failover_actions[self.failover_action](self)
+        self.disable_autofailover_and_validate()
 
     def test_rebalance_after_autofailover(self):
+        """
+        Test autofailover for different failure scenarios and then rebalance
+        nodes
+        1. Enable autofailover and validate
+        2. Start rebalance of nodes by either adding or removing nodes and
+        wait for the rebalance to be completed
+        3. Fail a node and validate if node is failed over if required.
+        4. Disable autofailover and validate.
+        :return: Nothing
+        """
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
@@ -74,6 +104,13 @@ class AutoFailoverTests(AutoFailoverBaseTest):
             self.fail("Rebalance failed. Check logs")
 
     def test_autofailover_and_addback_of_node(self):
+        """
+        Test autofailover of nodes and then addback of the node after failover
+        1. Enable autofailover and validate
+        2. Fail a node and validate if node is failed over if required
+        3. Addback node and validate that the addback was successful.
+        :return: Nothing
+        """
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
@@ -92,6 +129,14 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         self.assertTrue(self.rest.monitorRebalance(stop_if_loop=True), msg)
 
     def test_autofailover_and_remove_failover_node(self):
+        """
+        Test autofailover of nodes and remove the node via rebalance after
+        the failover.
+        1. Enable autofailover and validate
+        2. Fail a node and validate if node is failed over if required
+        3. Rebalance of node if failover was successful and validate.
+        :return:
+        """
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)

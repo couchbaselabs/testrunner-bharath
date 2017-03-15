@@ -1,15 +1,15 @@
-from TestInput import TestInputSingleton
-import logger
 import time
 import unittest
+
+import logger
+from TestInput import TestInputSingleton
 from membase.api.rest_client import RestConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
 from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
-
-
+from security.rbac_base import RbacBase
 
 log = logger.Logger.get_logger()
 
@@ -31,6 +31,17 @@ class AutoFailoverBaseTest(unittest.TestCase):
         BucketOperationHelper.delete_all_buckets_or_assert(servers, testcase)
         ClusterOperationHelper.cleanup_cluster(servers)
         ClusterOperationHelper.wait_for_ns_servers_or_assert(servers, testcase)
+
+        # Add built-in user
+        testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+        RbacBase().create_user_source(testuser, 'builtin', servers[0])
+        time.sleep(10)
+
+        # Assign user to role
+        role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+        RbacBase().add_user_role(role_list, RestConnection(servers[0]), 'builtin')
+        time.sleep(10)
+
         log.info("==============  common_setup was finished for test #{0} {1} =============="\
                       .format(testcase.case_number, testcase._testMethodName))
 

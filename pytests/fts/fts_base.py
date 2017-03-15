@@ -24,6 +24,7 @@ from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection
 from remote.remote_util import RemoteUtilHelper
 from scripts.collect_server_info import cbcollectRunner
+from security.rbac_base import RbacBase
 from testconstants import STANDARD_BUCKET_PORT,LINUX_COUCHBASE_BIN_PATH
 
 
@@ -108,13 +109,7 @@ class INDEX_DEFAULTS:
 
     ALIAS_DEFINITION = {"targets": {}}
 
-    PLAN_PARAMS = {
-        "maxPartitionsPerPIndex": 32,
-        "numReplicas": 0,
-        "hierarchyRules": None,
-        "nodePlanParams": None,
-        "planFrozen": False
-    }
+    PLAN_PARAMS = {}
 
     SOURCE_CB_PARAMS = {
         "authUser": "default",
@@ -861,9 +856,10 @@ class FTSIndex:
             self.__log.info("Doc ID %s not found in search results." % doc_id)
             return -1
 
-    def create(self):
+    def create(self, rest=None):
         self.__log.info("Checking if index already exists ...")
-        rest = RestConnection(self.__cluster.get_random_fts_node())
+        if not rest:
+            rest = RestConnection(self.__cluster.get_random_fts_node())
         status, _ = rest.get_fts_index_definition(self.name)
         if status != 400:
             rest.delete_fts_index(self.name)
@@ -873,30 +869,37 @@ class FTSIndex:
             rest.ip))
         rest.create_fts_index(self.name, self.index_definition)
 
-    def update(self):
-        rest = RestConnection(self.__cluster.get_random_fts_node())
+    def update(self, rest=None):
+        if not rest:
+            rest = RestConnection(self.__cluster.get_random_fts_node())
         self.__log.info("Updating {0} {1} on {2}".format(
             self.index_type,
             self.name,
             rest.ip))
         rest.update_fts_index(self.name, self.index_definition)
 
-    def delete(self):
-        rest = RestConnection(self.__cluster.get_random_fts_node())
+    def delete(self, rest=None):
+        if not rest:
+            rest = RestConnection(self.__cluster.get_random_fts_node())
         self.__log.info("Deleting {0} {1} on {2}".format(
             self.index_type,
             self.name,
             rest.ip))
         status = rest.delete_fts_index(self.name)
-        if not self.__cluster.are_index_files_deleted_from_disk(self.name):
-            self.__log.error("Status: {0} but index file for {1} not yet "
-                             "deleted!".format(status, self.name))
+        if status:
+            self.__cluster.get_indexes().remove(self)
+            if not self.__cluster.are_index_files_deleted_from_disk(self.name):
+                self.__log.error("Status: {0} but index file for {1} not yet "
+                                 "deleted!".format(status, self.name))
+            else:
+                self.__log.info("Validated: all index files for {0} deleted from "
+                                "disk".format(self.name))
         else:
-            self.__log.info("Validated: all index files for {0} deleted from "
-                            "disk".format(self.name))
+            raise FTSException("Index/alias {0} not deleted".format(self.name))
 
-    def get_index_defn(self):
-        rest = RestConnection(self.__cluster.get_random_fts_node())
+    def get_index_defn(self, rest=None):
+        if not rest:
+            rest = RestConnection(self.__cluster.get_random_fts_node())
         return rest.get_fts_index_definition(self.name)
 
     def get_max_partitions_pindex(self):
@@ -906,8 +909,9 @@ class FTSIndex:
     def clone(self, clone_name):
         pass
 
-    def get_indexed_doc_count(self):
-        rest = RestConnection(self.__cluster.get_random_fts_node())
+    def get_indexed_doc_count(self, rest=None):
+        if not rest:
+            rest = RestConnection(self.__cluster.get_random_fts_node())
         return rest.get_fts_index_doc_count(self.name)
 
     def get_src_bucket_doc_count(self):
@@ -1022,7 +1026,7 @@ class FTSIndex:
                       return_raw_hits=False, sort_fields=None,
                       explain=False, show_results_from_item=0, highlight=False,
                       highlight_style=None, highlight_fields=None, consistency_level='',
-                      consistency_vectors={}, timeout=60000):
+                      consistency_vectors={}, timeout=60000, rest=None):
         """
         Takes a query dict, constructs a json, runs and returns results
         """
@@ -1608,7 +1612,10 @@ class CouchbaseCluster:
                 count, err = shell.execute_command(
                     "ls {0}/@fts |grep {1}*.pindex | wc -l".
                         format(data_dir, index_name))
-                count = int(count[0])
+                if isinstance(count, list):
+                    count = int(count[0])
+                else:
+                    count = int(count)
                 self.__log.info(count)
                 retry += 1
                 if retry > 5:
@@ -2874,6 +2881,9 @@ class FTSBaseTest(unittest.TestCase):
                 "====  FTSbasetests cleanup is finished for test #{0} {1} ==="
                     .format(self.__case_number, self._testMethodName))
         finally:
+            # Remove rbac user in teardown
+            role_del = ['cbadminbucket']
+            temp = RbacBase().remove_user_role(role_del, RestConnection(self._input.servers[0]))
             self.__cluster_op.shutdown(force=True)
             unittest.TestCase.tearDown(self)
 
@@ -2906,6 +2916,17 @@ class FTSBaseTest(unittest.TestCase):
             self.setup_es()
         self._cb_cluster.init_cluster(self._cluster_services,
                                       self._input.servers[1:])
+
+        # Add built-in user
+        testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+        RbacBase().create_user_source(testuser, 'builtin', master)
+        time.sleep(10)
+
+        # Assign user to role
+        role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+        RbacBase().add_user_role(role_list, RestConnection(master), 'builtin')
+        time.sleep(10)
+
         self.__set_free_servers()
         if not no_buckets:
             self.__create_buckets()
@@ -2914,7 +2935,7 @@ class FTSBaseTest(unittest.TestCase):
         # simply append to this list, any error from log we want to fail test on
         self.__report_error_list = []
         if self.__fail_on_errors:
-            self.__report_error_list = ["panic:", "crash in forestdb"]
+            self.__report_error_list = []
 
         # for format {ip1: {"panic": 2}}
         self.__error_count_dict = {}
@@ -2981,7 +3002,7 @@ class FTSBaseTest(unittest.TestCase):
         self.index_replicas = self._input.param("index_replicas", None)
         self.index_kv_store = self._input.param("kvstore", None)
         self.partitions_per_pindex = \
-            self._input.param("max_partitions_pindex", 32)
+            self._input.param("max_partitions_pindex", 171)
         self.upd_del_fields = self._input.param("upd_del_fields", None)
         self.num_queries = self._input.param("num_queries", 1)
         self.query_types = (self._input.param("query_types", "match")).split(',')

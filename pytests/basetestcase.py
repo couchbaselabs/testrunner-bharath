@@ -26,6 +26,7 @@ from membase.helper.cluster_helper import ClusterOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
 from memcached.helper.data_helper import VBucketAwareMemcached
 from remote.remote_util import RemoteUtilHelper
+from scripts.collect_server_info import cbcollectRunner
 from security.rbac_base import RbacBase
 from testconstants import MAX_COMPACTION_THRESHOLD
 from testconstants import MIN_COMPACTION_THRESHOLD
@@ -135,6 +136,7 @@ class BaseTestCase(unittest.TestCase):
             self.enable_bloom_filter = self.input.param("enable_bloom_filter", False)
             self.enable_time_sync = self.input.param("enable_time_sync", False)
             self.gsi_type = self.input.param("gsi_type", 'forestdb')
+            self.is_container = self.input.param("is_container", False)
 
             # bucket parameters go here,
             self.bucket_size = self.input.param("bucket_size", None)
@@ -233,12 +235,12 @@ class BaseTestCase(unittest.TestCase):
                 self.change_checkpoint_params()
 
                 # Add built-in user
-                testuser = [{'id': 'temp', 'name': 'temp', 'password': 'password'}]
+                testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
                 RbacBase().create_user_source(testuser, 'builtin', self.master)
                 self.sleep(10)
 
                 # Assign user to role
-                role_list = [{'id': 'temp', 'name': 'temp', 'roles': 'admin'}]
+                role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
                 RbacBase().add_user_role(role_list, RestConnection(self.master), 'builtin')
                 self.sleep(10)
 
@@ -327,6 +329,22 @@ class BaseTestCase(unittest.TestCase):
             self.cluster.shutdown(force=True)
             self.fail(e)
 
+
+    def get_cbcollect_info(self, server):
+        """Collect cbcollectinfo logs for all the servers in the cluster.
+        """
+        path = TestInputSingleton.input.param("logs_folder", "/tmp")
+        print "grabbing cbcollect from {0}".format(server.ip)
+        path = path or "."
+        try:
+            cbcollectRunner(server, path).run()
+            TestInputSingleton.input.test_params[
+                "get-cbcollect-info"] = False
+        except Exception as e:
+            self.log.error( "IMPOSSIBLE TO GRAB CBCOLLECT FROM {0}: {1}".format( server.ip, e))
+
+
+
     def tearDown(self):
         if self.skip_setup_cleanup:
                 return
@@ -344,18 +362,31 @@ class BaseTestCase(unittest.TestCase):
                 self.log.warn("CLEANUP WAS SKIPPED")
             else:
 
-                if test_failed and TestInputSingleton.input.param('get_trace', None):
-                    for server in self.servers:
-                        try:
-                            shell = RemoteMachineShellConnection(server)
-                            output, _ = shell.execute_command("ps -aef|grep %s" %
-                                                              TestInputSingleton.input.param('get_trace', None))
-                            output = shell.execute_command("pstack %s" % output[0].split()[1].strip())
-                            print output[0]
-                        except:
-                            pass
-                if test_failed and self.input.param('BUGS', False):
-                    self.log.warn("Test failed. Possible reason is: {0}".format(self.input.param('BUGS', False)))
+                if test_failed:
+                    # collect logs here instead of in test runner because we have not shut things down
+                    if TestInputSingleton.param("get-cbcollect-info", False):
+                        for server in self.servers:
+                            self.log.info("Collecting logs @ {0}".format(server.ip))
+                            self.get_cbcollect_info(server)
+                        # collected logs so turn it off so it is not done later
+                        TestInputSingleton.input.test_params["get-cbcollect-info"] = False
+
+                    if TestInputSingleton.input.param('get_trace', None):
+                        for server in self.servers:
+                            try:
+                                shell = RemoteMachineShellConnection(server)
+                                output, _ = shell.execute_command("ps -aef|grep %s" %
+                                                                  TestInputSingleton.input.param('get_trace', None))
+                                output = shell.execute_command("pstack %s" % output[0].split()[1].strip())
+                                print output[0]
+                            except:
+                                pass
+                    if self.input.param('BUGS', False):
+                        self.log.warn("Test failed. Possible reason is: {0}".format(self.input.param('BUGS', False)))
+
+
+
+
 
                 self.log.info("==============  basetestcase cleanup was started for test #{0} {1} ==============" \
                               .format(self.case_number, self._testMethodName))
@@ -375,10 +406,6 @@ class BaseTestCase(unittest.TestCase):
                 BucketOperationHelper.delete_all_buckets_or_assert(self.servers, self)
                 ClusterOperationHelper.cleanup_cluster(self.servers, master=self.master)
                 ClusterOperationHelper.wait_for_ns_servers_or_assert(self.servers, self)
-                role_del = ['temp']
-
-                #Remove rbac user in teardown
-                temp = RbacBase().remove_user_role(role_del, rest)
                 self.log.info("==============  basetestcase cleanup was finished for test #{0} {1} ==============" \
                               .format(self.case_number, self._testMethodName))
         except BaseException:
@@ -461,7 +488,7 @@ class BaseTestCase(unittest.TestCase):
                                                       maxParallelReplicaIndexers, init_port,
                                                       quota_percent, services=assigned_services,
                                                       index_quota_percent=self.index_quota_percent,
-                                                      gsi_type=self.gsi_type))
+                                                      gsi_type=self.gsi_type, is_container=self.is_container))
         for task in init_tasks:
             node_quota = task.result()
             if node_quota < quota or quota == 0:
@@ -794,18 +821,23 @@ class BaseTestCase(unittest.TestCase):
     """
 
     def _load_all_buckets(self, server, kv_gen, op_type, exp, kv_store=1, flag=0,
-                          only_store_hash=True, batch_size=1000, pause_secs=1, timeout_secs=30,
-                          proxy_client=None):
+                          only_store_hash=True, batch_size=1000, pause_secs=1,
+                          timeout_secs=30, proxy_client=None):
 
         if self.enable_bloom_filter:
             for bucket in self.buckets:
-                ClusterOperationHelper.flushctl_set(self.master, "bfilter_enabled", 'true', bucket)
+                ClusterOperationHelper.flushctl_set(self.master,
+                                                    "bfilter_enabled", 'true', bucket)
 
         tasks = self._async_load_all_buckets(server, kv_gen, op_type, exp, kv_store, flag,
-                                             only_store_hash, batch_size, pause_secs, timeout_secs,
-                                             proxy_client)
+                                             only_store_hash, batch_size, pause_secs,
+                                             timeout_secs, proxy_client)
         for task in tasks:
             task.result()
+
+        """
+           Load bucket to DGM if params active_resident_threshold is passed
+        """
         if self.active_resident_threshold:
             stats_all_buckets = {}
             for bucket in self.buckets:
@@ -816,20 +848,31 @@ class BaseTestCase(unittest.TestCase):
                 while not threshold_reached:
                     active_resident = \
                         stats_all_buckets[bucket.name].get_stats([self.master], bucket, '',
-                                                                 'vb_active_perc_mem_resident')[
-                            server]
+                                                     'vb_active_perc_mem_resident')[server]
                     if int(active_resident) > self.active_resident_threshold:
                         self.log.info(
-                            "resident ratio is %s greater than %s for %s in bucket %s. Continue loading to the cluster" %
-                            (active_resident, self.active_resident_threshold, self.master.ip, bucket.name))
+                            "resident ratio is %s greater than %s for %s in bucket %s.\n"\
+                            " Continue loading to the cluster" %
+                                               (active_resident,
+                                                self.active_resident_threshold,
+                                                self.master.ip,
+                                                bucket.name))
                         random_key = self.key_generator()
-                        generate_load = BlobGenerator(random_key, '%s-' % random_key, self.value_size,
+                        generate_load = BlobGenerator(random_key,
+                                                      '%s-' % random_key,
+                                                      self.value_size,
                                                       end=batch_size * 50)
-                        self._load_bucket(bucket, self.master, generate_load, "create", exp=0, kv_store=1, flag=0,
-                                          only_store_hash=True, batch_size=batch_size, pause_secs=5, timeout_secs=60)
+                        self._load_bucket(bucket, self.master, generate_load,
+                                          "create", exp=0, kv_store=1, flag=0,
+                                          only_store_hash=True,
+                                          batch_size=batch_size,
+                                          pause_secs=5, timeout_secs=60)
                     else:
                         threshold_reached = True
-                        self.log.info("DGM state achieved for %s in bucket %s!" % (self.master.ip, bucket.name))
+                        self.log.info("\n DGM state achieved at %s %% for %s in bucket %s!"\
+                                                                     % (active_resident,
+                                                                        self.master.ip,
+                                                                        bucket.name))
                         break
 
     def _async_load_bucket(self, bucket, server, kv_gen, op_type, exp, kv_store=1, flag=0, only_store_hash=True,
@@ -846,6 +889,51 @@ class BaseTestCase(unittest.TestCase):
         task = self._async_load_bucket(bucket, server, kv_gen, op_type, exp, kv_store, flag, only_store_hash,
                                        batch_size, pause_secs, timeout_secs)
         task.result()
+
+
+
+
+    # Load all the buckets until there is no more memory
+    # Assumption - all buckets are ephemeral
+    # Work in progress
+
+    def _load_all_ephemeral_buckets_until_no_more_memory(self, server, kv_gen, op_type, exp, increment, kv_store=1, flag=0,
+                          only_store_hash=True, batch_size=1000, pause_secs=1, timeout_secs=30,
+                          proxy_client=None):
+
+
+
+        stats_all_buckets = {}
+        for bucket in self.buckets:
+            stats_all_buckets[bucket.name] = StatsCommon()
+
+        for bucket in self.buckets:
+            memory_is_full = False
+            while  not memory_is_full:
+                memory_used = \
+                    stats_all_buckets[bucket.name].get_stats([self.master], bucket, '',
+                                                             'mem_used')[ server]
+                # memory is considered full if mem_used is at say 90% of the available memory
+                if int(memory_used) < 0.90 * self.bucket_size * 1000000:
+                    self.log.info(
+                        "Still have memory. %s used is less than %s MB quota for %s in bucket %s. Continue loading to the cluster" %
+                        (memory_used, self.bucket_size , self.master.ip, bucket.name))
+
+                    self._load_bucket(bucket, self.master, kv_gen, "create", exp=0, kv_store=1, flag=0,
+                    only_store_hash=True, batch_size=batch_size, pause_secs=5, timeout_secs=60)
+                    kv_gen.start = kv_gen.start + increment
+                    kv_gen.end = kv_gen.end + increment
+                    generate_load = BlobGenerator('key-root', 'param2', self.value_size, start=0, end=self.num_items)
+                else:
+                    memory_is_full = True
+                    self.log.info("Memory is full, %s bytes in use for %s and bucket %s!" %
+                                  (memory_used, self.master.ip, bucket.name))
+
+
+
+
+
+
 
     def key_generator(self, size=6, chars=string.ascii_uppercase + string.digits):
         return ''.join(random.choice(chars) for x in range(size))

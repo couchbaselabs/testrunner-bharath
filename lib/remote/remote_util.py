@@ -289,11 +289,25 @@ class RemoteMachineShellConnection:
                     return float(line.strip().split(' ')[0])
 
     def stop_network(self, stop_time):
+        """
+        Stop the network for given time period and then restart the network
+        on the machine.
+        :param stop_time: Time duration for which the network service needs
+        to be down in the machine
+        :return: Nothing
+        """
         self.extract_remote_info()
         os_type = self.info.type.lower()
         if os_type == "unix" or os_type == "linux":
-            command = "service network stop && sleep {} && service network " \
-                      "start"
+            if self.info.distribution_type.lower() == "ubuntu":
+                command = "ifdown -a && sleep {} && ifup -a"
+            else:
+                command = "service network stop && sleep {} && service network " \
+                          "start"
+            output, error = self.execute_command(command.format(stop_time))
+            self.log_command_output(output, error)
+        elif os_type == "windows":
+            command = "net stop Netman && timeout {} && net start Netman"
             output, error = self.execute_command(command.format(stop_time))
             self.log_command_output(output, error)
 
@@ -389,8 +403,14 @@ class RemoteMachineShellConnection:
             self.log.error("don't know operating system or product version")
 
     def restart_couchbase(self):
+        """
+        Restart the couchbase server on the machine.
+        :return: Nothing
+        """
         self.extract_remote_info()
         if self.info.type.lower() == 'windows':
+            o, r = self.execute_command("net stop couchbaseserver")
+            self.log_command_output(o, r)
             o, r = self.execute_command("net start couchbaseserver")
             self.log_command_output(o, r)
         if self.info.type.lower() == "linux":

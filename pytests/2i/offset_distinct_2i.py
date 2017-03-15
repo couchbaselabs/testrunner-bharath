@@ -45,7 +45,7 @@ query_definition2 = QueryDefinition(
     groups=["single_field_index"],
     index_where_clause=" name IS NOT NULL ")
 
-global_projection_value = {"PrimaryKey": True}
+global_projection_value = None
 
 
 class SecondaryIndexingOffsetTests(BaseSecondaryIndexingTests):
@@ -1125,8 +1125,8 @@ class SecondaryIndexingOffsetTests(BaseSecondaryIndexingTests):
                               stale="false"):
         multiscan_content = {}
         multiscan_content["scans"] = json.dumps(scan_content)
-        multiscan_content["projection"] = json.dumps(
-            projection_val)
+        if projection_val is not None:
+            multiscan_content["projection"] = json.dumps(projection_val)
         multiscan_content["distinct"] = distinct
         multiscan_content["reverse"] = reverse
         multiscan_content["offset"] = offset
@@ -1206,18 +1206,18 @@ class SecondaryIndexingOffsetTests(BaseSecondaryIndexingTests):
         temp_doc_list = []
         ms_doc_list = []
         for tr in total_result:
-            if projection["PrimaryKey"] is False and tr["docid"] != "":
+            if projection is not None and projection["PrimaryKey"] is False and tr["docid"] != "":
                 assert False
-            if projection["PrimaryKey"] is True and tr["docid"] == "":
+            if projection is not None and projection["PrimaryKey"] is True and tr["docid"] == "":
                 assert False
             temp_doc_val = str(tr["key"])
             " ".join(temp_doc_val)
             temp_doc_list.append(temp_doc_val)
 
         for ms in multiscan_result:
-            if projection["PrimaryKey"] is False and ms["docid"] != "":
+            if projection is not None and projection["PrimaryKey"] is False and ms["docid"] != "":
                 assert False
-            if projection["PrimaryKey"] is True and ms["docid"] == "":
+            if projection is not None and projection["PrimaryKey"] is True and ms["docid"] == "":
                 assert False
             ms_doc_val = str(ms["key"])
             " ".join(ms_doc_val)

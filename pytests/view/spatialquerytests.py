@@ -1,28 +1,29 @@
-import logger
-import time
-import unittest
-import threading
-from threading import Thread
-from membase.helper.rebalance_helper import RebalanceHelper
-from couchbase_helper.cluster import Cluster
-from basetestcase import BaseTestCase
-from remote.remote_util import RemoteMachineShellConnection
 import json
 import sys
+import threading
+import time
+import unittest
+from threading import Thread
 
+import logger
+from basetestcase import BaseTestCase
+from couchbase_helper.cluster import Cluster
 from membase.helper.spatial_helper import SpatialHelper
+from remote.remote_util import RemoteMachineShellConnection
 
 
-class SpatialQueryTests(unittest.TestCase):
+class SpatialQueryTests(BaseTestCase):
     def setUp(self):
-        self.log = logger.Logger.get_logger()
         self.helper = SpatialHelper(self, "default")
+        super(SpatialQueryTests, self).setUp()
+        self.log = logger.Logger.get_logger()
+
         self.helper.setup_cluster()
         self.cluster = Cluster()
         self.servers = self.helper.servers
 
     def tearDown(self):
-        self.helper.cleanup_cluster()
+        super(SpatialQueryTests, self).tearDown()
 
     def test_simple_dataset_limit_queries(self):
         num_docs = self.helper.input.param("num-docs")

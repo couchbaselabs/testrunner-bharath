@@ -35,11 +35,14 @@ class QueryCurlTests(QueryTests):
     def setUp(self):
         super(QueryCurlTests, self).setUp()
         self.shell = RemoteMachineShellConnection(self.master)
-        self.cbqpath = '%scbq' % self.path
+        self.rest = RestConnection(self.master)
+        self.cbqpath = '%scbq' % self.path + " -u %s -p %s" % (self.rest.username,self.rest.password)
         self.query_service_url = "'http://%s:%s/query/service'" % (self.master.ip,self.n1ql_port)
         self.api_port = self.input.param("api_port", 8094)
         self.load_sample = self.input.param("load_sample", False)
-        print self.load_sample
+
+    def suite_setUp(self):
+        super(QueryCurlTests, self).suite_setUp()
         if self.load_sample:
             self.shell.execute_command("""curl -v -u Administrator:password \
                          -X POST http://{0}:{1}/sampleBuckets/install \
@@ -58,9 +61,6 @@ class QueryCurlTests(QueryTests):
             except Exception, ex:
                 self.fail(ex)
 
-    def suite_setUp(self):
-        super(QueryCurlTests, self).suite_setUp()
-
     def tearDown(self):
         super(QueryCurlTests, self).tearDown()
 
@@ -72,7 +72,7 @@ class QueryCurlTests(QueryTests):
         # The query that curl will send to couchbase
         n1ql_query = 'select * from default limit 5'
         # This is the query that the cbq-engine will execute
-        query = "select curl('POST', "+ self.query_service_url +", {'data' : 'statement=%s'})" % n1ql_query
+        query = "select curl('POST', "+ self.query_service_url +", {'data' : 'statement=%s','user':'Administrator:password'})" % n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         # Compare the curl statement to the expected result of the n1ql query done normally
@@ -91,7 +91,7 @@ class QueryCurlTests(QueryTests):
     def test_from(self):
         n1ql_query = 'select * from default limit 5'
         select_query = "select *"
-        from_query=" from curl('POST', "+ self.query_service_url +", {'data' : 'statement=%s'}) result" % n1ql_query
+        from_query=" from curl('POST', "+ self.query_service_url +", {'data' : 'statement=%s','user':'Administrator:password'}) result" % n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query + from_query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         expected_result = self.run_cbq_query('select * from default limit 5')
@@ -103,14 +103,14 @@ class QueryCurlTests(QueryTests):
         select_query = "select * "
         from_query="from default d "
         where_query="where curl('POST', "+ self.query_service_url +\
-                    ", {'data' : 'statement=%s'}).results[0].name == 'employee-9' " % n1ql_query
+                    ", {'data' : 'statement=%s','user':'Administrator:password'}).results[0].name == 'employee-9' " % n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+where_query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         # This should be equiv to select * from default d where true, so all docs should be present, assuming doc-per-day = 1
         self.assertTrue(json_curl['metrics']['resultCount'] == 2016)
 
         where_query="where curl('POST', "+ self.query_service_url \
-                    +", {'data' : 'statement=%s'}).results[0].name == 'Ajay' " % n1ql_query
+                    +", {'data' : 'statement=%s','user':'Administrator:password'}).results[0].name == 'Ajay' " % n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+where_query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         # This should be equiv to select * from default d where false, so no docs should be present
@@ -120,44 +120,27 @@ class QueryCurlTests(QueryTests):
     def test_select_and_from(self):
         n1ql_query = 'select * from default limit 5'
         from_n1ql_query= 'select * from default'
-        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s'})" % n1ql_query
-        from_query = " from curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s'}) result" % from_n1ql_query
+        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s','user':'Administrator:password'})" % n1ql_query
+        from_query = " from curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s','user':'Administrator:password'}) result" % from_n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath, select_query + from_query, '', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         expected_result = self.run_cbq_query('select * from default limit 5')
         self.assertTrue(json_curl['results'][0]['$1']['results'] == expected_result['results'])
-
-    '''WIP'''
-    def test_select_and_where(self):
-        n1ql_query = 'select d from default d limit 5&metrics=false&signature=false'
-        where_n1ql_query = 'select raw d from default d limit 5&metrics=false&signature=false'
-        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s'}) " % n1ql_query
-        from_query="from default "
-        where_query="where curl('POST', "+ self.query_service_url +\
-                    ", {'data' : 'statement=%s'}).results[0].name == 'employee-9' " % where_n1ql_query
-        curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+where_query,'', '', '', '', '')
-        json_curl = self.convert_to_json(curl)
-        # self.assertTrue(json_curl['metrics']['resultCount'] == 1)
-        #
-        # where_query = "where curl('POST', " + url + ", {'data' : 'statement=%s'}).results[0].name == 'Ajay' " % where_n1ql_query
-        # curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+where_query,'', '', '', '', '')
-        # json_curl = self.convert_to_json(curl)
-        # self.assertTrue(json_curl['metrics']['resultCount'] == 0)
 
     '''Basic test for having curl in the from and where clause at the same time'''
     def test_from_and_where(self):
         n1ql_query = 'select d from default d limit 5'
         where_n1ql_query = 'select raw d from default d limit 5&metrics=false&signature=false'
         select_query = "select * "
-        from_query="from curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s'}) result " % n1ql_query
+        from_query="from curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s','user':'Administrator:password'}) result " % n1ql_query
         where_query="where curl('POST', "+ self.query_service_url +\
-                    ", {'data' : 'statement=%s'}).results[0].name == 'employee-9' " % where_n1ql_query
+                    ", {'data' : 'statement=%s','user':'Administrator:password'}).results[0].name == 'employee-9' " % where_n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+where_query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         self.assertTrue(json_curl['metrics']['resultCount'] == 1)
 
         where_query = "where curl('POST', " + self.query_service_url + \
-                      ", {'data' : 'statement=%s'}).results[0].name == 'Ajay' " % where_n1ql_query
+                      ", {'data' : 'statement=%s','user':'Administrator:password'}).results[0].name == 'Ajay' " % where_n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+where_query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         self.assertTrue(json_curl['metrics']['resultCount'] == 0)
@@ -167,24 +150,103 @@ class QueryCurlTests(QueryTests):
         n1ql_query = 'select * from default limit 5'
         select_query = "select * "
         from_query="from default d "
-        where_query="where d.name in (select raw result.results[0].default.name  from curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s'}) result) " % n1ql_query
+        where_query="where d.name in (select raw result.results[0].default.name  from curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s','user':'Administrator:password'}) result) " % n1ql_query
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+where_query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         expected_result = self.run_cbq_query("select * from default d where d.name == 'employee-9'")
         self.assertTrue(json_curl['results'] == expected_result['results'])
 
-    '''WIP'''
+    '''Test if you can join using curl as one of the buckets to be joined'''
     def test_curl_join(self):
         url = "'http://%s:%s/api/index/beers/query'" % (self.master.ip,self.api_port)
         select_query = "select ARRAY x.id for x in b1.result.hits end as hits, b1.result.total_hits as total," \
                        "array_length(b1.result.hits), b "
         from_query = "from (select curl('POST', "+ url +", "
         options = "{'header':'Content-Type: application/json', " \
-                  "'data':{'explain':false,'fields': ['*'],'highlight': {},'query': {'query': 'beer'}}}) result) b1 "
-        join = "INNER JOIN `beer-sample` b ON KEYS b1.result.hits[*].id"
+                  "'data':{'explain':false,'fields': ['*'],'highlight': {},'query': {'query': 'beer'}},'user':'Administrator:password'}) result)b1 "
+        join = "INNER JOIN \`beer-sample\` b ON KEYS b1.result.hits[*].id"
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+options+join,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
-        import pdb;pdb.set_trace()
+        self.assertTrue(json_curl['metrics']['resultCount'] == 10 and json_curl['results'][0]['$1'] == 10 and
+                        len(json_curl['results'][0]['hits']) == 10)
+
+    '''Test that you can insert data from a select curl statement into couchbase
+        -inserting data pulled from another bucket
+        -inserting data with a key that already exists (should fail)'''
+    def test_insert_curl(self):
+        n1ql_query = 'select * from \`beer-sample\` limit 1'
+        insert_query ="insert into default (key UUID(), value curl_result.results[0].\`beer-sample\`) "
+        query = "select curl('POST', "+ self.query_service_url +", "
+        options = "{'data' : 'statement=%s','user': 'Administrator:password'}) curl_result " % n1ql_query
+        returning ="returning meta().id, * "
+        curl = self.shell.execute_commands_inside(self.cbqpath,insert_query+query+options+returning,'', '', '','', '')
+        json_curl = self.convert_to_json(curl)
+        docid = json_curl['results'][0]['id']
+        result = self.run_cbq_query('select * from default limit 1')
+        result2= self.run_cbq_query('select * from `beer-sample` limit 1')
+        self.assertTrue(result['results'][0]['default'] == result2['results'][0]['beer-sample']
+                        and json_curl['metrics']['mutationCount'] == 1)
+
+        insert_query = "insert into default (key '" + docid+"', value curl_result.results[0].\`beer-sample\`) "
+        curl = self.shell.execute_commands_inside(self.cbqpath,insert_query+query+options+returning,'', '', '','', '')
+        json_curl = self.convert_to_json(curl)
+        self.assertTrue(json_curl['status'] == 'errors' and 'cause:DuplicateKey' in json_curl['errors'][0]['msg'])
+
+    '''Test that you can insert data from a select curl statement using upsert
+        -inserting data pulled from another bucket
+        -insertign data using a key that already exists(should work)'''
+    def test_upsert_curl(self):
+        n1ql_query = 'select * from \`beer-sample\` limit 1'
+        insert_query ="upsert into default (key UUID(), value curl_result.results[0].\`beer-sample\`) "
+        query = "select curl('POST', "+ self.query_service_url +", "
+        options = "{'data' : 'statement=%s','user': 'Administrator:password'}) curl_result " % n1ql_query
+        returning ="returning meta().id, * "
+        curl = self.shell.execute_commands_inside(self.cbqpath,insert_query+query+options+returning,'', '', '','', '')
+        json_curl = self.convert_to_json(curl)
+        docid = json_curl['results'][0]['id']
+        result = self.run_cbq_query('select * from default limit 1')
+        result2= self.run_cbq_query('select * from `beer-sample` limit 1')
+        self.assertTrue(result['results'][0]['default'] == result2['results'][0]['beer-sample']
+                        and json_curl['metrics']['mutationCount'] == 1)
+
+        n1ql_query = 'select * from \`beer-sample\` offset 1 limit 1'
+        insert_query = "upsert into default (key '" + docid+"', value curl_result.results[0].\`beer-sample\`) "
+        options = "{'data' : 'statement=%s','user': 'Administrator:password'}) curl_result " % n1ql_query
+        curl = self.shell.execute_commands_inside(self.cbqpath,insert_query+query+options+returning,'', '', '','', '')
+        json_curl = self.convert_to_json(curl)
+        result = self.run_cbq_query('select * from default limit 1')
+        result2= self.run_cbq_query('select * from `beer-sample` offset 1 limit 1')
+        self.assertTrue(result['results'][0]['default'] == result2['results'][0]['beer-sample']
+                        and json_curl['metrics']['mutationCount'] == 1)
+
+    '''See if you can update a bucket using n1ql curl'''
+    def test_update_curl(self):
+        query = 'select meta().id from default limit 1'
+        n1ql_query = "select d.join_yr from default d where d.join_yr == 2010 limit 1"
+        result = self.run_cbq_query(query)
+        docid = result['results'][0]['id']
+        update_query ="update default use keys '" + docid + "' set name ="
+        query = "(curl('POST', "+ self.query_service_url +", "
+        options = "{'data' : 'statement=%s','user': 'Administrator:password'}).results[0].join_yr) " % n1ql_query
+        returning ="returning meta().id, * "
+        curl = self.shell.execute_commands_inside(self.cbqpath,update_query+query+options+returning,'', '', '','', '')
+        json_curl = self.convert_to_json(curl)
+        self.assertTrue(json_curl['results'][0]['default']['name'] == 2010)
+
+    '''Test if curl can be used inside a delete'''
+    def test_delete_curl(self):
+        curl_query = 'select meta().id from default limit 1'
+        result = self.run_cbq_query(curl_query)
+        docid = result['results'][0]['id']
+        delete_query ="delete from default d use keys "
+        query = "(curl('POST', "+ self.query_service_url +", "
+        options = "{'data' : 'statement=%s','user': 'Administrator:password'}).results[0].id) " % curl_query
+        returning ="returning meta().id, * "
+        curl = self.shell.execute_commands_inside(self.cbqpath,delete_query+query+options+returning,'', '', '','', '')
+        json_curl = self.convert_to_json(curl)
+        result = self.run_cbq_query('select * from default')
+        self.assertTrue(json_curl['metrics']['mutationCount'] == 1 and json_curl['results'][0]['id'] == docid and
+                        result['metrics']['resultCount'] == 2015)
 
     '''Test if you can access a protected bucket with curl and authorization'''
     def test_protected_bucket(self):
@@ -201,7 +263,7 @@ class QueryCurlTests(QueryTests):
         select_query = "select result.total_hits, array_length(result.hits) "
         from_query = "from curl('POST', "+ url +", "
         options = "{'header':'Content-Type: application/json', " \
-                  "'data':{'explain':true,'fields': ['*'],'highlight': {},'query': {'query': 'garden'}}}) result"
+                  "'data':{'explain':true,'fields': ['*'],'highlight': {},'query': {'query': 'garden'}},'user':'Administrator:password'}) result"
         curl = self.shell.execute_commands_inside(self.cbqpath,select_query+from_query+options,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         self.assertTrue(json_curl['results'][0]['total_hits'] == 12 and json_curl['results'][0]['$1'] == 10)
@@ -219,6 +281,7 @@ class QueryCurlTests(QueryTests):
     def test_simple_external_json(self):
         # Get the output from the actual curl and test it against the n1ql curl query
         curl_output = self.shell.execute_command("curl https://jsonplaceholder.typicode.com/todos")
+        print curl_output
         # The above command returns a tuple, we want the first element of that tuple
         expected_curl = self.convert_list_to_json(curl_output[0])
 
@@ -299,6 +362,45 @@ class QueryCurlTests(QueryTests):
 
 ##############################################################################################
 #
+#   Options Tests
+#
+##############################################################################################
+    '''WIP'''
+    def test_connect_timeout(self):
+        # Test with a connectiion time that is too small for the request to go through
+        n1ql_query = 'select * from default'
+        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s', 'user':'Administrator:password','connect-timeout':1})" % n1ql_query
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query, '', '', '', '', '')
+        json_curl = self.convert_to_json(curl)
+
+        # Test with a connection time that is big enough for the request to go through
+        n1ql_query = 'select * from default'
+        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s', 'user':'Administrator:password','connect-timeout':15})" % n1ql_query
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query, '', '', '', '', '')
+        json_curl = self.convert_to_json(curl)
+
+    '''WIP'''
+    def test_max_time(self):
+        n1ql_query = 'select * from default'
+        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s', 'user':'Administrator:password','max-time':1})" % n1ql_query
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query, '', '', '', '', '')
+        json_curl = self.convert_to_json(curl)
+
+    '''Tests what happens when you give two of the same option with different values.'''
+    def test_repeated_user_options(self):
+        n1ql_query = 'select * from default'
+        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s', 'user':'Administrator:password','user': 'Ajay:Bhullar'})" % n1ql_query
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query, '', '', '', '', '')
+        json_curl = self.convert_to_json(curl)
+        self.assertTrue(json_curl['results'][0]['$1']['errors'][0]['msg'] == 'Invalidusername/password.')
+
+        select_query = "select curl('POST', " + self.query_service_url + ", {'data' : 'statement=%s', 'user': 'Ajay:Bhullar', 'user':'Administrator:password'})" % n1ql_query
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query, '', '', '', '', '')
+        json_curl = self.convert_to_json(curl)
+        self.assertTrue(json_curl['results'][0]['$1']['metrics']['resultCount'] == 2016)
+
+##############################################################################################
+#
 #   Negative tests
 #
 ##############################################################################################
@@ -336,14 +438,27 @@ class QueryCurlTests(QueryTests):
 
     '''Test if a protected bucket can be accessed without giving its password'''
     def test_protected_bucket_noauth(self):
+        cbqpath = '%scbq' % self.path
         # The query that curl will send to couchbase
         n1ql_query = 'select * from bucket0 limit 5'
         # This is the query that the cbq-engine will execute
         query = "select curl('POST', "+ self.query_service_url +", {'data' : 'statement=%s'})" % n1ql_query
-        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(cbqpath,query,'', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         self.assertTrue(json_curl['results'][0]['$1']['errors'][0]['msg'] ==
-                        "Userdoesnotbelongtoaspecifiedrole.Keyspacebucket0")
+                        "Nousersuppliedforquery.")
+
+        query = "select curl('POST', "+ self.query_service_url +", {'data' : 'statement=%s','user':'Administrator:'})" % n1ql_query
+        curl = self.shell.execute_commands_inside(cbqpath,query,'', '', '', '', '')
+        json_curl = self.convert_to_json(curl)
+        self.assertTrue(json_curl['results'][0]['$1']['errors'][0]['msg'] ==
+                         "Invalidusername/password.")
+
+        query = "select curl('POST', "+ self.query_service_url +", {'data' : 'statement=%s','user':':password'})" % n1ql_query
+        curl = self.shell.execute_commands_inside(cbqpath,query,'', '', '', '', '')
+        json_curl = self.convert_to_json(curl)
+        self.assertTrue(json_curl['results'][0]['$1']['errors'][0]['msg'] ==
+                         "Invalidusername/password.")
 
     '''Test an unsupported method in n1ql curl
         -DELETE.'''
@@ -373,6 +488,30 @@ class QueryCurlTests(QueryTests):
         curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
         actual_curl = self.convert_to_json(curl)
         self.assertTrue(actual_curl['results'][0]['$1']['error_message'] == "TheprovidedAPIkeyisinvalid.")
+
+    '''WIP'''
+    def test_expired_cert(self):
+        url = "'https://expired.badssl.com/'"
+        query="select curl('GET', "+ url +")"
+        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
+        actual_curl = self.convert_to_json(curl)
+        import pdb;pdb.set_trace()
+
+    '''WIP'''
+    def test_self_signed_cert(self):
+        url = "'https://self-signed.badssl.com/'"
+        query = "select curl('GET', " + url + ")"
+        curl = self.shell.execute_commands_inside(self.cbqpath, query, '', '', '', '', '')
+        actual_curl = self.convert_to_json(curl)
+        import pdb;pdb.set_trace()
+
+    '''WIP'''
+    def test_revoked_cert(self):
+        url = "'https://revoked.badssl.com/'"
+        query = "select curl('GET', " + url + ")"
+        curl = self.shell.execute_commands_inside(self.cbqpath, query, '', '', '', '', '')
+        actual_curl = self.convert_to_json(curl)
+        import pdb; pdb.set_trace()
 
 
 ##############################################################################################

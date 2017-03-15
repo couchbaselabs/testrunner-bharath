@@ -255,7 +255,8 @@ class BucketOperationHelper():
         return False
 
     @staticmethod
-    def wait_for_vbuckets_ready_state(node, bucket, timeout_in_seconds=300, log_msg=''):
+    def wait_for_vbuckets_ready_state(node, bucket, timeout_in_seconds=300, log_msg='', admin_user='cbadminbucket',
+                                      admin_pass='password'):
         log = logger.Logger.get_logger()
         start_time = time.time()
         end_time = start_time + timeout_in_seconds
@@ -279,8 +280,8 @@ class BucketOperationHelper():
                 client = MemcachedClient(ip, int(port), timeout=30)
                 client.vbucket_count = len(vbuckets)
                 bucket_info = rest.get_bucket(bucket)
-                client.sasl_auth_plain("temp",
-                                       "password")
+                client.sasl_auth_plain(admin_user,admin_pass)
+                bucket = bucket.encode('ascii')
                 client.bucket_select(bucket)
                 for i in server_dict[every_ip_port]:
                     try:

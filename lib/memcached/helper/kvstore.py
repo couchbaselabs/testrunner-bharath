@@ -1,8 +1,8 @@
-import threading
-import random
-import zlib
-import time
 import copy
+import random
+import threading
+import time
+import zlib
 
 
 class KVStore(object):
@@ -70,6 +70,37 @@ class KVStore(object):
             deleted_keys.extend(partition.deleted_key_set())
             self.cache[itr]["lock"].release()
         return valid_keys, deleted_keys
+
+    def get_partitions(self):
+        partitions = []
+        for itr in range(self.num_locks):
+            partitions.append({"itr": itr,
+                               "partition": self.cache[itr]["partition"]})
+        return partitions
+
+    def merge_partition(self, itr, partition):
+
+        # merge valid
+        for key in partition.valid_key_set():
+            new_ts = partition.get_timestamp(key)
+            curr_ts = 0
+            self_partition = self.cache[itr]["partition"]
+            curr_item = self_partition.get_key(key)
+            if curr_item is not None:
+                curr_ts = self_partition.get_timestamp(key)
+            if new_ts > curr_ts:
+                item = partition.get_key(key)
+                self.cache[itr]["partition"].set(
+                    key,
+                    item["value"],
+                    item["expires"],
+                    item["flag"])
+
+    def merge_all_partitions(self, partitions):
+        for partition in partitions:
+            self.merge_partition(
+                partition["itr"],
+                partition["partition"])
 
     def __len__(self):
         return sum([len(self.cache[itr]["partition"]) for itr in range(self.num_locks)])

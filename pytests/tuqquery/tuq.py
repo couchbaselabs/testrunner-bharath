@@ -76,6 +76,8 @@ class QueryTests(BaseTestCase):
         self.server = self.master
         self.cbas_node = self.input.cbas
         self.rest = RestConnection(self.server)
+        self.username=self.rest.username
+        self.password=self.rest.password
         #self.coverage = self.input.param("coverage",False)
         self.cover = self.input.param("cover", False)
         shell = RemoteMachineShellConnection(self.master)
@@ -471,6 +473,27 @@ class QueryTests(BaseTestCase):
             self.query = "SELECT count(*) AS cnt from %s " % (bucket.name) +\
                          "WHERE join_mo > 7 and join_day > 1"
             self.prepared_common_body()
+
+    def test_leak_goroutine(self):
+     shell = RemoteMachineShellConnection(self.master)
+     for i in xrange(20):
+         cmd = 'curl http://%s:6060/debug/pprof/goroutine?debug=2 | grep NewLexer' %(self.master.ip)
+         o =shell.execute_command(cmd)
+         new_curl = json.dumps(o)
+         string_curl = json.loads(new_curl)
+         self.assertTrue([u'', u"curl: (7) couldn't connect to host"]==string_curl[1])
+         self.assertTrue(len(string_curl)==2)
+         cmd = "curl http://%s:8093/query/service -d 'statement=select * from 1+2+3'"%(self.master.ip)
+         o =shell.execute_command(cmd)
+         new_curl = json.dumps(o)
+         string_curl = json.loads(new_curl)
+         self.assertTrue(len(string_curl)==2)
+         cmd = 'curl http://%s:6060/debug/pprof/goroutine?debug=2 | grep NewLexer'%(self.master.ip)
+         o =shell.execute_command(cmd)
+         new_curl = json.dumps(o)
+         string_curl = json.loads(new_curl)
+         self.assertTrue(len(string_curl)==2)
+
 
 
 
@@ -3994,6 +4017,10 @@ class QueryTests(BaseTestCase):
            if self.input.tuq_client and "client" in self.input.tuq_client:
                server = self.tuq_client
         cred_params = {'creds': []}
+        rest = RestConnection(server)
+        username = rest.username
+        password = rest.password
+        cred_params['creds'].append({'user': username, 'pass': password})
         for bucket in self.buckets:
             if bucket.saslPassword:
                 cred_params['creds'].append({'user': 'local:%s' % bucket.name, 'pass': bucket.saslPassword})
@@ -4028,14 +4055,16 @@ class QueryTests(BaseTestCase):
                 for bucket in self.buckets:
                     query = query.replace(bucket.name,bucket.name+"_shadow")
                 self.log.info('RUN QUERY %s' % query)
-                result = RestConnection(server).analytics_tool(query, 8095, query_params=query_params, is_prepared=is_prepared,
+                result = rest.analytics_tool(query, 8095, query_params=query_params, is_prepared=is_prepared,
                                                         named_prepare=self.named_prepare, encoded_plan=encoded_plan,
                                                         servers=self.servers)
 
             else :
-                result = RestConnection(server).query_tool(query, self.n1ql_port, query_params=query_params, is_prepared=is_prepared,
-                                                        named_prepare=self.named_prepare, encoded_plan=encoded_plan,
-                                                        servers=self.servers)
+                result = rest.query_tool(query, self.n1ql_port, query_params=query_params,
+                                                            is_prepared=is_prepared,
+                                                            named_prepare=self.named_prepare,
+                                                            encoded_plan=encoded_plan,
+                                                            servers=self.servers)
         else:
             #self._set_env_variable(server)
             if self.version == "git_repo":
@@ -4046,10 +4075,8 @@ class QueryTests(BaseTestCase):
                 if not(self.isprepared):
                     query = query.replace('"', '\\"')
                     query = query.replace('`', '\\`')
-                    if "system" in query:
-                        cmd =  "%s/cbq  -engine=http://%s:8091/ -q -u Administrator -p password" % (self.path,server.ip)
-                    else:
-                        cmd = "%s/cbq  -engine=http://%s:8091/ -q" % (self.path,server.ip)
+
+                    cmd =  "%scbq  -engine=http://%s:%s/ -q -u %s -p %s" % (self.path,server.ip,server.port,username,password)
 
                     output = self.shell.execute_commands_inside(cmd,query,"","","","","")
                     if not(output[0] == '{'):

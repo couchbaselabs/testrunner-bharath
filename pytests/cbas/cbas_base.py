@@ -46,6 +46,10 @@ class CBASBaseTest(BaseTestCase):
         self.mode = self.input.param('mode',None)
         self.num_concurrent_queries = self.input.param('num_queries',5000)
         self.concurrent_batch_size = self.input.param('concurrent_batch_size', 100)
+        self.compiler_param = self.input.param('compiler_param', None)
+        self.compiler_param_val = self.input.param('compiler_param_val', None)
+        self.expect_reject = self.input.param('expect_reject', False)
+        self.expect_failure = self.input.param('expect_failure', False)
 
         # Drop any existing buckets and datasets
         self.cleanup_cbas()
@@ -311,15 +315,15 @@ class CBASBaseTest(BaseTestCase):
         :param end_key: Doc Key to end the operation with
         :return:
         """
-        number = 100
-        first = ['james', 'sharon']
+        age = range(70)
+        first = ['james', 'sharon', 'dave', 'bill', 'mike', 'steve']
         template = '{{ "number": {0}, "first_name": "{1}" , "mutated":0}}'
-        gen_load = DocumentGenerator('test_docs', template, [number, ], first,
+        gen_load = DocumentGenerator('test_docs', template, age, first,
                                      start=start_key, end=end_key)
         self.log.info("%s %s documents..." % (operation, num_items))
         try:
             self._load_all_buckets(self.master, gen_load, operation, 0)
-            self._verify_stats_all_buckets([self.master])
+            self._verify_stats_all_buckets(self.input.servers)
         except Exception as e:
             self.log.info(e.message)
 
@@ -357,12 +361,12 @@ class CBASBaseTest(BaseTestCase):
         count, mutated_count = self.get_num_items_in_cbas_dataset(dataset_name)
         tries = 12
         if expected_mutated_count:
-            while (count < expected_count or mutated_count < expected_mutated_count) and tries > 0:
+            while (count != expected_count or mutated_count != expected_mutated_count) and tries > 0:
                 self.sleep(10)
                 count, mutated_count = self.get_num_items_in_cbas_dataset(dataset_name)
                 tries -= 1
         else :
-            while count < expected_count and tries > 0:
+            while count != expected_count and tries > 0:
                 self.sleep(10)
                 count, mutated_count = self.get_num_items_in_cbas_dataset(
                     dataset_name)
@@ -397,7 +401,7 @@ class CBASBaseTest(BaseTestCase):
         else:
             return None
 
-    def execute_statement_on_cbas_via_rest(self, statement, mode=None, rest=None, timeout=70):
+    def execute_statement_on_cbas_via_rest(self, statement, mode=None, rest=None, timeout=70, client_context_id=None):
         """
         Executes a statement on CBAS using the REST API using REST Client
         """
@@ -406,7 +410,7 @@ class CBASBaseTest(BaseTestCase):
             rest = RestConnection(self.master)
         try:
             response = rest.execute_statement_on_cbas(statement, mode, pretty,
-                                                      timeout)
+                                                      timeout, client_context_id)
             response = json.loads(response)
             if "errors" in response:
                 errors = response["errors"]
@@ -453,12 +457,21 @@ class CBASBaseTest(BaseTestCase):
             task.result()
             if not task.passed:
                 fail_count += 1
-                failed_queries.append(task.query_index + 1)
 
         if fail_count:
-            self.fail("%s out of %s queries failed! - %s" % (fail_count,
-                                                             num_queries,
-                                                             failed_queries))
+            self.fail("%s out of %s queries failed!" % (fail_count, num_queries))
         else:
             self.log.info("SUCCESS: %s out of %s queries passed"
                           % (num_queries - fail_count, num_queries))
+
+    def delete_request(self, client_context_id):
+        """
+        Deletes a request from CBAS
+        """
+        rest = RestConnection(self.master)
+        try:
+            status = rest.delete_active_request_on_cbas(client_context_id)
+            self.log.info (status)
+            return status
+        except Exception, e:
+            raise Exception(str(e))

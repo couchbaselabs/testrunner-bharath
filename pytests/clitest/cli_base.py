@@ -8,6 +8,7 @@ from membase.api.rest_client import RestConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
+from security.rbac_base import RbacBase
 from testconstants import LINUX_COUCHBASE_SAMPLE_PATH, \
     WIN_COUCHBASE_SAMPLE_PATH, \
     WIN_BACKUP_C_PATH, LINUX_BACKUP_PATH, LINUX_COUCHBASE_LOGS_PATH, \
@@ -27,6 +28,17 @@ class CliBaseTest(BaseTestCase):
         self.r = random.Random()
         self.vbucket_count = 1024
         self.cluster = Cluster()
+
+        """ Add built-in user cbadminbucket to second cluster """
+        self.log.info("add built-in user cbadminbucket to master cluster.")
+        testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+        RbacBase().create_user_source(testuser, 'builtin', self.master)
+        self.sleep(10)
+        """ Assign user to role """
+        role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+        RbacBase().add_user_role(role_list, RestConnection(self.master), 'builtin')
+        self.sleep(10)
+
         self.clusters_dic = self.input.clusters
         if self.clusters_dic:
             if len(self.clusters_dic) > 1:

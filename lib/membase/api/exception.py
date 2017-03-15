@@ -143,6 +143,7 @@ class AutoFailoverException(MembaseHttpException):
     def __init__(self, message):
         self._message = message
 
+
 class DesignDocCreationException(MembaseHttpException):
     def __init__(self, design_doc_name, reason=''):
         self._message = 'Error occured design document %s: %s' % (design_doc_name, reason)
