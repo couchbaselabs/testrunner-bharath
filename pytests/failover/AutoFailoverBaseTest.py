@@ -66,6 +66,13 @@ class AutoFailoverBaseTest(BaseTestCase):
                 a = "Group "
                 if rest.is_zone_exist(a + str(i + 1)):
                     rest.delete_zone(a + str(i + 1))
+        for node in self.servers:
+            master = node
+            try:
+                ClusterOperationHelper.cleanup_cluster(self.servers,
+                                                       master=master)
+            except:
+                continue
         master = self.orchestrator
         rest = RestConnection(master)
         cluster_status = rest.cluster_status()
@@ -94,6 +101,8 @@ class AutoFailoverBaseTest(BaseTestCase):
                 self.fail("{}".format(self.node_monitor_task._exception))
             self.node_monitor_task.stop = True
         self.task_manager.shutdown(force=True)
+        self.log.info("============Finished AutoFailoverBaseTest "
+                      "teardown============")
 
     def enable_autofailover(self):
         status = self.rest.update_autofailover_settings(True,
