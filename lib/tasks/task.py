@@ -28,7 +28,7 @@ from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from memcacheConstants import ERR_NOT_FOUND,NotFoundError
 from memcached.helper.data_helper import MemcachedClientHelper
-from remote.remote_util import RemoteMachineShellConnection
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
 from tasks.future import Future
 from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY
 
