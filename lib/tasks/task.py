@@ -4872,24 +4872,36 @@ class AutoFailoverNodesFailureTask(Task):
 
     def _check_for_autofailover_initiation(self, failed_over_node):
         rest = RestConnection(self.master)
-        ui_logs = rest.get_logs(5)
+        ui_logs = rest.get_logs(10)
         ui_logs_text = [t["text"] for t in ui_logs]
+        ui_logs_time = [t["serverTime"] for t in ui_logs]
         expected_log = "Starting failing over 'ns_1@{}'".format(
             failed_over_node.ip)
         if expected_log in ui_logs_text:
-            return True
-        return False
+            failed_over_time = ui_logs_time[ui_logs_text.index(expected_log)]
+            return True, failed_over_time
+        return False, None
 
     def _wait_for_autofailover_initiation(self, timeout):
         autofailover_initated = False
         while time.time() < timeout + self.start_time:
-            autofailover_initated = self._check_for_autofailover_initiation(
-                self.current_failure_node)
+            autofailover_initated, failed_over_time = \
+                self._check_for_autofailover_initiation(
+                    self.current_failure_node)
             if autofailover_initated:
-                end_time = time.time()
+                end_time = self._get_mktime_from_server_time(failed_over_time)
                 time_taken = end_time - self.start_time
                 return autofailover_initated, time_taken
         return autofailover_initated, -1
+
+    def _get_mktime_from_server_time(self, server_time):
+        self.log.info("Server Time : {}".format(server_time))
+        time_format = "%Y-%m-%dT%H:%M:%S"
+        server_time = server_time.split('.')[0]
+        mk_time = time.mktime(time.strptime(server_time, time_format))
+        self.log.info("MK_TIME {}".format(mk_time))
+        self.log.info("Server Time = {}".format(time.ctime(mk_time)))
+        return mk_time
 
     def _rebalance(self):
         rest = RestConnection(self.master)
@@ -4936,6 +4948,8 @@ class NodeDownTimerTask(Task):
                     self.start_time = time.time()
                     socket.socket().connect(("{}".format(self.node),
                                              int(self.port)))
+                    socket.socket().close()
+                    socket.socket().connect(("{}".format(self.node), 11210))
                     socket.socket().close()
                 except socket.error:
                     self.log.info("Injected failure in {}".format(self.node))

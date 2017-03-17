@@ -229,7 +229,7 @@ class AutoFailoverBaseTest(BaseTestCase):
     def stop_restart_network(self):
         node_down_timer_tasks = []
         for node in self.server_to_fail:
-            node_failure_timer_task = NodeDownTimerTask(node.ip, node.port)
+            node_failure_timer_task = NodeDownTimerTask(node.ip)
             node_down_timer_tasks.append(node_failure_timer_task)
         task = AutoFailoverNodesFailureTask(self.orchestrator,
                                             self.server_to_fail,
