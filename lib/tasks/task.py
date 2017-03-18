@@ -4946,6 +4946,8 @@ class NodeDownTimerTask(Task):
                     self.set_result(True)
                 try:
                     self.start_time = time.time()
+                    socket.socket().connect(("{}".format(self.node), 8091))
+                    socket.socket().close()
                     socket.socket().connect(("{}".format(self.node), 11210))
                     socket.socket().close()
                 except socket.error:
