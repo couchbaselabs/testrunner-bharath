@@ -4930,7 +4930,8 @@ class NodeDownTimerTask(Task):
             if not self.port:
                 try:
                     self.start_time = time.time()
-                    response = os.system("ping -c 1 {}".format(self.node))
+                    response = os.system("ping -c 1 {} > /dev/null".format(
+                        self.node))
                     if response == 0:
                         continue
                     else:
@@ -4938,9 +4939,17 @@ class NodeDownTimerTask(Task):
                             self.node))
                         self.state = FINISHED
                         self.set_result(True)
-                except Exception, e:
+                except Exception as e:
                     self.log.warning("Unexpected exception caught {"
                                      "}".format(e))
+                    self.state = FINISHED
+                    self.set_result(True)
+                try:
+                    self.start_time = time.time()
+                    socket.socket().connect(("{}".format(self.node), 11210))
+                    socket.socket().close()
+                except socket.error:
+                    self.log.info("Injected failure in {}".format(self.node))
                     self.state = FINISHED
                     self.set_result(True)
             else:
