@@ -4932,18 +4932,18 @@ class NodeDownTimerTask(Task):
                     self.start_time = time.time()
                     response = os.system("ping -c 1 {} > /dev/null".format(
                         self.node))
-                    if response == 0:
-                        continue
-                    else:
-                        self.log.info("Injected failure in {}".format(
-                            self.node))
+                    if response != 0:
+                        self.log.info("Injected failure in {}. Caught "
+                                      "due to ping".format(self.node))
                         self.state = FINISHED
                         self.set_result(True)
+                        break
                 except Exception as e:
                     self.log.warning("Unexpected exception caught {"
                                      "}".format(e))
                     self.state = FINISHED
                     self.set_result(True)
+                    break
                 try:
                     self.start_time = time.time()
                     socket.socket().connect(("{}".format(self.node), 8091))
@@ -4951,9 +4951,11 @@ class NodeDownTimerTask(Task):
                     socket.socket().connect(("{}".format(self.node), 11210))
                     socket.socket().close()
                 except socket.error:
-                    self.log.info("Injected failure in {}".format(self.node))
+                    self.log.info("Injected failure in {}. Caught due "
+                                  "to ports".format(self.node))
                     self.state = FINISHED
                     self.set_result(True)
+                    break
             else:
                 try:
                     self.start_time = time.time()
@@ -4966,6 +4968,7 @@ class NodeDownTimerTask(Task):
                     self.log.info("Injected failure in {}".format(self.node))
                     self.state = FINISHED
                     self.set_result(True)
+                    break
 
     def check(self, task_manager):
         pass
