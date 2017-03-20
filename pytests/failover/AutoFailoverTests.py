@@ -48,6 +48,8 @@ class AutoFailoverTests(AutoFailoverBaseTest):
             pass
         except ServerUnavailableException:
             pass
+        except:
+            pass
         else:
             self.fail("Rebalance should fail since a node went down")
         self.disable_autofailover_and_validate()
