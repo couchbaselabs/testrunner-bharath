@@ -116,6 +116,7 @@ class AutoFailoverBaseTest(BaseTestCase):
     def enable_autofailover_and_validate(self):
         status = self.enable_autofailover()
         self.assertTrue(status, "Failed to enable autofailover_settings!")
+        self.sleep(5)
         settings = self.rest.get_autofailover_settings()
         self.assertTrue(settings.enabled, "Failed to enable "
                                           "autofailover_settings!")
@@ -127,6 +128,7 @@ class AutoFailoverBaseTest(BaseTestCase):
     def disable_autofailover_and_validate(self):
         status = self.disable_autofailover()
         self.assertTrue(status, "Failed to change autofailover_settings!")
+        self.sleep(5)
         settings = self.rest.get_autofailover_settings()
         self.assertFalse(settings.enabled, "Failed to disable "
                                            "autofailover_settings!")
