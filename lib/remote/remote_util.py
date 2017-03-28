@@ -302,8 +302,8 @@ class RemoteMachineShellConnection:
             if self.info.distribution_type.lower() == "ubuntu":
                 command = "ifdown -a && sleep {} && ifup -a"
             else:
-                command = "service network stop && sleep {} && service network " \
-                          "start"
+                command = "nohup service network stop && sleep {} && service network " \
+                          "start &"
             output, error = self.execute_command(command.format(stop_time))
             self.log_command_output(output, error)
         elif os_type == "windows":

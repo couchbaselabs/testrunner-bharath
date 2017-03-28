@@ -4696,6 +4696,13 @@ class AutoFailoverNodesFailureTask(Task):
             return
         rest = RestConnection(self.master)
         max_timeout = self.timeout + self.timeout_buffer
+        if self.start_time == 0:
+            message = "Did not inject failure in the system."
+            rest.print_UI_logs(10)
+            self.log.error(message)
+            self.state = FINISHED
+            self.set_result(False)
+            self.set_exception(AutoFailoverException(message))
         autofailover_initiated, time_taken = \
             self._wait_for_autofailover_initiation(
                 self.max_time_to_wait_for_failover)
@@ -4915,7 +4922,7 @@ class AutoFailoverNodesFailureTask(Task):
 
 
 class NodeDownTimerTask(Task):
-    def __init__(self, node, port=None, timeout=60):
+    def __init__(self, node, port=None, timeout=300):
         Task.__init__(self, "NodeDownTimerTask")
         self.log.info("Initializing NodeDownTimerTask")
         self.node = node
@@ -4969,6 +4976,10 @@ class NodeDownTimerTask(Task):
                     self.state = FINISHED
                     self.set_result(True)
                     break
+        if time.time() >= end_task:
+            self.state = FINISHED
+            self.set_result(False)
+            self.log.info("Could not inject failure in {}".format(self.node))
 
     def check(self, task_manager):
         pass
