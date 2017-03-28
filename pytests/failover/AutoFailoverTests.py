@@ -113,6 +113,10 @@ class AutoFailoverTests(AutoFailoverBaseTest):
         3. Addback node and validate that the addback was successful.
         :return: Nothing
         """
+        if not self.failover_expected:
+            self.log.info("Since no failover is expected in the test, "
+                          "skipping the test")
+            return
         self.enable_autofailover_and_validate()
         self.sleep(5)
         self.failover_actions[self.failover_action](self)
