@@ -58,6 +58,9 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.start_couchbase_server()
         self.sleep(10)
         self.disable_firewall()
+        self.rest = RestConnection(self.orchestrator)
+        self.rest.reset_autofailover()
+        self.disable_autofailover()
         super(AutoFailoverBaseTest, self).tearDown()
         """ Delete the new zones created if zone > 1. """
         if self.input.param("zone", 1) > 1:
