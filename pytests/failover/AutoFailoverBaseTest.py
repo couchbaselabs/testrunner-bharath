@@ -303,6 +303,14 @@ class AutoFailoverBaseTest(BaseTestCase):
             task.result()
         except Exception, e:
             self.fail("Exception: {}".format(e))
+        finally:
+            task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                                self.server_to_fail,
+                                                "start_memcached",
+                                                self.timeout, 0, False, 0,
+                                                check_for_failover=False)
+            self.task_manager.schedule(task)
+            task.result()
 
     def split_network(self):
         if self.server_to_fail.__len__() < 2:

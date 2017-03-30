@@ -4709,23 +4709,11 @@ class AutoFailoverNodesFailureTask(Task):
         if self.expect_auto_failover:
             if autofailover_initiated:
                 if time_taken < max_timeout + 1:
-                    if time_taken > self.timeout - 2:
-                        self.log.info("Autofailover of node {0} successfully "
-                                      "initiated in {1} sec".format(
-                            self.current_failure_node.ip, time_taken))
-                        rest.print_UI_logs(10)
-                        self.state = EXECUTING
-                    else:
-                        message = "Autofailover of node {0} was initiated " \
-                                  "before the failover timeout. Expected " \
-                                  "timeout: {1} Actual time: {2}".format(
-                            self.current_failure_node.ip, self.timeout,
-                            time_taken)
-                        rest.print_UI_logs(10)
-                        self.log.error(message)
-                        self.state = FINISHED
-                        self.set_result(False)
-                        self.set_exception(AutoFailoverException(message))
+                    self.log.info("Autofailover of node {0} successfully "
+                                  "initiated in {1} sec".format(
+                        self.current_failure_node.ip, time_taken))
+                    rest.print_UI_logs(10)
+                    self.state = EXECUTING
                 else:
                     message = "Autofailover of node {0} was initiated after " \
                               "the timeout period. Expected  timeout: {1} " \
@@ -4794,6 +4782,8 @@ class AutoFailoverNodesFailureTask(Task):
             self._restart_machine(self.current_failure_node)
         elif self.failure_type == "stop_memcached":
             self._stop_memcached(self.current_failure_node)
+        elif self.failure_type == "start_memcached":
+            self._start_memcached(self.current_failure_node)
         elif self.failure_type == "network_split":
             self._block_incoming_network_from_node(self.servers_to_fail[0],
                                                    self.servers_to_fail[
@@ -4864,10 +4854,16 @@ class AutoFailoverNodesFailureTask(Task):
         node_failure_timer = self.failure_timers[self.itr]
         time.sleep(1)
         shell = RemoteMachineShellConnection(node)
-        o, r = shell.kill_memcached()
+        o, r = shell.stop_memcached()
         self.log.info("Killed memcached. {0} {1}".format(o, r))
         node_failure_timer.result()
         self.start_time = node_failure_timer.start_time
+
+    def _start_memcached(self, node):
+        shell = RemoteMachineShellConnection(node)
+        o, r = shell.start_memcached()
+        self.log.info("Started back memcached. {0} {1}".format(o, r))
+        shell.disconnect()
 
     def _block_incoming_network_from_node(self, node1, node2):
         shell = RemoteMachineShellConnection(node1)

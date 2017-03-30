@@ -472,6 +472,26 @@ class RemoteMachineShellConnection:
             self.log_command_output(o, r)
         return o, r
 
+    def stop_memcached(self):
+        self.extract_remote_info()
+        if self.info.type.lower() == 'windows':
+            o, r = self.execute_command("taskkill /F /T /IM memcached*")
+            self.log_command_output(o, r)
+        else:
+            o, r = self.execute_command("kill -SIGSTOP $(pgrep memcached)")
+            self.log_command_output(o, r)
+        return o, r
+
+    def start_memcached(self):
+        self.extract_remote_info()
+        if self.info.type.lower() == 'windows':
+            o, r = self.execute_command("taskkill /F /T /IM memcached*")
+            self.log_command_output(o, r)
+        else:
+            o, r = self.execute_command("kill -SIGCONT $(pgrep memcached)")
+            self.log_command_output(o, r)
+        return o, r
+
     def kill_goxdcr(self):
         self.extract_remote_info()
         if self.info.type.lower() == 'windows':
