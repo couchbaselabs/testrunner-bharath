@@ -215,16 +215,14 @@ class CBASBaseTest(BaseTestCase):
         Retrieves result from the /analytics/results endpoint
         """
         shell = RemoteMachineShellConnection(server)
-        requestURI = "{{\"handle\":{0}}}".format(str(handle))
-        requestURI = urllib.quote(requestURI)
-        requestURI = "http://{0}:8095/analytics/result?handle=".format(self.cbas_node.ip) + requestURI
 
-        output, error = shell.execute_command("""curl -v {0}""".format(requestURI))
+        output, error = shell.execute_command("""curl -v {0}""".format(handle))
 
         response = ""
         for line in output:
             response = response + line
-        response = json.loads(response)
+        if response:
+            response = json.loads(response)
         shell.disconnect()
 
         return response
@@ -234,24 +232,26 @@ class CBASBaseTest(BaseTestCase):
         Retrieves status of a request from /analytics/status endpoint
         """
         shell = RemoteMachineShellConnection(server)
-        requestURI = "{{\"handle\":{0}}}".format(str(handle))
-        requestURI = urllib.quote(requestURI)
-        requestURI = "http://{0}:8095/analytics/status?handle=".format(
-            self.cbas_node.ip) + requestURI
 
         output, error = shell.execute_command(
-            """curl -v {0}""".format(requestURI))
+            """curl -v {0}""".format(handle))
 
         response = ""
         for line in output:
             response = response + line
-        response = json.loads(response)
+        if response:
+            response = json.loads(response)
         shell.disconnect()
 
-        if response['status']:
-            return response['status']
-        else:
-            return None
+        status = ""
+        handle = ""
+        if 'status' in response:
+            status = response['status']
+        if 'handle' in response:
+            handle = response['handle']
+
+        self.log.info("status=%s, handle=%s"%(status,handle))
+        return status, handle
 
     def validate_error_in_response(self, status, errors):
         """
@@ -270,7 +270,6 @@ class CBASBaseTest(BaseTestCase):
         """
         try:
             # Disconnect from all connected buckets
-            #cmd_get_buckets = "select BucketName from Metadata.`Bucket`;"
             cmd_get_buckets = "select Name from Metadata.`Bucket`;"
             status, metrics, errors, results, _ = self.execute_statement_on_cbas_via_rest(
                 cmd_get_buckets)

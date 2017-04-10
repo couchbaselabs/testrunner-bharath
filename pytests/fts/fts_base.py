@@ -2,30 +2,34 @@
 Base class for FTS/CBFT/Couchbase Full Text Search
 """
 
+import unittest
+import time
 import copy
+import logger
 import logging
 import re
-import time
-import unittest
+import json
 
-import logger
-from TestInput import TestInputSingleton
 from couchbase_helper.cluster import Cluster
-from couchbase_helper.documentgenerator import *
-from couchbase_helper.documentgenerator import JsonDocGenerator
-from couchbase_helper.stats_tools import StatsCommon
-from es_base import ElasticSearchBase
-from lib.membase.api.exception import FTSException
-from membase.api.exception import ServerUnavailableException
 from membase.api.rest_client import RestConnection, Bucket
-from membase.helper.bucket_helper import BucketOperationHelper
-from membase.helper.cluster_helper import ClusterOperationHelper
-from memcached.helper.data_helper import MemcachedClientHelper
+from membase.api.exception import ServerUnavailableException
 from remote.remote_util import RemoteMachineShellConnection
 from remote.remote_util import RemoteUtilHelper
+from testconstants import STANDARD_BUCKET_PORT,LINUX_COUCHBASE_BIN_PATH, WIN_COUCHBASE_BIN_PATH, \
+    MAC_COUCHBASE_BIN_PATH
+from membase.helper.cluster_helper import ClusterOperationHelper
+from couchbase_helper.stats_tools import StatsCommon
+from membase.helper.bucket_helper import BucketOperationHelper
+from memcached.helper.data_helper import MemcachedClientHelper
+from TestInput import TestInputSingleton
 from scripts.collect_server_info import cbcollectRunner
+from couchbase_helper.documentgenerator import *
+
+from couchbase_helper.documentgenerator import JsonDocGenerator
+from lib.membase.api.exception import FTSException
+from es_base import ElasticSearchBase
 from security.rbac_base import RbacBase
-from testconstants import STANDARD_BUCKET_PORT,LINUX_COUCHBASE_BIN_PATH
+
 
 
 class RenameNodeException(FTSException):
@@ -210,7 +214,7 @@ class NodeHelper:
         shell.disconnect()
 
     @staticmethod
-    def reboot_server(server, test_case, wait_timeout=60):
+    def reboot_server(server, test_case, wait_timeout=120):
         """Reboot a server and wait for couchbase server to run.
         @param server: server object, which needs to be rebooted.
         @param test_case: test case object, since it has assert() function
@@ -610,8 +614,6 @@ class FTSIndex:
             custom_analyzer_def = cm_gen.build_custom_analyzer()
             self.index_definition["params"]["mapping"]["analysis"] = \
                                                     custom_analyzer_def
-            self.index_definition['params']['mapping']['default_analyzer'] = \
-                cm_gen.get_random_value(custom_analyzer_def["analyzers"].keys())
         self.__log.info(json.dumps(self.index_definition["params"],
                                    indent=3))
 
@@ -648,8 +650,6 @@ class FTSIndex:
                     custom_analyzer_def = cm_gen.build_custom_analyzer()
                     self.index_definition["params"]["mapping"]["analysis"] = \
                         custom_analyzer_def
-                    self.index_definition['params']['mapping']['default_analyzer'] = \
-                        cm_gen.get_random_value(custom_analyzer_def["analyzers"].keys())
 
     def build_custom_index_params(self, index_params):
         if self.index_type == "fulltext-index":
@@ -868,6 +868,7 @@ class FTSIndex:
             self.name,
             rest.ip))
         rest.create_fts_index(self.name, self.index_definition)
+        self.__cluster.get_indexes().append(self)
 
     def update(self, rest=None):
         if not rest:
@@ -943,8 +944,6 @@ class FTSIndex:
             query_json['from'] = int(show_results_from_item)
         if timeout is not None:
             query_json['ctl']['timeout'] = int(timeout)
-        else:
-            del query_json['ctl']['timeout']
         if fields:
             query_json['fields'] = fields
         if facets:
@@ -1694,7 +1693,6 @@ class CouchbaseCluster:
     def cleanup_cluster(
             self,
             test_case,
-            from_rest=False,
             cluster_shutdown=True):
         """Cleanup cluster.
         1. Remove all remote cluster references.
@@ -1732,6 +1730,12 @@ class CouchbaseCluster:
         finally:
             if cluster_shutdown:
                 self.__clusterop.shutdown(force=True)
+        try:
+            self.__log.info("Removing user 'cbadminbucket'...")
+            RbacBase().remove_user_role(['cbadminbucket'], RestConnection(
+                self.__master_node))
+        except Exception as e:
+            self.__log.info(e)
 
     def _create_bucket_params(self, server, replicas=1, size=0, port=11211, password=None,
                              bucket_type='membase', enable_replica_index=1, eviction_policy='valueOnly',
@@ -1920,7 +1924,6 @@ class CouchbaseCluster:
             source_uuid
         )
         index.create()
-        self.__indexes.append(index)
         return index
 
     def get_fts_index_by_name(self, name):
@@ -2881,9 +2884,6 @@ class FTSBaseTest(unittest.TestCase):
                 "====  FTSbasetests cleanup is finished for test #{0} {1} ==="
                     .format(self.__case_number, self._testMethodName))
         finally:
-            # Remove rbac user in teardown
-            role_del = ['cbadminbucket']
-            temp = RbacBase().remove_user_role(role_del, RestConnection(self._input.servers[0]))
             self.__cluster_op.shutdown(force=True)
             unittest.TestCase.tearDown(self)
 
@@ -3356,44 +3356,44 @@ class FTSBaseTest(unittest.TestCase):
         """
         Wait for index_count for any index to stabilize
         """
-        index_doc_count = 0
         retry = self._input.param("index_retry", 20)
-        start_time = time.time()
         for index in self._cb_cluster.get_indexes():
             if index.index_type == "alias":
                 continue
             retry_count = retry
             prev_count = 0
             while retry_count > 0:
-                index_doc_count = index.get_indexed_doc_count()
-                bucket_doc_count = index.get_src_bucket_doc_count()
-                if not self.compare_es:
-                    self.log.info("Docs in bucket = %s, docs in FTS index '%s': %s"
-                                  % (bucket_doc_count,
-                                     index.name,
-                                     index_doc_count))
-                else:
-                    self.es.update_index('es_index')
-                    self.log.info("Docs in bucket = %s, docs in FTS index '%s':"
-                                  " %s, docs in ES index: %s "
-                                  % (bucket_doc_count,
-                                     index.name,
-                                     index_doc_count,
-                                     self.es.get_index_count('es_index')))
-                if item_count and index_doc_count > item_count:
-                    break
+                try:
+                    index_doc_count = index.get_indexed_doc_count()
+                    bucket_doc_count = index.get_src_bucket_doc_count()
+                    if not self.compare_es:
+                        self.log.info("Docs in bucket = %s, docs in FTS index '%s': %s"
+                                      % (bucket_doc_count,
+                                         index.name,
+                                         index_doc_count))
+                    else:
+                        self.es.update_index('es_index')
+                        self.log.info("Docs in bucket = %s, docs in FTS index '%s':"
+                                      " %s, docs in ES index: %s "
+                                      % (bucket_doc_count,
+                                         index.name,
+                                         index_doc_count,
+                                         self.es.get_index_count('es_index')))
+                    if item_count and index_doc_count > item_count:
+                        break
 
-                if bucket_doc_count == index_doc_count:
-                    break
+                    if bucket_doc_count == index_doc_count:
+                        break
 
-                if prev_count < index_doc_count or prev_count > index_doc_count:
-                    prev_count = index_doc_count
-                    retry_count = retry
-                else:
+                    if prev_count < index_doc_count or prev_count > index_doc_count:
+                        prev_count = index_doc_count
+                        retry_count = retry
+                    else:
+                        retry_count -= 1
+                except Exception as e:
+                    self.log.info(e)
                     retry_count -= 1
                 time.sleep(6)
-        self.log.info("FTS indexed %s docs in %s mins"
-                      % (index_doc_count, round(float((time.time() - start_time) / 60), 2)))
 
     def construct_plan_params(self):
         plan_params = {}
@@ -3581,7 +3581,6 @@ class FTSBaseTest(unittest.TestCase):
             alias_def = {"targets": {}}
             for index in target_indexes:
                 alias_def['targets'][index.name] = {}
-                alias_def['targets'][index.name]['indexUUID'] = index.get_uuid()
 
         return self._cb_cluster.create_fts_index(name=name,
                                                  index_type='fulltext-alias',

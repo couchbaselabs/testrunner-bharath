@@ -1,16 +1,14 @@
-import datetime
-import time
-import unittest
 from threading import Thread
-
-import logger
+import unittest
+import time
 from TestInput import TestInputSingleton
+import logger
+import datetime
 from membase.api.rest_client import RestConnection, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
 from memcached.helper.data_helper import MemcachedClientHelper
 from security.rbac_base import RbacBase
-
 
 class DrainRateTests(unittest.TestCase):
     def setUp(self):

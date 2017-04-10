@@ -1,46 +1,53 @@
-import copy
-import logging
 import os
 import re
-import stat
 import sys
-import time
+import copy
 import urllib
 import uuid
+import time
+import logging
+import stat
+import TestInput
 from subprocess import Popen, PIPE
 
-import TestInput
 import logger
-import testconstants
 from builds.build_query import BuildQuery
-from membase.api.rest_client import RestConnection, RestHelper
-from testconstants import CB_RELEASE_APT_GET_REPO
-from testconstants import CB_RELEASE_YUM_REPO
-from testconstants import CB_REPO
-from testconstants import CB_VERSION_NAME
-from testconstants import COUCHBASE_FROM_VERSION_3,\
-                          COUCHBASE_FROM_SPOCK
-from testconstants import COUCHBASE_FROM_VERSION_4, COUCHBASE_FROM_WATSON
-from testconstants import COUCHBASE_RELEASE_VERSIONS_3
-from testconstants import COUCHBASE_VERSIONS
-from testconstants import COUCHBASE_VERSION_2
-from testconstants import COUCHBASE_VERSION_3
-from testconstants import LINUX_DISTRIBUTION_NAME, LINUX_CB_PATH, \
-                          LINUX_COUCHBASE_BIN_PATH
-from testconstants import MAC_CB_PATH
+import testconstants
+from testconstants import VERSION_FILE
+from testconstants import WIN_REGISTER_ID
 from testconstants import MEMBASE_VERSIONS
+from testconstants import COUCHBASE_VERSIONS
 from testconstants import MISSING_UBUNTU_LIB
 from testconstants import MV_LATESTBUILD_REPO
-from testconstants import NR_INSTALL_LOCATION_FILE
-from testconstants import RPM_DIS_NAME
 from testconstants import SHERLOCK_BUILD_REPO
-from testconstants import VERSION_FILE
+from testconstants import COUCHBASE_VERSIONS
+from testconstants import WIN_CB_VERSION_3
+from testconstants import COUCHBASE_VERSION_2
+from testconstants import COUCHBASE_VERSION_3
+from testconstants import COUCHBASE_FROM_VERSION_3,\
+                          COUCHBASE_FROM_SPOCK
+from testconstants import COUCHBASE_RELEASE_VERSIONS_3
+from testconstants import SHERLOCK_VERSION, WIN_PROCESSES_KILLED
+from testconstants import COUCHBASE_FROM_VERSION_4, COUCHBASE_FROM_WATSON
+from testconstants import RPM_DIS_NAME
+from testconstants import LINUX_DISTRIBUTION_NAME, LINUX_CB_PATH, \
+                          LINUX_COUCHBASE_BIN_PATH
 from testconstants import WIN_COUCHBASE_BIN_PATH,\
                           WIN_CB_PATH
 from testconstants import WIN_COUCHBASE_BIN_PATH_RAW
-from testconstants import WIN_PROCESSES_KILLED
-from testconstants import WIN_REGISTER_ID
 from testconstants import WIN_TMP_PATH
+
+from testconstants import MAC_CB_PATH
+
+from testconstants import CB_VERSION_NAME
+from testconstants import CB_REPO
+from testconstants import CB_RELEASE_APT_GET_REPO
+from testconstants import CB_RELEASE_YUM_REPO
+
+from testconstants import LINUX_NONROOT_CB_BIN_PATH,\
+                          NR_INSTALL_LOCATION_FILE
+
+from membase.api.rest_client import RestConnection, RestHelper
 
 log = logger.Logger.get_logger()
 logging.getLogger("paramiko").setLevel(logging.WARNING)
@@ -287,6 +294,29 @@ class RemoteMachineShellConnection:
             for line in output:
                 if not 'grep' in line.strip().split(' '):
                     return float(line.strip().split(' ')[0])
+
+    def stop_network(self, stop_time):
+        """
+        Stop the network for given time period and then restart the network
+        on the machine.
+        :param stop_time: Time duration for which the network service needs
+        to be down in the machine
+        :return: Nothing
+        """
+        self.extract_remote_info()
+        os_type = self.info.type.lower()
+        if os_type == "unix" or os_type == "linux":
+            if self.info.distribution_type.lower() == "ubuntu":
+                command = "ifdown -a && sleep {} && ifup -a"
+            else:
+                command = "service network stop && sleep {} && service network " \
+                          "start"
+            output, error = self.execute_command(command.format(stop_time))
+            self.log_command_output(output, error)
+        elif os_type == "windows":
+            command = "net stop Netman && timeout {} && net start Netman"
+            output, error = self.execute_command(command.format(stop_time))
+            self.log_command_output(output, error)
 
     def stop_network(self, stop_time):
         """
@@ -1552,7 +1582,7 @@ class RemoteMachineShellConnection:
             if fts_query_limit:
                 self.set_environment_variable(
                     name="CBFT_ENV_OPTIONS",
-                    value="bleveMaxResultWindow={0},ftsMossDebug=1".format(int(fts_query_limit))
+                    value="bleveMaxResultWindow={0}".format(int(fts_query_limit))
                 )
 
             output, error = self.execute_command("rm -f \
@@ -1649,12 +1679,16 @@ class RemoteMachineShellConnection:
                 success &= self.log_command_output(output, error, track_words)
 
             if vbuckets:
-                output, error = self.execute_command("sed -i 's/ulimit "
-                                                     "-c unlimited/ulimit "
-                                                     "-c unlimited\\n    export "
-                                 "{0}_NUM_VBUCKETS={1}/' {3}opt/{2}/etc/{2}_init.d".
-                                 format(server_type.upper(), vbuckets, server_type,
-                                        nonroot_path_start))
+                """
+                   From spock, the file to edit is in /opt/couchbase/bin/couchbase-server
+                """
+                output, error = self.execute_command("sed -i 's/export ERL_FULLSWEEP_AFTER/"
+                                                     "export ERL_FULLSWEEP_AFTER\\n"
+                                                     "{0}_NUM_VBUCKETS={1}\\n"
+                                                     "export {0}_NUM_VBUCKETS/' "
+                                                     "{3}opt/{2}/bin/{2}-server".
+                                                     format(server_type.upper(), vbuckets,
+                                                            server_type, nonroot_path_start))
                 success &= self.log_command_output(output, error, track_words)
             if upr is not None:
                 protocol = "tap"
@@ -1677,7 +1711,7 @@ class RemoteMachineShellConnection:
             if fts_query_limit:
                 output, error = \
                     self.execute_command("sed -i 's/export PATH/export PATH\\n"
-                            "export CBFT_ENV_OPTIONS=bleveMaxResultWindow={1},ftsMossDebug=1,logStatsEvery=30,hideUI=false/'\
+                            "export CBFT_ENV_OPTIONS=bleveMaxResultWindow={1},hideUI=false/'\
                             {2}opt/{0}/bin/{0}-server".format(server_type, int(fts_query_limit),
                                                               nonroot_path_start))
                 success &= self.log_command_output(output, error, track_words)

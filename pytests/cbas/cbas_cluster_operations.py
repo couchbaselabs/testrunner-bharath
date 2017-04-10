@@ -1,4 +1,6 @@
 from cbas_base import *
+from lib.memcached.helper.data_helper import MemcachedClientHelper
+from lib.remote.remote_util import RemoteMachineShellConnection
 
 
 class CBASClusterOperations(CBASBaseTest):
@@ -58,7 +60,7 @@ class CBASClusterOperations(CBASBaseTest):
         query = "select count(*) from {0};".format(self.cbas_dataset_name)
 
         self.setup_for_test()
-        self._cb_cluster.async_rebalance([self.master], [], [self.master])
+        self._cb_cluster.async_rebalance([self.master], [], [self.input.servers[1]])
 
         self.perform_doc_ops_in_all_cb_buckets(self.num_items, "create",
                                                self.num_items,

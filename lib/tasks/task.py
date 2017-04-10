@@ -1,36 +1,36 @@
-import copy
-import json
-import math
 import os
+import time
+import logger
 import random
-import re
 import socket
 import string
-import time
-import traceback
-from httplib import IncompleteRead
-from multiprocessing import Process, Manager, Semaphore
-from threading import Thread
-
+import copy
+import json
+import re
+import math
 import crc32
-import logger
+import traceback
 import testconstants
-from TestInput import TestInputServer
-from couchbase_helper.document import DesignDocument
-from couchbase_helper.documentgenerator import BatchedDocumentGenerator
-from couchbase_helper.stats_tools import StatsCommon
-from mc_bin_client import MemcachedError
+from httplib import IncompleteRead
+from threading import Thread
+from memcacheConstants import ERR_NOT_FOUND,NotFoundError
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.api.exception import BucketCreationException
+from membase.helper.bucket_helper import BucketOperationHelper
+from memcached.helper.data_helper import KVStoreAwareSmartClient, MemcachedClientHelper
+from memcached.helper.kvstore import KVStore
+from couchbase_helper.document import DesignDocument, View
+from mc_bin_client import MemcachedError
+from tasks.future import Future
+from couchbase_helper.stats_tools import StatsCommon
 from membase.api.exception import N1QLQueryException, DropIndexException, CreateIndexException, DesignDocCreationException, QueryViewException, ReadDocumentException, RebalanceFailedException, \
                                     GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, FailoverFailedException, \
-                                    ServerUnavailableException,BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException,AutoFailoverException
-from membase.api.rest_client import RestConnection, Bucket, RestHelper
-from membase.helper.bucket_helper import BucketOperationHelper
-from memcacheConstants import ERR_NOT_FOUND,NotFoundError
-from memcached.helper.data_helper import MemcachedClientHelper
-from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
-from tasks.future import Future
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY
+                                    ServerUnavailableException, BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException
+from remote.remote_util import RemoteMachineShellConnection
+from couchbase_helper.documentgenerator import BatchedDocumentGenerator
+from TestInput import TestInputServer
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY, ALLOW_HTP
+from multiprocessing import Process, Manager, Semaphore
 
 try:
     CHECK_FLAG = False
@@ -84,6 +84,11 @@ class Task(Future):
     def check(self, task_manager):
         raise NotImplementedError
 
+    def set_unexpected_exception(self, e, suffix = ""):
+        self.log.error("Unexpected exception [{0}] caught".format(e) + suffix)
+        self.log.error(''.join(traceback.format_stack()))
+        self.set_exception(e)
+
 class NodeInitializeTask(Task):
     def __init__(self, server, disabled_consistent_view=None,
                  rebalanceIndexWaitingDisabled=None,
@@ -92,8 +97,7 @@ class NodeInitializeTask(Task):
                  maxParallelReplicaIndexers=None,
                  port=None, quota_percent=None,
                  index_quota_percent=None,
-                 services = None, gsi_type='forestdb',
-                 is_container = False):
+                 services = None, gsi_type='forestdb'):
         Task.__init__(self, "node_init_task")
         self.server = server
         self.port = port or server.port
@@ -108,7 +112,6 @@ class NodeInitializeTask(Task):
         self.maxParallelReplicaIndexers = maxParallelReplicaIndexers
         self.services = services
         self.gsi_type = gsi_type
-        self.is_container = is_container
 
     def execute(self, task_manager):
         try:
@@ -128,11 +131,6 @@ class NodeInitializeTask(Task):
             self.state = FINISHED
             self.set_result(True)
             return
-
-        if self.is_container:
-           # the storage total values are more accurate than
-           # mcdMemoryReserved - which is container host memory
-           info.mcdMemoryReserved = info.storageTotalRam
 
         self.quota = int(info.mcdMemoryReserved * 2/3)
         if self.index_quota_percent:
@@ -295,8 +293,7 @@ class BucketCreateTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -345,10 +342,8 @@ class BucketDeleteTask(Task):
 
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
             self.log.info(StatsCommon.get_stats([self.server], self.bucket, "timings"))
-            self.set_exception(e)
-
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -361,9 +356,8 @@ class BucketDeleteTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
             self.log.info(StatsCommon.get_stats([self.server], self.bucket, "timings"))
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class RebalanceTask(Task):
     def __init__(self, servers, to_add=[], to_remove=[], do_stop=False, progress=30,
@@ -503,9 +497,7 @@ class RebalanceTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught in {0} sec".
-                          format(time.time() - self.start_time))
-            self.set_exception(e)
+            self.set_unexpected_exception(e, " in {0} sec".format(time.time() - self.start_time))
         retry_get_process_num = 25
         if self.rest.is_cluster_mixed():
             """ for mix cluster, rebalance takes longer """
@@ -705,7 +697,7 @@ class GenericLoadingTask(Thread, Task):
     def next(self):
         raise NotImplementedError
 
-    def _unlocked_create(self, partition, key, value, is_base64_value=False, shared_client = None):
+    def _unlocked_create(self, partition, key, value, is_base64_value=False):
         try:
             value_json = json.loads(value)
             if isinstance(value_json, dict):
@@ -719,14 +711,14 @@ class GenericLoadingTask(Thread, Task):
             value = json.dumps(value)
 
         try:
-            client = shared_client or self.client
-            client.set(key, self.exp, self.flag, value)
+            self.client.set(key, self.exp, self.flag, value)
             if self.only_store_hash:
                 value = str(crc32.crc32_hash(value))
             partition.set(key, value, self.exp, self.flag)
         except Exception as error:
             self.state = FINISHED
             self.set_exception(error)
+
 
     def _unlocked_read(self, partition, key):
         try:
@@ -833,17 +825,27 @@ class GenericLoadingTask(Thread, Task):
             self.state = FINISHED
             self.set_exception(error)
 
+
     # start of batch methods
-    def _create_batch(self, partition_keys_dic, key_val, shared_client = None):
+    def _create_batch_client(self, key_val, shared_client = None):
+        """
+        standalone method for creating key/values in batch (sans kvstore)
+
+        arguments:
+            key_val -- array of key/value dicts to load size = self.batch_size
+            shared_client -- optional client to use for data loading
+        """
         try:
             self._process_values_for_create(key_val)
             client = shared_client or self.client
             client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False)
-            self._populate_kvstore(partition_keys_dic, key_val)
         except (MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError, RuntimeError) as error:
             self.state = FINISHED
             self.set_exception(error)
 
+    def _create_batch(self, partition_keys_dic, key_val):
+            self._create_batch_client(key_val)
+            self._populate_kvstore(partition_keys_dic, key_val)
 
     def _update_batch(self, partition_keys_dic, key_val):
         try:
@@ -889,6 +891,8 @@ class GenericLoadingTask(Thread, Task):
             except ValueError:
                 index = random.choice(range(len(value)))
                 value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
+            except TypeError:
+                 value = json.dumps(value)
             finally:
                 key_val[key] = value
 
@@ -947,13 +951,13 @@ class LoadDocumentsTask(GenericLoadingTask):
     def has_next(self):
         return self.generator.has_next()
 
-    def next(self, override_generator = None, shared_client = None):
+    def next(self, override_generator = None):
         if self.batch_size == 1:
             key, value = self.generator.next()
             partition = self.kv_store.acquire_partition(key)
             if self.op_type == 'create':
                 is_base64_value = (self.generator.__class__.__name__ == 'Base64Generator')
-                self._unlocked_create(partition, key, value, is_base64_value=is_base64_value, shared_client = shared_client)
+                self._unlocked_create(partition, key, value, is_base64_value=is_base64_value)
             elif self.op_type == 'read':
                 self._unlocked_read(partition, key)
             elif self.op_type == 'read_replica':
@@ -974,7 +978,7 @@ class LoadDocumentsTask(GenericLoadingTask):
             key_value = doc_gen.next_batch()
             partition_keys_dic = self.kv_store.acquire_partitions(key_value.keys())
             if self.op_type == 'create':
-                self._create_batch(partition_keys_dic, key_value, shared_client)
+                self._create_batch(partition_keys_dic, key_value)
             elif self.op_type == 'update':
                 self._update_batch(partition_keys_dic, key_value)
             elif self.op_type == 'delete':
@@ -1004,9 +1008,12 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
         # only run high throughput for batch-create workloads
         # also check number of input generators isn't greater than
         # process_concurrency as too many generators become inefficient
-        self.is_high_throughput_mode = self.op_type == "create" and \
-            self.batch_size > 1 and \
-            len(self.generators) < self.process_concurrency
+        self.is_high_throughput_mode = False
+        if ALLOW_HTP:
+            self.is_high_throughput_mode = self.op_type == "create" and \
+                self.batch_size > 1 and \
+                len(self.generators) < self.process_concurrency
+
         self.input_generators = generators
 
         self.op_types = None
@@ -1049,7 +1056,6 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
 
     def run_high_throughput_mode(self):
 
-
         # high throughput mode requires partitioning the doc generators
         self.generators = []
         for gen in self.input_generators:
@@ -1068,8 +1074,6 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
                         self.batch_size)
                 self.generators.append(batch_gen)
 
-
-        # run generator processes
         iterator = 0
         all_processes = []
         for generator in self.generators:
@@ -1100,18 +1104,18 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
 
             # merge child partitions with parent
             generator_partitions = rv["partitions"]
-            count = \
-                sum([len(p['partition'].valid_key_set()) for p in generator_partitions])
-            self.kv_store.merge_all_partitions(generator_partitions)
+            self.kv_store.merge_partitions(generator_partitions)
 
             # terminate child process
             iterator-=1
             all_processes[iterator].terminate()
 
-
     def run_generator(self, generator, iterator):
 
+        # create a tmp kvstore to track work
+        tmp_kv_store = KVStore()
         rv = {"err": None, "partitions": None}
+
         try:
             client = VBucketAwareMemcached(
                     RestConnection(self.server),
@@ -1120,13 +1124,22 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
                 self.op_type = self.op_types[iterator]
             if self.buckets:
                 self.bucket = self.buckets[iterator]
+
             while generator.has_next() and not self.done():
-                self.next(generator, client)
+
+                # generate
+                key_value = generator.next_batch()
+
+                # create
+                self._create_batch_client(key_value, client)
+
+                # cache
+                self.cache_items(tmp_kv_store, key_value)
+
         except Exception as ex:
             rv["err"] = ex
         else:
-            process_partitions = self.kv_store.get_partitions()
-            rv["partitions"] = process_partitions
+            rv["partitions"] = tmp_kv_store.get_partitions()
         finally:
             # share the kvstore from this generator
             self.shared_kvstore_queue.put(rv)
@@ -1134,6 +1147,19 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
             # release concurrency lock
             CONCURRENCY_LOCK.release()
 
+
+    def cache_items(self, store, key_value):
+        """
+            unpacks keys,values and adds them to provided store
+        """
+        for key, value in key_value.iteritems():
+            if self.only_store_hash:
+                value = str(crc32.crc32_hash(value))
+            store.partition(key)["partition"].set(
+                key,
+                value,
+                self.exp,
+                self.flag)
 
 class ESLoadGeneratorTask(Task):
     """
@@ -1894,8 +1920,7 @@ class VerifyRevIdTask(GenericLoadingTask):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught: {0}".format(e))
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def _check_key_revId(self, key, ignore_meta_data=[]):
         src_meta_data = self.__get_meta_data(self.client_src, key)
@@ -2105,8 +2130,7 @@ class ViewCreateTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
         try:
             self.rest.create_design_document(self.bucket, ddoc)
@@ -2120,8 +2144,7 @@ class ViewCreateTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -2167,13 +2190,11 @@ class ViewCreateTask(Task):
                 task_manager.schedule(self, 2)
             else:
                 self.state = FINISHED
-                self.log.error("Unexpected Exception Caught")
-                self.set_exception(e)
+                self.set_unexpected_exception(e)
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def _check_ddoc_revision(self):
         valid = False
@@ -2189,8 +2210,7 @@ class ViewCreateTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
         return valid
 
@@ -2236,8 +2256,7 @@ class ViewCreateTask(Task):
                         self.log.info("Unexpected Exception Caught. Retrying.")
                         time.sleep(2)
                     else:
-                        self.log.error("Unexpected Exception Caught")
-                        self.set_exception(e)
+                        self.set_unexpected_exception(e)
                         self.state = FINISHED
                         break
             else:
@@ -2288,8 +2307,7 @@ class ViewDeleteTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -2308,8 +2326,7 @@ class ViewDeleteTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class ViewQueryTask(Task):
     def __init__(self, server, design_doc_name, view_name,
@@ -2347,8 +2364,7 @@ class ViewQueryTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -2388,8 +2404,7 @@ class ViewQueryTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class N1QLQueryTask(Task):
     def __init__(self,
@@ -2440,8 +2455,7 @@ class N1QLQueryTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -2468,8 +2482,7 @@ class N1QLQueryTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class CreateIndexTask(Task):
     def __init__(self,
@@ -2550,8 +2563,7 @@ class BuildIndexTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -2566,8 +2578,7 @@ class BuildIndexTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class MonitorIndexTask(Task):
     def __init__(self,
@@ -2599,8 +2610,7 @@ class MonitorIndexTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -2614,8 +2624,7 @@ class MonitorIndexTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class DropIndexTask(Task):
     def __init__(self,
@@ -2647,8 +2656,7 @@ class DropIndexTask(Task):
         # catch and set all unexpected exceptions
         except DropIndexException as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -2665,8 +2673,7 @@ class DropIndexTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class MonitorViewQueryResultsTask(Task):
     def __init__(self, servers, design_doc_name, view,
@@ -2935,8 +2942,7 @@ class ModifyFragmentationConfigTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 
 class MonitorActiveTask(Task):
@@ -3103,8 +3109,7 @@ class MonitorViewFragmentationTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 
     def _get_current_auto_compaction_percentage(self):
@@ -3226,8 +3231,7 @@ class ViewCompactionTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     # verify compaction history incremented and some defraging occurred
     def check(self, task_manager):
@@ -3304,8 +3308,7 @@ class ViewCompactionTask(Task):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def _get_compaction_details(self):
         status, content = self.rest.set_view_info(self.bucket, self.design_doc_name)
@@ -3343,8 +3346,7 @@ class FailoverTask(Task):
 
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def _failover_nodes(self, task_manager):
         rest = RestConnection(self.servers[0])
@@ -3390,8 +3392,7 @@ class GenerateExpectedViewResultsTask(Task):
             task_manager.schedule(self)
         except Exception, ex:
             self.state = FINISHED
-            self.log.error("Unexpected Exception: %s" % str(ex))
-            self.set_exception(ex)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         self.state = FINISHED
@@ -3852,8 +3853,7 @@ class BucketFlushTask(Task):
 
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:
@@ -3866,8 +3866,7 @@ class BucketFlushTask(Task):
             self.state = FINISHED
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
 class MonitorDBFragmentationTask(Task):
 
@@ -4163,8 +4162,7 @@ class MonitorViewCompactionTask(ViewCompactionTask):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     # verify compaction history incremented and some defraging occurred
     def check(self, task_manager):
@@ -4238,8 +4236,7 @@ class MonitorViewCompactionTask(ViewCompactionTask):
         # catch and set all unexpected exceptions
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def _get_disk_size(self):
         nodes_ddoc_info = MonitorViewFragmentationTask.aggregate_ddoc_info(self.rest, self.design_doc_name,
@@ -4613,9 +4610,8 @@ class CBASQueryExecuteTask(Task):
 
         except Exception as e:
             self.state = FINISHED
-            self.log.error("Unexpected Exception Caught")
             self.passed = False
-            self.set_exception(e)
+            self.set_unexpected_exception(e)
 
     def check(self, task_manager):
         try:

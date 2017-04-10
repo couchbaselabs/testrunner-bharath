@@ -2,11 +2,13 @@ import json
 import math
 import re
 import uuid
+import time
 
-from membase.api.rest_client import RestConnection
-from tuq import ExplainPlanHelper
 from tuq import QueryTests
-
+from tuq import ExplainPlanHelper
+from remote.remote_util import RemoteMachineShellConnection
+from membase.api.rest_client import RestConnection
+from membase.api.exception import CBQError
 
 class QueriesIndexTests(QueryTests):
 
@@ -20,6 +22,8 @@ class QueriesIndexTests(QueryTests):
             self.log.error("MAX NUMBER OF INDEXES IS 3. ALL TESTS WILL BE SKIPPED")
             self.fail('MAX NUMBER OF INDEXES IS 3. ALL TESTS WILL BE SKIPPED')
         self.rest = RestConnection(self.master)
+        self.shell = RemoteMachineShellConnection(self.master)
+        self.delete_sample = self.input.param("delete_sample", False)
 
     def suite_setUp(self):
         super(QueriesIndexTests, self).suite_setUp()
@@ -29,6 +33,64 @@ class QueriesIndexTests(QueryTests):
 
     def suite_tearDown(self):
         super(QueriesIndexTests, self).suite_tearDown()
+
+    '''MB-22321: test that ordered intersectscan is used for pagination use cases'''
+    def test_orderedintersectscan(self):
+        rest = RestConnection(self.master)
+        self.shell.execute_command("""curl -v -u {0}:{1} \
+                     -X POST http://{2}:{3}/sampleBuckets/install \
+                  -d  '["beer-sample"]'""".format(rest.username, rest.password, self.master.ip, self.master.port))
+        time.sleep(1)
+        created_indexes = []
+        try:
+            idx = "idx_abv"
+            self.query = "CREATE INDEX %s ON `beer-sample`(abv)" % (idx)
+            self.run_cbq_query()
+            time.sleep(15)
+            idx2 = "idx_name"
+            self.query = "CREATE INDEX %s ON `beer-sample`(name)" % (idx2)
+            self.run_cbq_query()
+            time.sleep(15)
+            created_indexes.append(idx)
+            created_indexes.append(idx2)
+            self.query = "explain select * from `beer-sample` where name like 'A%' and abv > 0 order by abv limit 10"
+            result = self.run_cbq_query()
+            self.assertTrue(result['results'][0]['plan']['~children'][0]['~children'][0]['#operator']
+                            == 'OrderedIntersectScan')
+        finally:
+            for idx in created_indexes:
+                self.query = "DROP INDEX `beer-sample`.%s USING %s" % (idx, self.index_type)
+                actual_result = self.run_cbq_query()
+            if self.delete_sample:
+                self.shell.execute_command(
+                    "curl -X DELETE -u Administrator:password http://%s:%s/pools/default/buckets/beer-sample"
+                    % (self.master.ip, self.master.port))
+
+    '''MB-22412: equality predicates and constant keys should be removed from order by clause'''
+    def test_remove_equality_orderby(self):
+        rest = RestConnection(self.master)
+        self.shell.execute_command("""curl -v -u {0}:{1} \
+                     -X POST http://{2}:{3}/sampleBuckets/install \
+                  -d  '["beer-sample"]'""".format(rest.username, rest.password, self.master.ip, self.master.port))
+        time.sleep(1)
+        created_indexes = []
+        try:
+            idx = "idx_abv"
+            self.query = "CREATE INDEX %s ON `beer-sample`(abv)" % (idx)
+            self.run_cbq_query()
+            time.sleep(15)
+            created_indexes.append(idx)
+            self.query = "EXPLAIN SELECT * FROM `beer-sample` WHERE abv = 0 ORDER BY abv"
+            result = self.run_cbq_query()
+            self.assertTrue('Order' not in result['results'][0]['plan'])
+        finally:
+            for idx in created_indexes:
+                self.query = "DROP INDEX `beer-sample`.%s USING %s" % (idx, self.index_type)
+                actual_result = self.run_cbq_query()
+            if self.delete_sample:
+                self.shell.execute_command(
+                    "curl -X DELETE -u Administrator:password http://%s:%s/pools/default/buckets/beer-sample"
+                    % (self.master.ip, self.master.port))
 
     def test_meta_indexcountscan(self):
         for bucket in self.buckets:
@@ -1129,6 +1191,42 @@ class QueriesIndexTests(QueryTests):
                     self._verify_results(actual_result['results'], [])
                     self.assertFalse(self._is_index_in_list(bucket, idx), "Index is in list")
 
+    def test_covering_like_array_index(self):
+        created_indexes = []
+        idx = "ix"
+        try:
+           for bucket in self.buckets:
+            self.query = "CREATE INDEX %s ON %s( DISTINCT ARRAY ( DISTINCT array j.region1 for j in i.Marketing end) FOR i in %s.%s END) where VMs[0].os = 'ubuntu' USING %s" % (
+                    idx, bucket.name,bucket.name, "tasks", self.index_type)
+            actual_result =self.run_cbq_query()
+            self._wait_for_index_online(bucket, idx)
+            self._verify_results(actual_result['results'], [])
+            created_indexes.append(idx)
+            self.assertTrue(self._is_index_in_list(bucket, idx), "Index is not in list")
+            self.query = "explain select meta().id from %s WHERE ANY i IN %s.tasks SATISFIES  (ANY j IN i.Marketing SATISFIES j.region1='South' end) END and VMs[0].os = 'ubuntu'"  % (bucket.name,bucket.name)
+            actual_result = self.run_cbq_query()
+            plan = ExplainPlanHelper(actual_result)
+            self.assertTrue(plan['~children'][0]['scan']['index'] == idx)
+            self.query = 'explain select meta().id from {0} WHERE ANY i IN tasks SATISFIES  (ANY j IN i.Marketing SATISFIES j.region1 like "{1}" end) END and VMs[0].os = "ubuntu"' .format(bucket.name,'Sou%')
+            actual_result = self.run_cbq_query()
+            plan = ExplainPlanHelper(actual_result)
+            self.assertTrue(plan['~children'][0]['scan']['index'] == idx )
+        finally:
+                for idx in created_indexes:
+                    self.query = "DROP INDEX %s.%s USING %s" % (bucket.name, idx, self.index_type)
+                    actual_result = self.run_cbq_query()
+                    self._verify_results(actual_result['results'], [])
+                    self.assertFalse(self._is_index_in_list(bucket, idx), "Index is in list")
+
+    def test_panic_in_null(self):
+        self.query = 'create index ix5 on default(join_yr)'
+        actual_result = self.run_cbq_query()
+        self.query = 'explain select join_yr from default where join_yr IN [NULL]'
+        actual_result = self.run_cbq_query()
+        plan = ExplainPlanHelper(actual_result)
+        self.assertTrue(plan['~children'][0]['index'] == "ix5")
+
+
 
     def test_covering_index_collections(self):
         created_indexes = []
@@ -2072,6 +2170,13 @@ class QueriesIndexTests(QueryTests):
                 result1 = plan['~children'][0]['scan']['index']
                 self.assertTrue(result1 == idx)
 
+                self.query = "explain select name from %s WHERE ANY i IN %s.tasks SATISFIES  (ANY j IN i.Marketing SATISFIES j.region1='South' end) END"  % (
+                bucket.name,bucket.name)
+                actual_result = self.run_cbq_query()
+                plan = ExplainPlanHelper(actual_result)
+                print plan
+                result1 = plan['~children'][0]['scan']['index']
+                self.assertTrue(result1 == idx)
                 self.query = "select name from %s WHERE ANY i IN %s.tasks SATISFIES  (ANY j IN i.Marketing SATISFIES j.region1='South' end) END " % (
                 bucket.name,bucket.name) + \
                              "order BY name limit 10"
@@ -2933,6 +3038,44 @@ class QueriesIndexTests(QueryTests):
                     self.run_cbq_query()
                     self.assertFalse(self._is_index_in_list(bucket, idx), "Index is in list")
 
+    def test_asc_desc_index(self):
+        for bucket in self.buckets:
+            created_indexes = []
+            try:
+                idx = "idx"
+                self.query = "CREATE INDEX %s ON default(join_yr ASC, join_day DESC, meta().id ASC)"%(idx)
+                actual_result = self.run_cbq_query()
+                self._wait_for_index_online(bucket, idx)
+                self._verify_results(actual_result['results'], [])
+                created_indexes.append(idx)
+                self.assertTrue(self._is_index_in_list(bucket, idx), "Index is not in list")
+                self.query = 'explain SELECT * FROM default WHERE join_yr > 10 ' \
+                             'ORDER BY join_yr, join_day DESC LIMIT 100 OFFSET 200'
+                actual_result = self.run_cbq_query()
+                plan=ExplainPlanHelper(actual_result)
+                self.assertTrue(plan['~children'][0]['~children'][0]['index']==idx)
+                self.query = 'explain SELECT * FROM default WHERE join_yr > 10 ' \
+                             'ORDER BY join_yr,meta().id ASC LIMIT 100 OFFSET 200'
+                actual_result = self.run_cbq_query()
+                plan=ExplainPlanHelper(actual_result)
+                self.assertTrue(plan['~children'][0]['~children'][0]['index']==idx)
+                self.query = 'explain SELECT * FROM default WHERE join_yr > 10 and join_day <10 ' \
+                             'ORDER BY join_yr asc,join_day desc LIMIT 100 OFFSET 200'
+                actual_result = self.run_cbq_query()
+                plan=ExplainPlanHelper(actual_result)
+                self.assertTrue(plan['~children'][0]['~children'][0]['index']==idx)
+                self.query = 'explain SELECT * FROM default WHERE join_yr > 10 and join_day <10 and meta().id like "query-test%"' \
+                             'ORDER BY join_yr asc,join_day desc,meta().id ASC LIMIT 100 OFFSET 200'
+                actual_result = self.run_cbq_query()
+                plan=ExplainPlanHelper(actual_result)
+                self.assertTrue(plan['~children'][0]['~children'][0]['index']==idx)
+            finally:
+                for idx in created_indexes:
+                    self.query = "DROP INDEX %s.%s USING %s" % (bucket.name, idx, self.index_type)
+                    self.run_cbq_query()
+                    self.assertFalse(self._is_index_in_list(bucket, idx), "Index is in list")
+
+
     def test_avoid_full_span(self):
          for bucket in self.buckets:
             created_indexes = []
@@ -2947,8 +3090,8 @@ class QueriesIndexTests(QueryTests):
                 self.query = "explain select * from default where join_yr in [2011,2012]"
                 actual_result = self.run_cbq_query()
                 plan = ExplainPlanHelper(actual_result)
-                self.assertTrue(plan['~children'][0]['spans'][0]['Range']=={u'High': [u'successor(2011)'], u'Low': [u'2011'], u'Inclusion': 1})
-                self.assertTrue(plan['~children'][0]['spans'][1]['Range']=={u'High': [u'successor(2012)'], u'Low': [u'2012'], u'Inclusion': 1})
+                self.assertTrue(plan['~children'][0]['spans'][0]['range']=={u'High': [u'successor(2011)'], u'Low': [u'2011'], u'Inclusion': 1})
+                self.assertTrue(plan['~children'][0]['spans'][1]['range']=={u'High': [u'successor(2012)'], u'Low': [u'2012'], u'Inclusion': 1})
 
                 self.query = "select * from default where join_yr in [2011,2012] order by meta().id"
                 actual_result = self.run_cbq_query()
@@ -2958,12 +3101,12 @@ class QueriesIndexTests(QueryTests):
                 self.query = 'explain select * from default where join_yr =2011 and join_day in [1,2,3,$1,$2,null,""]'
                 actual_result = self.run_cbq_query()
                 plan = ExplainPlanHelper(actual_result)
-                self.assertTrue(plan['~children'][0]['scan']['spans'][0]['Range']=={u'High': [u'2011', u'1'], u'Low': [u'2011', u'1'], u'Inclusion': 3})
-                self.assertTrue(plan['~children'][0]['scan']['spans'][1]['Range'] == {u'High': [u'2011', u'2'], u'Low': [u'2011', u'2'], u'Inclusion': 3})
-                self.assertTrue(plan['~children'][0]['scan']['spans'][1]['Range'] == {u'High': [u'2011', u'3'], u'Low': [u'2011', u'3'], u'Inclusion': 3})
-                self.assertTrue(plan['~children'][0]['scan']['spans'][3]['Range']=={u'High': [u'2011', u'$1'], u'Low': [u'2011', u'$1'], u'Inclusion': 3})
-                self.assertTrue(plan['~children'][0]['scan']['spans'][4]['Range']=={u'High': [u'2011', u'$2'], u'Low': [u'2011', u'$2'], u'Inclusion': 3})
-                self.assertTrue(plan['~children'][0]['scan']['spans'][5]['Range']=={u'High': [u'2011', u'""'], u'Low': [u'2011', u'""'], u'Inclusion': 3})
+                self.assertTrue(plan['~children'][0]['scan']['spans'][0]['range']=={u'High': [u'2011', u'1'], u'Low': [u'2011', u'1'], u'Inclusion': 3})
+                self.assertTrue(plan['~children'][0]['scan']['spans'][1]['range'] == {u'High': [u'2011', u'2'], u'Low': [u'2011', u'2'], u'Inclusion': 3})
+                self.assertTrue(plan['~children'][0]['scan']['spans'][1]['range'] == {u'High': [u'2011', u'3'], u'Low': [u'2011', u'3'], u'Inclusion': 3})
+                self.assertTrue(plan['~children'][0]['scan']['spans'][3]['range']=={u'High': [u'2011', u'$1'], u'Low': [u'2011', u'$1'], u'Inclusion': 3})
+                self.assertTrue(plan['~children'][0]['scan']['spans'][4]['range']=={u'High': [u'2011', u'$2'], u'Low': [u'2011', u'$2'], u'Inclusion': 3})
+                self.assertTrue(plan['~children'][0]['scan']['spans'][5]['range']=={u'High': [u'2011', u'""'], u'Low': [u'2011', u'""'], u'Inclusion': 3})
                 self.query = 'select * from default where join_yr =2011 and join_day in [1,2,3,null,""] order by meta().id'
                 actual_result = self.run_cbq_query()
                 self.query = 'select * from default use index(`#primary`) where join_yr =2011 and join_day in [1,2,3,null,""] order by meta().id'
@@ -3922,8 +4065,7 @@ class QueriesIndexTests(QueryTests):
                     self.query = "SELECT count(name)" + \
                                  " FROM %s use index(`#primary`) where join_yr=2012 AND name = 'query-testemployee10317.9004497-0'  GROUP BY name" % (bucket.name)
                     expected_result = self.run_cbq_query()
-                    import pdb;pdb.set_trace()
-                    self.assertTrue((actual_result['results']),(expected_result['results']))
+                    self.assertEquals(actual_result['results'],expected_result['results'])
             finally:
                 for index_name in set(created_indexes):
                     self.query = "DROP INDEX %s.%s USING %s" % (bucket.name, index_name,self.index_type)
@@ -4264,6 +4406,15 @@ class QueriesIndexTests(QueryTests):
                 self.query = "DROP INDEX %s.%s USING %s" % (bucket.name, index_name,self.index_type)
                 self.run_cbq_query()
 
+    def test_covering_meta(self):
+                self.query = 'CREATE INDEX `iy` ON `default`((distinct (array (`v`.`os`) for `v` in `VMs` end)))'
+                self.run_cbq_query()
+                self.query = 'EXPLAIN SELECT meta().id FROM default WHERE ANY v IN VMs SATISFIES v.os = "ubuntu" END'
+                res = self.run_cbq_query()
+                plan = ExplainPlanHelper(res)
+                self.assertTrue('cover ((meta(`default`).`id`))' in str(plan['~children']))
+
+
     def test_covering_index(self):
         for bucket in self.buckets:
             created_indexes = []
@@ -4420,7 +4571,7 @@ class QueriesIndexTests(QueryTests):
                     self.run_cbq_query()
                     self._wait_for_index_online(bucket, index_name)
                     created_indexes.append(index_name)
-                    self.query = "EXPLAIN SELECT count(*),join_yr,name FROM %s where join_yr > 2009 GROUP BY join_yr,name ORDER BY name';" % (bucket.name)
+                    self.query = "EXPLAIN SELECT count(*),join_yr,name FROM %s where join_yr > 2009 GROUP BY join_yr,name ORDER BY name;" % (bucket.name)
                     if self.covering_index:
                         self.test_explain_covering_index(index_name)
                     self.query = "SELECT count(*),join_yr FROM %s  where join_yr > 2009 GROUP BY join_yr,name ORDER BY name;" % (bucket.name)
@@ -4818,6 +4969,17 @@ class QueriesIndexTests(QueryTests):
                 for index_name in set(created_indexes):
                     self.query = "DROP INDEX %s.%s USING %s" % (bucket.name, index_name,self.index_type)
                     self.run_cbq_query()
+
+    def test_max_pushdown(self):
+        for bucket in self.buckets:
+            created_indexes = []
+            self.query = 'CREATE INDEX idx ON default(test_rate DESC,join_mO DESC)'
+            self.run_cbq_query()
+            created_indexes.append("idx")
+            self.query = 'explain SELECT MAX(test_rate) FROM default WHERE test_rate > 10'
+            actual_result = self.run_cbq_query()
+            print actual_result
+
 
     def test_max_covering_index(self):
         for bucket in self.buckets:

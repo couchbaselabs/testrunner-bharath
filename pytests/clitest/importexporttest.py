@@ -1,23 +1,30 @@
-import ast
 import copy
-import os
-import shutil
+import json, filecmp
+import os, shutil, ast
+from threading import Thread
 
-from clitest.cli_base import CliBaseTest
-from couchbase_helper.documentgenerator import BlobGenerator, JsonDocGenerator
 from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
+from TestInput import TestInputSingleton
+from clitest.cli_base import CliBaseTest
+from remote.remote_util import RemoteMachineShellConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
-from remote.remote_util import RemoteMachineShellConnection
+from couchbase_helper.documentgenerator import BlobGenerator, JsonDocGenerator
+from couchbase_cli import CouchbaseCLI
 from security.rbac_base import RbacBase
+from pprint import pprint
+from testconstants import CLI_COMMANDS, COUCHBASE_FROM_WATSON,\
+                          COUCHBASE_FROM_SPOCK, LINUX_COUCHBASE_BIN_PATH,\
+                          WIN_COUCHBASE_BIN_PATH, COUCHBASE_FROM_SHERLOCK
 
 
 class ImportExportTests(CliBaseTest):
     def setUp(self):
         super(ImportExportTests, self).setUp()
-        ClusterOperationHelper.cleanup_cluster(self.servers, self.servers[0])
         self.ex_path = self.tmp_path + "export/"
         self.num_items = self.input.param("items", 1000)
+        self.localhost = self.input.param("localhost", False)
         self.field_separator = self.input.param("field_separator", "comma")
         self.json_create_gen = JsonDocGenerator("imex", op_type="create",
                                        encoding="utf-8", start=0, end=self.num_items)
@@ -27,6 +34,7 @@ class ImportExportTests(CliBaseTest):
     def tearDown(self):
         super(ImportExportTests, self).tearDown()
         self.import_back = self.input.param("import_back", False)
+        ClusterOperationHelper.cleanup_cluster(self.servers, self.servers[0])
         if self.import_back:
             self.log.info("clean up server in import back tests")
             imp_servers = copy.deepcopy(self.servers[2:])
@@ -80,6 +88,14 @@ class ImportExportTests(CliBaseTest):
         options = {"load_doc": True, "docs":"1000"}
         return self._common_imex_test("export", options)
 
+    def test_export_with_localhost(self):
+        """
+           Set localhost param = True
+           IP address will be replaced with localhost
+        """
+        options = {"load_doc": True, "docs":"1000"}
+        return self._common_imex_test("export", options)
+
     def test_export_delete_expired_updated_data(self):
         """
            @delete_percent = percent keys deleted
@@ -104,31 +120,26 @@ class ImportExportTests(CliBaseTest):
             password = server.rest_password
         self.cli_command_path = "cd %s; ./" % self.cli_command_path
         self.buckets = RestConnection(server).get_buckets()
-        tasks_ops = []
         total_items = self.num_items
         for bucket in self.buckets:
             doc_create_gen = copy.deepcopy(self.json_create_gen)
-            tasks_ops.append(self.cluster.async_load_gen_docs(self.master, bucket.name,
-                                               doc_create_gen, bucket.kvs[1], "create"))
-            self.verify_cluster_stats(self.servers[:self.nodes_init])
+            self.cluster.load_gen_docs(self.master, bucket.name,
+                                               doc_create_gen, bucket.kvs[1], "create")
+            self.verify_cluster_stats(self.servers[:self.nodes_init], max_verify=total_items)
             if delete_percent is not None:
                 self.log.info("Start to delete %s %% total keys" % delete_percent)
                 doc_delete_gen = copy.deepcopy(self.json_delete_gen)
                 doc_delete_gen.end = int(self.num_items) * int(delete_percent) / 100
                 total_items -= doc_delete_gen.end
-                tasks_ops.append(self.cluster.async_load_gen_docs(self.master,
-                                                 bucket.name, doc_delete_gen,
-                                                 bucket.kvs[1], "delete"))
+                self.cluster.load_gen_docs(self.master, bucket.name, doc_delete_gen,
+                                                            bucket.kvs[1], "delete")
             if updated and update_field is not None:
                 self.log.info("Start update data")
                 doc_updated_gen = copy.deepcopy(self.json_create_gen)
                 doc_updated_gen.update(fields_to_update=update_field)
-                tasks_ops.append(self.cluster.async_load_gen_docs(self.master,
-                                                 bucket.name, doc_updated_gen,
-                                                 bucket.kvs[1], "update"))
-            for task in tasks_ops:
-                task.result()
-            self.verify_cluster_stats(self.servers[:self.nodes_init])
+                self.cluster.load_gen_docs(self.master, bucket.name, doc_updated_gen,
+                                                             bucket.kvs[1], "update")
+            self.verify_cluster_stats(self.servers[:self.nodes_init], max_verify=total_items)
             """ remove previous export directory at tmp dir and re-create it
                 in linux:   /tmp/export
                 in windows: /cygdrive/c/tmp/export """
@@ -147,6 +158,10 @@ class ImportExportTests(CliBaseTest):
                                                     self.format_type, export_file)
             output, error = self.shell.execute_command(exe_cmd_str)
             self._check_output("successfully", output)
+            if self.format_type == "list":
+                self.log.info("remove [] in file")
+                self.shell.execute_command("sed%s -i '/^\[\]/d' %s"
+                                                 % (self.cmd_ext,export_file))
             output, _ = self.shell.execute_command("awk%s 'END {print NR}' %s"
                                                      % (self.cmd_ext, export_file))
             self.assertTrue(int(total_items) == int(output[0]),
@@ -703,6 +718,8 @@ class ImportExportTests(CliBaseTest):
                     export_file = self.ex_path + bucket.name
                     if self.cmd_ext:
                         export_file = export_file.replace("/cygdrive/c", "c:")
+                    if self.localhost:
+                        server.ip = "localhost"
                     exe_cmd_str = "%s%s%s %s -c %s -u %s -p %s -b %s -f %s -o %s"\
                          % (self.cli_command_path, cmd, self.cmd_ext, self.imex_type,
                                      server.ip, username, password, bucket.name,
@@ -864,8 +881,8 @@ class ImportExportTests(CliBaseTest):
                     sample_file.close()
                     export_file.close()
             else:
-                self.fail("There is not export file in %s%s"\
-                                  % (self.ex_path, export_file_name))
+                self.fail("There is not export file '%s' in %s%s"\
+                                  % (export_file_name, self.ex_path, export_file_name))
 
     def _check_output(self, word_check, output):
         found = False

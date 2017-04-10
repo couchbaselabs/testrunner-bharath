@@ -1,22 +1,20 @@
-import datetime
 import time
+import datetime
 import unittest
-from threading import Thread
-
-import logger
 from TestInput import TestInputSingleton
-from basetestcase import BaseTestCase
+import logger
 from couchbase_helper.cluster import Cluster
-from membase.api.exception import RebalanceFailedException
 from membase.api.rest_client import RestConnection, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
 from memcached.helper.data_helper import LoadWithMcsoda
-from memcached.helper.data_helper import MemcachedClientHelper
+from threading import Thread
 from remote.remote_util import RemoteMachineShellConnection
+from memcached.helper.data_helper import MemcachedClientHelper
+from membase.api.exception import RebalanceFailedException
+from basetestcase import BaseTestCase
 from security.rbac_base import RbacBase
-
 
 class SwapRebalanceBase(unittest.TestCase):
 
@@ -101,8 +99,12 @@ class SwapRebalanceBase(unittest.TestCase):
             SwapRebalanceBase._log_finish(self)
 
         # Remove rbac user in teardown
-        role_del = ['cbadminbucket']
-        RbacBase().remove_user_role(role_del, RestConnection(self.servers[0]))
+        try:
+            role_del = ['cbadminbucket']
+            RbacBase().remove_user_role(role_del, RestConnection(
+                self.servers[0]))
+        except:
+            pass
 
     @staticmethod
     def reset(self):

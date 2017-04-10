@@ -3,18 +3,20 @@ import time
 
 import logger
 from basetestcase import BaseTestCase
-from couchbase_helper.cluster import Cluster
 from membase.api.rest_client import RestConnection
-from membase.helper.bucket_helper import BucketOperationHelper
-from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
-from security.rbac_base import RbacBase
 from testconstants import LINUX_COUCHBASE_SAMPLE_PATH, \
     WIN_COUCHBASE_SAMPLE_PATH, \
     WIN_BACKUP_C_PATH, LINUX_BACKUP_PATH, LINUX_COUCHBASE_LOGS_PATH, \
     WIN_COUCHBASE_LOGS_PATH, WIN_TMP_PATH, WIN_TMP_PATH_RAW, \
     WIN_BACKUP_PATH, LINUX_COUCHBASE_BIN_PATH, LINUX_ROOT_PATH, LINUX_CB_PATH,\
     MAC_COUCHBASE_BIN_PATH, WIN_COUCHBASE_BIN_PATH, WIN_ROOT_PATH
+
+from couchbase_helper.cluster import Cluster
+from security.rbac_base import RbacBase
+from membase.helper.bucket_helper import BucketOperationHelper
+from membase.helper.cluster_helper import ClusterOperationHelper
+
 
 log = logger.Logger.get_logger()
 
@@ -275,17 +277,11 @@ class CliBaseTest(BaseTestCase):
 
         return True
 
-    def verifyBucketSettings(self, server, bucket_name, bucket_password,
-                             bucket_type, memory_quota, eviction_policy,
-                             replica_count, enable_index_replica, priority,
-                             enable_flush):
+    def verifyBucketSettings(self, server, bucket_name, bucket_type, memory_quota,
+                             eviction_policy, replica_count, enable_index_replica,
+                             priority, enable_flush):
         rest = RestConnection(server)
         result = rest.get_bucket_json(bucket_name)
-        if bucket_password is not None and bucket_password != result[
-            "saslPassword"]:
-            log.info("Bucket password does not match (%s vs %s)",
-                     bucket_password, result["saslPassword"])
-            return False
 
         if bucket_type == "couchbase":
             bucket_type = "membase"

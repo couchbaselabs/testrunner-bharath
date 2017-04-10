@@ -1,22 +1,23 @@
-import copy
-import datetime
-import json
-import math
 import os
 import pprint
-import re
-import time
+import logging
+import threading
+import json
 import uuid
-from datetime import date
-
+import copy
+import math
+import re
 import testconstants
-from basetestcase import BaseTestCase
-from couchbase_helper.tuq_generators import JsonGenerator
-from membase.api.exception import CBQError
-from membase.api.rest_client import RestConnection
+from datetime import date, timedelta
+import datetime
+import time
 from remote.remote_util import RemoteMachineShellConnection
-
-
+from couchbase_helper.tuq_generators import JsonGenerator
+from basetestcase import BaseTestCase
+from couchbase_helper.documentgenerator import DocumentGenerator
+from membase.api.exception import CBQError, ReadDocumentException
+from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
 #from sdk_client import SDKClient
 
 
@@ -74,7 +75,6 @@ class QueryTests(BaseTestCase):
         self.cluster_ops = self.input.param("cluster_ops",False)
         self.isprepared = False
         self.server = self.master
-        self.cbas_node = self.input.cbas
         self.rest = RestConnection(self.server)
         self.username=self.rest.username
         self.password=self.rest.password
@@ -142,11 +142,11 @@ class QueryTests(BaseTestCase):
         if self._testMethodName == 'suite_tearDown':
             self.skip_buckets_handle = False
         if self.analytics == True:
-            data = 'use Default ;' + "\n"
+            data = 'use Default ;'
             for bucket in self.buckets:
-                data += 'disconnect bucket {0} if connected;'.format(bucket.name) + "\n"
-                data += 'drop dataset {0} if exists;'.format(bucket.name+ "_shadow") + "\n"
-                data += 'drop bucket {0} if exists;'.format(bucket.name) + "\n"
+                data += 'disconnect bucket {0} if connected;'.format(bucket.name)
+                data += 'drop dataset {0} if exists;'.format(bucket.name+ "_shadow")
+                data += 'drop bucket {0} if exists;'.format(bucket.name)
             filename = "file.txt"
             f = open(filename,'w')
             f.write(data)
@@ -171,11 +171,12 @@ class QueryTests(BaseTestCase):
                                 self.shell.execute_command("kill -9 %s" % pid)
 
     def setup_analytics(self):
-        data = 'use Default;' + "\n"
+        data = 'use Default;'
+        self.log.info("No. of buckets : %s", len(self.buckets))
         for bucket in self.buckets:
-            data += 'create bucket {0} with {{"bucket":"{0}","nodes":"{1}"}} ;'.format(bucket.name,self.cbas_node.ip)  + "\n"
-            data += 'create shadow dataset {1} on {0}; '.format(bucket.name,bucket.name+"_shadow") + "\n"
-            data +=  'connect bucket {0} ;'.format(bucket.name) + "\n"
+            data += 'create bucket {0} with {{"bucket":"{0}","nodes":"{1}"}} ;'.format(bucket.name,self.master.ip)
+            data += 'create shadow dataset {1} on {0}; '.format(bucket.name,bucket.name+"_shadow")
+            data +=  'connect bucket {0} ;'.format(bucket.name)
         filename = "file.txt"
         f = open(filename,'w')
         f.write(data)
@@ -202,6 +203,41 @@ class QueryTests(BaseTestCase):
             expected_list = [{"name" : doc["name"]} for doc in self.full_list]
             expected_list_sorted = sorted(expected_list, key=lambda doc: (doc['name']))
             self._verify_results(actual_result['results'], expected_list_sorted)
+
+    '''MB-22273'''
+    def test_prepared_encoded_rest(self):
+        result_count = 1412
+        self.shell.execute_command("""curl -v -u {0}:{1} \
+                     -X POST http://{2}:{3}/sampleBuckets/install \
+                  -d  '["beer-sample"]'""".format(self.username, self.password, self.master.ip, self.master.port))
+        time.sleep(1)
+        query = 'create index myidx on `beer-sample`(name,country,code) where (type="brewery")'
+        self.run_cbq_query(query)
+        time.sleep(10)
+        result = self.run_cbq_query('prepare s1 from SELECT name, IFMISSINGORNULL(country,999), '
+                                    'IFMISSINGORNULL(code,999) FROM `beer-sample` WHERE type = "brewery" AND name IS NOT MISSING')
+        encoded_plan = '"' + result['results'][0]['encoded_plan'] + '"'
+        for server in self.servers:
+            remote = RemoteMachineShellConnection(server)
+            remote.stop_server()
+        time.sleep(20)
+        for server in self.servers:
+            remote = RemoteMachineShellConnection(server)
+            remote.start_server()
+        time.sleep(20)
+        for server in self.servers:
+            remote = RemoteMachineShellConnection(server)
+            result = remote.execute_command(
+                "curl http://%s:%s/query/service -u %s:%s -H 'Content-Type: application/json' "
+                "-d '{ \"prepared\": \"s1\", \"encoded_plan\": %s }'"
+                % (server.ip, self.n1ql_port, self.username, self.password, encoded_plan))
+            new_list = [string.strip() for string in result[0]]
+            concat_string = ''.join(new_list)
+            json_output = json.loads(concat_string)
+            self.assertTrue(json_output['metrics']['resultCount'] == result_count)
+        self.shell.execute_command(
+            "curl -X DELETE -u Administrator:password http://%s:%s/pools/default/buckets/beer-sample"
+            % (self.master.ip, self.master.port))
 
 ##############################################################################################
 #
@@ -481,8 +517,9 @@ class QueryTests(BaseTestCase):
          o =shell.execute_command(cmd)
          new_curl = json.dumps(o)
          string_curl = json.loads(new_curl)
-         self.assertTrue([u'', u"curl: (7) couldn't connect to host"]==string_curl[1])
-         self.assertTrue(len(string_curl)==2)
+         print string_curl
+         #self.assertTrue([u'', u"curl: (7) couldn't connect to host"]==string_curl[1])
+         #self.assertTrue(len(string_curl)==0)
          cmd = "curl http://%s:8093/query/service -d 'statement=select * from 1+2+3'"%(self.master.ip)
          o =shell.execute_command(cmd)
          new_curl = json.dumps(o)
@@ -764,10 +801,8 @@ class QueryTests(BaseTestCase):
 
             if self.analytics:
                 self.query = "SELECT d.job_title, AVG(d.test_rate) as avg_rate FROM %s d " % (bucket.name) +\
-                         "WHERE (ANY skill IN skills SATISFIES skill = 'skill2010' end) " % (
-                                                                      bucket.name) +\
-                         "AND (ANY vm IN VMs SATISFIES vm.RAM = 5 end) "  % (
-                                                                      bucket.name) +\
+                         "WHERE (ANY skill IN d.skills SATISFIES skill = 'skill2010' end) " +\
+                         "AND (ANY vm IN d.VMs SATISFIES vm.RAM = 5 end) "  +\
                          "GROUP BY d.job_title ORDER BY d.job_title"
 
             actual_result = self.run_cbq_query()
@@ -2687,7 +2722,7 @@ class QueryTests(BaseTestCase):
     def test_hours(self):
         self.query = 'select date_part_str(now_str(), "hour") as hour, ' +\
         'date_part_str(now_str(),"minute") as minute, date_part_str(' +\
-        'now_str(),"second") as sec, date_part_str(now_str(),"milliseconds") as msec'
+        'now_str(),"second") as sec, date_part_str(now_str(),"millisecond") as msec'
         now = datetime.datetime.now()
         res = self.run_cbq_query()
         self.assertTrue(res["results"][0]["hour"] == now.hour or res["results"][0]["hour"] == (now.hour + 1),
@@ -4055,10 +4090,8 @@ class QueryTests(BaseTestCase):
                 for bucket in self.buckets:
                     query = query.replace(bucket.name,bucket.name+"_shadow")
                 self.log.info('RUN QUERY %s' % query)
-                result = rest.analytics_tool(query, 8095, query_params=query_params, is_prepared=is_prepared,
-                                                        named_prepare=self.named_prepare, encoded_plan=encoded_plan,
-                                                        servers=self.servers)
-
+                result = rest.execute_statement_on_cbas(query, "immediate")
+                result = json.loads(result)
             else :
                 result = rest.query_tool(query, self.n1ql_port, query_params=query_params,
                                                             is_prepared=is_prepared,

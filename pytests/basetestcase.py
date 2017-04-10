@@ -1,36 +1,42 @@
-import commands
+import logger
+import unittest
 import copy
 import datetime
-import json
-import logging
-import random
-import string
 import time
+import string
+import random
+import logging
+import json
+import commands
+import mc_bin_client
 import traceback
-import unittest
 
-import logger
-import testconstants
-from TestInput import TestInputSingleton
-from couchbase_cli import CouchbaseCLI
-from couchbase_helper.cluster import Cluster
-from couchbase_helper.data_analysis_helper import *
-from couchbase_helper.document import View
+ 
+from memcached.helper.data_helper import VBucketAwareMemcached
 from couchbase_helper.documentgenerator import BlobGenerator
+from couchbase_helper.cluster import Cluster
+from couchbase_helper.document import View
 from couchbase_helper.documentgenerator import DocumentGenerator
 from couchbase_helper.stats_tools import StatsCommon
-from membase.api.exception import ServerUnavailableException
-from membase.api.rest_client import Bucket, RestHelper
+from TestInput import TestInputSingleton
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
-from memcached.helper.data_helper import VBucketAwareMemcached
-from remote.remote_util import RemoteUtilHelper
-from scripts.collect_server_info import cbcollectRunner
-from security.rbac_base import RbacBase
-from testconstants import MAX_COMPACTION_THRESHOLD
-from testconstants import MIN_COMPACTION_THRESHOLD
+from memcached.helper.data_helper import MemcachedClientHelper
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+from membase.api.exception import ServerUnavailableException
+from couchbase_helper.data_analysis_helper import *
 from testconstants import STANDARD_BUCKET_PORT
+from testconstants import MIN_COMPACTION_THRESHOLD
+from testconstants import MAX_COMPACTION_THRESHOLD
+from membase.helper.cluster_helper import ClusterOperationHelper
+from security.rbac_base import RbacBase
+
+from couchbase_cli import CouchbaseCLI
+import testconstants
+
+from scripts.collect_server_info import cbcollectRunner
 
 
 class BaseTestCase(unittest.TestCase):
@@ -135,15 +141,22 @@ class BaseTestCase(unittest.TestCase):
             self.test_timeout = self.input.param("test_timeout", 3600)  # kill hang test and jump to next one.
             self.enable_bloom_filter = self.input.param("enable_bloom_filter", False)
             self.enable_time_sync = self.input.param("enable_time_sync", False)
-            self.gsi_type = self.input.param("gsi_type", 'forestdb')
-            self.is_container = self.input.param("is_container", False)
-
+            self.gsi_type = self.input.param("gsi_type", 'plasma')
+            if hasattr(self.input, 'cbas'):
+                if self.input.cbas:
+                    self.cbas_node = self.input.cbas
             # bucket parameters go here,
             self.bucket_size = self.input.param("bucket_size", None)
             self.bucket_type = self.input.param("bucket_type", 'membase')
             self.num_replicas = self.input.param("replicas", 1)
             self.enable_replica_index = self.input.param("index_replicas", 1)
             self.eviction_policy = self.input.param("eviction_policy", 'valueOnly')  # or 'fullEviction'
+                           # for ephemeral bucket is can be noEviction or nruEviction
+            if self.bucket_type == 'ephemeral' and self.eviction_policy == 'valueOnly':
+                # use the ephemeral bucket default
+                self.eviction_policy = 'noEviction'
+
+                                          # for ephemeral buckets it
             self.sasl_password=self.input.param("sasl_password", 'password')
             self.lww = self.input.param("lww",
                                         False)  # only applies to LWW but is here because the bucket is created here
@@ -235,15 +248,7 @@ class BaseTestCase(unittest.TestCase):
                 self.change_checkpoint_params()
 
                 # Add built-in user
-                testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
-                RbacBase().create_user_source(testuser, 'builtin', self.master)
-                self.sleep(10)
-
-                # Assign user to role
-                role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
-                RbacBase().add_user_role(role_list, RestConnection(self.master), 'builtin')
-                self.sleep(10)
-
+                self.add_built_in_server_user(node=self.master)
                 self.log.info("done initializing cluster")
             else:
                 self.quota = ""
@@ -488,7 +493,7 @@ class BaseTestCase(unittest.TestCase):
                                                       maxParallelReplicaIndexers, init_port,
                                                       quota_percent, services=assigned_services,
                                                       index_quota_percent=self.index_quota_percent,
-                                                      gsi_type=self.gsi_type, is_container=self.is_container))
+                                                      gsi_type=self.gsi_type))
         for task in init_tasks:
             node_quota = task.result()
             if node_quota < quota or quota == 0:
@@ -503,18 +508,19 @@ class BaseTestCase(unittest.TestCase):
         return quota
 
     def _create_bucket_params(self, server, replicas=1, size=0, port=11211, password=None,
-                             bucket_type='membase', enable_replica_index=1, eviction_policy='valueOnly',
-                             bucket_priority=None, flush_enabled=1, lww=False):
+                              bucket_type='membase', enable_replica_index=1, eviction_policy='valueOnly',
+                              bucket_priority=None, flush_enabled=1, lww=False):
         """Create a set of bucket_parameters to be sent to all of the bucket_creation methods
         Parameters:
             server - The server to create the bucket on. (TestInputServer)
-            bucket_name - The name of the bucket to be created. (String)
             port - The port to create this bucket on. (String)
             password - The password for this bucket. (String)
             size - The size of the bucket to be created. (int)
             enable_replica_index - can be 0 or 1, 1 enables indexing of replica bucket data (int)
             replicas - The number of replicas for this bucket. (int)
-            eviction_policy - The eviction policy for the bucket, can be valueOnly or fullEviction. (String)
+            eviction_policy - The eviction policy for the bucket (String). Can be
+                ephemeral bucket: noEviction or nruEviction
+                non-ephemeral bucket: valueOnly or fullEviction.
             bucket_priority - The priority of the bucket:either none, low, or high. (String)
             bucket_type - The type of bucket. (String)
             flushEnabled - Enable or Disable the flush functionality of the bucket. (int)
@@ -634,7 +640,7 @@ class BaseTestCase(unittest.TestCase):
 
         for i in range(num_buckets):
             name = 'standard_bucket' + str(i)
-            port= STANDARD_BUCKET_PORT + i + 1
+            port = STANDARD_BUCKET_PORT + i + 1
             bucket_priority = None
             if self.standard_bucket_priority is not None:
                 bucket_priority = self.get_bucket_priority(self.standard_bucket_priority[i])
@@ -1984,6 +1990,32 @@ class BaseTestCase(unittest.TestCase):
                     initial_list.remove(server)
         return initial_list
 
+    def add_built_in_server_user(self, testuser=None, rolelist=None, node=None):
+        """
+           From spock, couchbase server is built with some users that handles
+           some specific task such as:
+               cbadminbucket
+           Default added user is cbadminbucket with admin role
+        """
+        if testuser is None:
+            testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
+                                                'password': 'password'}]
+        if rolelist is None:
+            rolelist = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
+                                                      'roles': 'admin'}]
+        if node is None:
+            node = self.master
+
+        self.log.info("**** add built-in '%s' user to node %s ****" % (testuser[0]["name"],
+                                                                       node.ip))
+        RbacBase().create_user_source(testuser, 'builtin', node)
+        self.sleep(10)
+
+        self.log.info("**** add '%s' role to '%s' user ****" % (rolelist[0]["roles"],
+                                                                testuser[0]["name"]))
+        RbacBase().add_user_role(rolelist, RestConnection(node), 'builtin')
+        self.sleep(10)
+
     def get_nodes(self, server):
         """ Get Nodes from list of server """
         rest = RestConnection(self.master)
@@ -2244,21 +2276,23 @@ class BaseTestCase(unittest.TestCase):
                     src_nodes.append(src_node)
         return src_nodes
 
-    def load(self, generators_load, exp=0, flag=0,
+    def load(self, generators_load, buckets=None, exp=0, flag=0,
              kv_store=1, only_store_hash=True, batch_size=1, pause_secs=1,
              timeout_secs=30, op_type='create', start_items=0, verify_data=True):
+        if not buckets:
+            buckets = self.buckets
         gens_load = {}
-        for bucket in self.buckets:
+        for bucket in buckets:
             tmp_gen = []
             for generator_load in generators_load:
                 tmp_gen.append(copy.deepcopy(generator_load))
             gens_load[bucket] = copy.deepcopy(tmp_gen)
         tasks = []
         items = 0
-        for bucket in self.buckets:
+        for bucket in buckets:
             for gen_load in gens_load[bucket]:
                 items += (gen_load.end - gen_load.start)
-        for bucket in self.buckets:
+        for bucket in buckets:
             self.log.info("%s %s to %s documents..." % (op_type, items, bucket.name))
             tasks.append(self.cluster.async_load_gen_docs(self.master, bucket.name,
                                                           gens_load[bucket],
