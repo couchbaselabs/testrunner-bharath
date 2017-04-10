@@ -1,19 +1,14 @@
 import time
-import random
-from eviction.evictionbase import EvictionBase
-
-from memcached.helper.data_helper import MemcachedClientHelper
 import uuid
+
 import mc_bin_client
-
-from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator, JSONNonDocGenerator
-from couchbase_helper.stats_tools import StatsCommon
-
-from membase.api.rest_client import RestConnection
-from sdk_client import SDKClient
-from dcp.dcpbase import DCPBase
-from dcp.constants import *
 import memcacheConstants as constants
+from couchbase_helper.documentgenerator import BlobGenerator
+from dcp.dcpbase import DCPBase
+from eviction.evictionbase import EvictionBase
+from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
+
 
 class EvictionKV(EvictionBase):
 

@@ -1,5 +1,3 @@
-import urllib
-
 from TestInput import TestInputSingleton
 from basetestcase import BaseTestCase
 from couchbase_helper.documentgenerator import DocumentGenerator

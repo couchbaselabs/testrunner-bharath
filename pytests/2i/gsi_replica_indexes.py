@@ -1,17 +1,9 @@
-from datetime import datetime
+import random
 
 from base_2i import BaseSecondaryIndexingTests, log
-from membase.api.rest_client import RestConnection, RestHelper
-import random
-import threading
 from lib import testconstants
-from lib.couchbase_helper.query_definitions import SQLDefinitionGenerator
-from lib.couchbase_helper.tuq_generators import TuqGenerators
 from lib.remote.remote_util import RemoteMachineShellConnection
-from pytests.ent_backup_restore.enterprise_backup_restore_base import \
-    EnterpriseBackupRestoreBase, Backupset
-from pytests.fts.fts_base import NodeHelper
-from pytests.query_tests_helper import QueryHelperTests
+from membase.api.rest_client import RestConnection
 
 
 class GSIReplicaIndexesTests(BaseSecondaryIndexingTests):
