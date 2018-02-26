@@ -509,12 +509,17 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
                                "create", 0)
         self.failover_actions['disk_failure'] = self.fail_disk_via_disk_failure
         self.failover_actions['disk_full'] = self.fail_disk_via_disk_full
+        self.loadgen_tasks = []
         self.log.info("=============Finished Diskautofailover base setup=============")
 
     def tearDown(self):
         self.log.info("=============Starting Diskautofailover teardown ==============")
         self.targetMaster = True
         if hasattr(self, "original_data_path"):
+            for task in self.loadgen_tasks:
+                task.set_result(True)
+                task.result()
+            self.bring_back_failed_nodes_up()
             self.reset_cluster()
             for server in self.servers:
                 self._initialize_node_with_new_data_location(server, self.original_data_path)
@@ -630,8 +635,9 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
                                                 self.server_to_fail,
                                                 "recover_disk_failure", self.timeout,
                                                 self.pause_between_failover_action,
-                                                False,
-                                                self.timeout_buffer,
+                                                expect_auto_failover=False,
+                                                timeout_buffer=self.timeout_buffer,
+                                                check_for_failover=False,
                                                 disk_timeout=self.disk_timeout, disk_location=self.disk_location,
                                                 disk_size=self.disk_location_size)
             self.task_manager.schedule(task)
@@ -644,8 +650,9 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
                                                 self.server_to_fail,
                                                 "recover_disk_full_failure", self.timeout,
                                                 self.pause_between_failover_action,
-                                                False,
-                                                self.timeout_buffer,
+                                                expect_auto_failover=False,
+                                                timeout_buffer=self.timeout_buffer,
+                                                check_for_failover=False,
                                                 disk_timeout=self.disk_timeout, disk_location=self.disk_location,
                                                 disk_size=self.disk_location_size)
             self.task_manager.schedule(task)

@@ -36,12 +36,9 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
 
     def test_disk_failure_for_writes(self):
         self.enable_disk_autofailover_and_validate()
-        tasks = self._loadgen()
+        self.loadgen_tasks = self._loadgen()
         self.failover_expected = True
         self.failover_actions[self.failover_action]()
-        for task in tasks:
-            task.set_result(True)
-            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
@@ -49,22 +46,17 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         self.enable_disk_autofailover_and_validate()
         tasks = []
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
+        self.loadgen_tasks =  tasks
         self.failover_expected = (not self.failover_action == "disk_full")
         self.failover_actions[self.failover_action]()
-        for task in tasks:
-            task.set_result(True)
-            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
     def test_disk_failure_for_read_and_writes(self):
         self.enable_disk_autofailover_and_validate()
-        tasks = self._loadgen()
+        self.loadgen_tasks = self._loadgen()
         self.failover_expected = True
         self.failover_actions[self.failover_action]()
-        for task in tasks:
-            task.set_result(True)
-            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
@@ -81,8 +73,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         """
         self.enable_disk_autofailover_and_validate()
         self.sleep(5)
-        tasks = self._loadgen()
-        tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
+        self.loadgen_tasks = self._loadgen()
+        self.loadgen_tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
         rebalance_task = self.cluster.async_rebalance(self.servers,
                                                       self.servers_to_add,
                                                       self.servers_to_remove)
@@ -99,10 +91,6 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
             pass
         else:
             self.fail("Rebalance should fail since a node went down")
-        finally:
-            for task in tasks:
-                task.set_result(True)
-                task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
@@ -119,8 +107,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         """
         self.enable_disk_autofailover_and_validate()
         self.sleep(5)
-        tasks = self._loadgen()
-        tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
+        self.loadgen_tasks = self._loadgen()
+        self.loadgen_tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
         rebalance_success = self.cluster.rebalance(self.servers,
                                                    self.servers_to_add,
                                                    self.servers_to_remove)
@@ -128,9 +116,6 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
             self.disable_firewall()
             self.fail("Rebalance failed. Check logs")
         self.failover_actions[self.failover_action]()
-        for task in tasks:
-            task.set_result(True)
-            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
@@ -147,8 +132,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         """
         self.enable_disk_autofailover_and_validate()
         self.sleep(5)
-        tasks = self._loadgen()
-        tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
+        self.loadgen_tasks = self._loadgen()
+        self.loadgen_tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
         self.failover_actions[self.failover_action]()
         for node in self.servers_to_add:
             self.rest.add_node(user=self.orchestrator.rest_username,
@@ -165,9 +150,6 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         if (not rebalance_success or not started) and not \
                 self.failover_expected:
             self.fail("Rebalance failed. Check logs")
-        for task in tasks:
-            task.set_result(True)
-            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
@@ -185,8 +167,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
             return
         self.enable_disk_autofailover_and_validate()
         self.sleep(5)
-        tasks = self._loadgen()
-        tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
+        self.loadgen_tasks = self._loadgen()
+        self.loadgen_tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
         self.failover_actions[self.failover_action]()
         self.bring_back_failed_nodes_up()
         self.sleep(30)
@@ -201,9 +183,6 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         msg = "rebalance failed while recovering failover nodes {0}".format(
             self.server_to_fail[0])
         self.assertTrue(self.rest.monitorRebalance(stop_if_loop=True), msg)
-        for task in tasks:
-            task.set_result(True)
-            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
@@ -222,8 +201,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
             return
         self.enable_disk_autofailover_and_validate()
         self.sleep(5)
-        tasks = self._loadgen()
-        tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
+        self.loadgen_tasks = self._loadgen()
+        self.loadgen_tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
         self.failover_actions[self.failover_action]()
         self.nodes = self.rest.node_statuses()
         self.remove_after_failover = True
@@ -231,8 +210,5 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         msg = "rebalance failed while removing failover nodes {0}".format(
             self.server_to_fail[0])
         self.assertTrue(self.rest.monitorRebalance(stop_if_loop=True), msg)
-        for task in tasks:
-            task.set_result(True)
-            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()

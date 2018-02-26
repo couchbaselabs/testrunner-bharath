@@ -4939,7 +4939,6 @@ class AutoFailoverNodesFailureTask(Task):
     def _recover_disk(self, node):
         shell = RemoteMachineShellConnection(node)
         o,r = shell.mount_partition(self.disk_location)
-        o,r = shell.get_disk_info()
         for line in o:
             if self.disk_location in line:
                 self.log.info("Mounted disk at location : {0} on {1}".format(self.disk_location, node.ip))
