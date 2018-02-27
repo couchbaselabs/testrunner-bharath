@@ -517,8 +517,11 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
         self.targetMaster = True
         if hasattr(self, "original_data_path"):
             for task in self.loadgen_tasks:
-                task.set_result(True)
-                task.result()
+                try:
+                    task.set_result(True)
+                    task.result()
+                except Exception:
+                    pass
             self.bring_back_failed_nodes_up()
             self.reset_cluster()
             for server in self.servers:
