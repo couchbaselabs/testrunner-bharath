@@ -1,3 +1,4 @@
+import gc
 import time
 
 from basetestcase import BaseTestCase
@@ -522,10 +523,17 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
                     task.result()
                 except Exception:
                     pass
+            self.task_manager.shutdown(force=True)
             self.bring_back_failed_nodes_up()
             self.reset_cluster()
             for server in self.servers:
                 self._initialize_node_with_new_data_location(server, self.original_data_path)
+            for object in gc.get_objects():
+                if isinstance(object, TaskManager):
+                    try:
+                        object.shutdown(force=True)
+                    except:
+                        pass
         self.log.info("=============Finished Diskautofailover teardown ==============")
 
     def enable_disk_autofailover(self):
