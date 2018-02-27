@@ -480,7 +480,7 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
         self.targetMaster = True
         self.reset_cluster()
         self.disk_location = self.input.param("data_location", "/data")
-        self.disk_location_size = self.input.param("data_location_size", None)
+        self.disk_location_size = self.input.param("data_location_size", 5120)
         self.data_location = "{0}/data".format(self.disk_location)
         self.disk_timeout = self.input.param("disk_timeout", 120)
         self.read_loadgen = self.input.param("read_loadgen", False)
