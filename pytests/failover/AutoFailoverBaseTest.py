@@ -529,11 +529,12 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
             for server in self.servers:
                 self._initialize_node_with_new_data_location(server, self.original_data_path)
             for object in gc.get_objects():
-                if isinstance(object, TaskManager):
-                    try:
+                try:
+                    if object.name in ["Autofailover_thread", "Cluster_Thread", "Nodes_failure_detector_thread"]:
+                        self.log.info(object.name)
                         object.shutdown(force=True)
-                    except:
-                        pass
+                except:
+                    pass
         self.log.info("=============Finished Diskautofailover teardown ==============")
 
     def enable_disk_autofailover(self):
