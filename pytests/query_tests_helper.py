@@ -23,11 +23,12 @@ class QueryHelperTests(BaseTestCase):
             "use_gsi_for_secondary", True)
         self.scan_consistency = self.input.param("scan_consistency", "request_plus")
         self.shell = RemoteMachineShellConnection(self.master)
-        self.buckets = RestConnection(self.master).get_buckets()
+        if not self.skip_init_check_cbserver:  # for upgrade tests
+            self.buckets = RestConnection(self.master).get_buckets()
         self.docs_per_day = self.input.param("doc-per-day", 49)
         self.use_rest = self.input.param("use_rest", True)
         self.max_verify = self.input.param("max_verify", None)
-        self.item_flag = self.input.param("item_flag", 4042322160)
+        self.item_flag = self.input.param("item_flag", 0)
         self.n1ql_port = self.input.param("n1ql_port", 8093)
         self.dataset = self.input.param("dataset", "default")
         self.groups = self.input.param("groups", "all").split(":")
@@ -41,8 +42,9 @@ class QueryHelperTests(BaseTestCase):
         self.full_docs_list = self.generate_full_docs_list(self.gens_load)
         self.gen_results = TuqGenerators(self.log,
                                          full_set=self.full_docs_list)
-        self.n1ql_server = self.get_nodes_from_services_map(
-            service_type="n1ql")
+        if not self.skip_init_check_cbserver:   # for upgrade tests
+            self.n1ql_server = self.get_nodes_from_services_map(
+                service_type="n1ql")
         query_definition_generator = SQLDefinitionGenerator()
         if self.dataset == "default" or self.dataset == "employee":
             self.query_definitions = query_definition_generator.generate_employee_data_query_definitions()

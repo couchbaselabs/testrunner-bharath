@@ -1,11 +1,14 @@
 import logging
 import random
+import time
 
-from couchbase_helper.cluster import Cluster
-from couchbase_helper.query_definitions import SQLDefinitionGenerator
-from couchbase_helper.tuq_generators import TuqGenerators
-from membase.api.rest_client import RestConnection
+from lib.membase.helper.cluster_helper import ClusterOperationHelper
+from lib.remote.remote_util import RemoteMachineShellConnection
 from newtuq import QueryTests
+from couchbase_helper.cluster import Cluster
+from couchbase_helper.tuq_generators import TuqGenerators
+from couchbase_helper.query_definitions import SQLDefinitionGenerator
+from membase.api.rest_client import RestConnection
 
 log = logging.getLogger(__name__)
 
@@ -13,6 +16,7 @@ class BaseSecondaryIndexingTests(QueryTests):
 
     def setUp(self):
         super(BaseSecondaryIndexingTests, self).setUp()
+        self.ansi_join = self.input.param("ansi_join", False)
         self.index_lost_during_move_out = []
         self.verify_using_index_status = self.input.param("verify_using_index_status",False)
         self.use_replica_when_active_down = self.input.param("use_replica_when_active_down",True)
@@ -199,9 +203,12 @@ class BaseSecondaryIndexingTests(QueryTests):
         for bucket in buckets:
             for query_definition in query_definitions:
                 index_info = query_definition.generate_index_drop_query(bucket = bucket.name)
+                index_create_info = "{0}:{1}".format(bucket.name, query_definition.index_name)
                 if index_info not in self.memory_drop_list:
                     self.memory_drop_list.append(index_info)
                     self.drop_index(bucket.name, query_definition)
+                if index_create_info in self.memory_create_list:
+                    self.memory_create_list.remove(index_create_info)
 
     def async_multi_drop_index(self, buckets=None, query_definitions=None):
         if not buckets:
@@ -367,9 +374,8 @@ class BaseSecondaryIndexingTests(QueryTests):
                      scan_consistency = scan_consistency, scan_vector = scan_vector))
         return multi_query_tasks
 
-    def async_check_and_run_operations(self, buckets = [],
-     initial = False, before = False, after = False, in_between = False,
-     scan_consistency = None, scan_vectors = None):
+    def async_check_and_run_operations(self, buckets=[], initial=False, before=False, after=False,
+                                       in_between=False, scan_consistency=None, scan_vectors=None):
         #self.verify_query_result = True
         #self.verify_explain_result = True
         if initial:
@@ -484,7 +490,7 @@ class BaseSecondaryIndexingTests(QueryTests):
                     if "n1ql" in nodes_out and phase == "in_between":
                         tasks = []
                     else:
-                        tasks  += self.async_multi_query_using_index(buckets, query_definitions, expected_results,
+                        tasks += self.async_multi_query_using_index(buckets, query_definitions, expected_results,
                                                                  scan_consistency=scan_consistency,
                                                                  scan_vectors=scan_vectors)
                 if "drop_index" in operation_map:
@@ -808,6 +814,26 @@ class BaseSecondaryIndexingTests(QueryTests):
                     is_cluster_healthy = True
         return is_cluster_healthy
 
+    def wait_until_indexes_online(self, timeout=600):
+        rest = RestConnection(self.master)
+        init_time = time.time()
+        check = False
+        next_time = init_time
+        while not check:
+            index_status = rest.get_index_status()
+            log.info(index_status)
+            for index_info in index_status.values():
+                for index_state in index_info.values():
+                    if index_state["status"] == "Ready":
+                        check = True
+                    else:
+                        check = False
+                        time.sleep(1)
+                        next_time = time.time()
+                        break
+            check = check or (next_time - init_time > timeout)
+        return check
+
     def get_dgm_for_plasma(self, indexer_nodes=None, memory_quota=256):
         """
         Internal Method to create OOM scenario
@@ -854,3 +880,20 @@ class BaseSecondaryIndexingTests(QueryTests):
             cnt += 1
             docs += 20
         return False
+
+    def reboot_node(self, node):
+        self.log.info("Rebooting node '{0}'....".format(node.ip))
+        shell = RemoteMachineShellConnection(node)
+        if shell.extract_remote_info().type.lower() == 'windows':
+            o, r = shell.execute_command("shutdown -r -f -t 0")
+        elif shell.extract_remote_info().type.lower() == 'linux':
+            o, r = shell.execute_command("reboot")
+        shell.log_command_output(o, r)
+        shell.disconnect()
+        # wait for restart and warmup on all node
+        self.sleep(self.wait_timeout * 5)
+        # disable firewall on these nodes
+        self.stop_firewall_on_node(node)
+        # wait till node is ready after warmup
+        ClusterOperationHelper.wait_for_ns_servers_or_assert([node], self,
+                                                             wait_if_warmup=True)

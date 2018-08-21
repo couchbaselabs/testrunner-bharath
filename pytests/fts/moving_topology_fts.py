@@ -211,7 +211,7 @@ class MovingTopFTS(FTSBaseTest):
                           %(index.name,index.get_indexed_doc_count()))
         task = self._cb_cluster.async_failover(graceful=True)
         task.result()
-        self.sleep(30)
+        self.sleep(60)
         self._cb_cluster.add_back_node(recovery_type='delta', services=["kv,fts"])
         for index in self._cb_cluster.get_indexes():
             self.is_index_partitioned_balanced(index)
@@ -573,8 +573,10 @@ class MovingTopFTS(FTSBaseTest):
         self.wait_for_indexing_complete()
         self.validate_index_count(equal_bucket_doc_count=True)
         self._cb_cluster.reboot_one_node(test_case=self)
+        self.sleep(5)
         for index in self._cb_cluster.get_indexes():
             self.is_index_partitioned_balanced(index)
+        self.validate_index_count(equal_bucket_doc_count=True)
         for index in self._cb_cluster.get_indexes():
             hits, _, _, _ = index.execute_query(query=self.query,
                                              expected_hits=self._num_items)
@@ -701,12 +703,15 @@ class MovingTopFTS(FTSBaseTest):
         #TESTED
         index = self.create_index_generate_queries()
         services = []
+        tasks = []
         for _ in xrange(self.num_rebalance):
             services.append("fts")
-        tasks = []
-        tasks.append(self._cb_cluster.async_swap_rebalance(
-            num_nodes=self.num_rebalance,
-            services=services))
+        reb_thread = Thread(
+            target=self._cb_cluster.async_swap_rebalance,
+            args=[self.num_rebalance, services])
+        reb_thread.start()
+        # wait for a bit before querying
+        self.sleep(8)
         for count in range(0, len(index.fts_queries)):
             tasks.append(self._cb_cluster.async_run_fts_query_compare(
                 fts_index=index,
@@ -714,6 +719,7 @@ class MovingTopFTS(FTSBaseTest):
                 es_index_name=None,
                 query_index=count))
         self.run_tasks_and_report(tasks, len(index.fts_queries))
+        self.sleep(5)
         self.is_index_partitioned_balanced(index)
         hits, _, _, _ = index.execute_query(query=self.query,
                                          expected_hits=self._num_items)
@@ -913,37 +919,71 @@ class MovingTopFTS(FTSBaseTest):
         """
          Perform indexing + rebalance + index delete in parallel
         """
+        import copy
+        self.load_data()
+        self.create_fts_indexes_all_buckets()
+        self.sleep(10)
+        self.log.info("Index building has begun...")
+        indexes = copy.copy(self._cb_cluster.get_indexes())
+        for index in indexes:
+            self.log.info("Index count for %s: %s"
+                          %(index.name, index.get_indexed_doc_count()))
+        # wait till indexing is midway...
+        self.wait_for_indexing_complete(self._num_items/2)
+        reb_thread = Thread(target=self._cb_cluster.rebalance_out,
+                                   name="rebalance",
+                                   args=())
+        reb_thread.start()
+        # the first part of the rebalance is kv, wait for fts rebalance
+        self.sleep(50)
+
+        for index in indexes:
+            index.delete()
+
+        self.sleep(5)
+
+        for index in indexes:
+            try:
+                _, defn = index.get_index_defn()
+                self.log.info(defn['indexDef'])
+            except KeyError as e:
+                self.log.info("Expected exception: {0}".format(e))
+                deleted = self._cb_cluster.are_index_files_deleted_from_disk(index.name)
+                if deleted:
+                    self.log.info("Confirmed: index files deleted from disk")
+                else:
+                    self.fail("ERROR: Index files still present on disk")
+            else:
+                self.fail("ERROR: Index definition still exists after deletion! "
+                          "%s" %defn['indexDef'])
+
+
+    def delete_buckets_during_rebalance(self):
+        """
+            Perform indexing + rebalance + bucket delete in parallel
+        """
+        from lib.membase.api.rest_client import RestConnection
         self.load_data()
         self.create_fts_indexes_all_buckets()
         self.sleep(10)
         self.log.info("Index building has begun...")
         for index in self._cb_cluster.get_indexes():
             self.log.info("Index count for %s: %s"
-                          %(index.name, index.get_indexed_doc_count()))
+                          % (index.name, index.get_indexed_doc_count()))
         # wait till indexing is midway...
-        self.wait_for_indexing_complete(self._num_items/2)
+        self.wait_for_indexing_complete(self._num_items / 2)
         reb_thread = Thread(target=self._cb_cluster.rebalance_out_master,
-                                   name="rebalance",
-                                   args=())
+                            name="rebalance",
+                            args=())
         reb_thread.start()
-        self.sleep(15)
-        index = self._cb_cluster.get_fts_index_by_name('default_index_1')
-        new_plan_param = {"maxPartitionsPerPIndex": 128}
-        index.index_definition['planParams'] = \
-            index.build_custom_plan_params(new_plan_param)
-        index.index_definition['uuid'] = index.get_uuid()
-        del_index_thread = Thread(target=index.delete(),
-                                   name="delete_index",
-                                   args=())
-        del_index_thread.start()
-        self.sleep(5)
-        try:
-            _, defn = index.get_index_defn()
-            self.log.info(defn)
-            self.fail("ERROR: Index definition still exists after deletion! "
-                      "%s" %defn['indexDef'])
-        except Exception as e:
-            self.log.info("Expected exception caught: %s" % e)
+        self.sleep(1)
+        for bucket in self._cb_cluster.get_buckets():
+            self.log.info("Deleting bucket {0}".format(bucket.name))
+            if not RestConnection(self._cb_cluster.get_master_node()).delete_bucket(bucket.name):
+                self.log.info("Expected error - cannot delete buckets during rebalance!")
+            else:
+                self.fail("Able to delete buckets during rebalance!")
+
 
     def update_index_during_failover(self):
         """
@@ -1218,7 +1258,7 @@ class MovingTopFTS(FTSBaseTest):
         non_master_nodes = list(set(self._cb_cluster.get_nodes())-
                            set([self._master]))
 
-        from lib.membase.api.rest_client import RestConnection, RestHelper
+        from lib.membase.api.rest_client import RestConnection
         rest = RestConnection(self._master)
         nodes = rest.node_statuses()
         ejected_nodes = []
@@ -1260,3 +1300,79 @@ class MovingTopFTS(FTSBaseTest):
                           % (index.name, index.get_indexed_doc_count()))
         self.wait_for_indexing_complete()
         self.validate_index_count(equal_bucket_doc_count=True)
+
+    def test_kv_and_fts_rebalance_with_high_ops(self):
+        from lib.membase.api.rest_client import RestConnection
+        rest = RestConnection(self._cb_cluster.get_master_node())
+
+        # start loading
+        default_bucket = self._cb_cluster.get_bucket_by_name("default")
+        load_thread = Thread(target=self._cb_cluster.load_from_high_ops_loader,
+                                       name="gen_high_ops_load",
+                                       args=[default_bucket])
+        load_thread.start()
+
+        # create index and query
+        index = self.create_index(
+            self._cb_cluster.get_bucket_by_name('default'),
+            "default_index")
+        load_thread.join()
+        self.wait_for_indexing_complete()
+        
+        # check for dataloss
+        errors = self._cb_cluster.check_dataloss_with_high_ops_loader(default_bucket)
+        if errors:
+            self.log.info("Printing missing keys:")
+            for error in errors:
+                print error
+
+        if self._num_items != rest.get_active_key_count(default_bucket):
+            self.fail("FATAL: Data loss detected!! Docs loaded : {0}, docs present: {1}".
+                      format(self._num_items, rest.get_active_key_count(default_bucket)))
+        else:
+            self.log.info("SUCCESS: No traces of data loss upon verification")
+
+        # load again
+        load_thread = Thread(target=self._cb_cluster.load_from_high_ops_loader,
+                                       name="gen_high_ops_load",
+                                       args=[default_bucket])
+        load_thread.start()
+
+
+        # do a rebalance-out of kv+fts node
+        self._cb_cluster.rebalance_out_master()
+        load_thread.join()
+
+        # check for dataloss
+        errors = self._cb_cluster.check_dataloss_with_high_ops_loader(default_bucket)
+        if errors:
+            self.log.info("Printing missing keys:")
+            for error in errors:
+                print error
+        if self._num_items != rest.get_active_key_count(default_bucket):
+            self.fail("FATAL: Data loss detected!! Docs loaded : {0}, docs present: {1}".
+                      format(self._num_items, rest.get_active_key_count(default_bucket)))
+        else:
+            self.log.info("SUCCESS: No traces of data loss upon verification")
+
+        # load again
+        load_thread = Thread(target=self._cb_cluster.load_from_high_ops_loader,
+                                       name="gen_high_ops_load",
+                                       args=[default_bucket])
+        load_thread.start()
+
+        # do a rebalance-out of fts node
+        self._cb_cluster.rebalance_out()
+        load_thread.join()
+
+        # check for dataloss
+        errors = self._cb_cluster.check_dataloss_with_high_ops_loader(default_bucket)
+        if errors:
+            self.log.info("Printing missing keys:")
+            for error in errors:
+                print error
+        if self._num_items != rest.get_active_key_count(default_bucket):
+            self.fail("FATAL: Data loss detected!! Docs loaded : {0}, docs present: {1}".
+                      format(self._num_items, rest.get_active_key_count(default_bucket)))
+        else:
+            self.log.info("SUCCESS: No traces of data loss upon verification")

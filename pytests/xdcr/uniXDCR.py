@@ -694,10 +694,10 @@ class unidirectional(XDCRNewBaseTest):
         for node in self.src_cluster.get_nodes():
             count = NodeHelper.check_goxdcr_log(
                             node,
-                            "batchGetMeta timed out",
+                            "batchGetMeta received fatal error and had to abort",
                             goxdcr_log)
-            self.assertEqual(count, 0, "batchGetMeta timed out error message found in " + str(node.ip))
-            self.log.info("batchGetMeta timed out error message not found in " + str(node.ip))
+            self.assertEqual(count, 0, "batchGetMeta error message found in " + str(node.ip))
+            self.log.info("batchGetMeta error message not found in " + str(node.ip))
 
         self.verify_results()
 
@@ -714,10 +714,10 @@ class unidirectional(XDCRNewBaseTest):
         for node in self.src_cluster.get_nodes():
             count = NodeHelper.check_goxdcr_log(
                             node,
-                            "batchGetMeta timed out",
+                            "batchGetMeta received fatal error and had to abort",
                             goxdcr_log)
             self.assertEqual(count, 0, "batchGetMeta timed out error message found in " + str(node.ip))
-            self.log.info("batchGetMeta timed out error message not found in " + str(node.ip))
+            self.log.info("batchGetMeta error message not found in " + str(node.ip))
 
         self.sleep(300)
         self.verify_results()
@@ -917,13 +917,29 @@ class unidirectional(XDCRNewBaseTest):
             self.sleep(30)
             self.src_cluster.resume_all_replications()
 
+            self.sleep(self._wait_timeout)
+
             output, error = conn.execute_command("netstat -an | grep " + self.src_cluster.get_master_node().ip
                                                  + ":11210 | wc -l")
             conn.log_command_output(output, error)
             self.log.info("No. of memcached connections in iteration {0}:  {1}".format(i+1, output[0]))
-            self.assertLessEqual(int(output[0]), int(before), "Number of memcached connections increased")
+            self.assertLessEqual(abs(int(output[0]) - int(before)), 5, "Number of memcached connections changed beyond allowed limit")
 
         for task in load_tasks:
             task.result()
 
         self.log.info("No. of memcached connections did not increase with pausing and resuming replication multiple times")
+
+    def test_maxttl_setting(self):
+        maxttl = int(self._input.param("maxttl", None))
+        self.setup_xdcr_and_load()
+        self.merge_all_buckets()
+        self._wait_for_replication_to_catchup()
+        self.sleep(maxttl, "waiting for docs to expire per maxttl properly")
+        for bucket in self.src_cluster.get_buckets():
+            items = RestConnection(self.src_master).get_active_key_count(bucket)
+            self.log.info("Docs in source bucket is {0} after maxttl has elapsed".format(items))
+            if items != 0:
+                self.fail("Docs in source bucket is not 0 after maxttl has elapsed")
+        self._wait_for_replication_to_catchup()
+

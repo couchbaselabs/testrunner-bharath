@@ -1,18 +1,16 @@
-import copy
-import json
-from membase.api.rest_client import RestConnection, RestHelper
+from membase.api.rest_client import RestConnection
+from membase.api.rest_client import RestConnection
 from membase.helper.rebalance_helper import RebalanceHelper
 from remote.remote_util import RemoteMachineShellConnection
-from remote.remote_util import RemoteUtilHelper
-from failoverbasetests import FailoverBaseTest
+
 
 class NegativeFailoverTests(FailoverBaseTest):
 
     def setUp(self):
-        super(NegativeFailoverTests, self).setUp(self)
+        super(NegativeFailoverTests, self).setUp()
 
     def tearDown(self):
-        super(NegativeFailoverTests, self).tearDown(self)
+        super(NegativeFailoverTests, self).tearDown()
 
     def graceful_failover_when_rebalance_running(self):
         try:

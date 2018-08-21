@@ -58,6 +58,7 @@ class EventingRQG(EventingBaseTest):
     join_map = {"PREVIOUS_TABLE.FIELD":"src_bucket.email","CURRENT_TABLE.FIELD":"_bucket.email","STRING_FIELD ": "email ", "NUMERIC_FIELD ": "age ", "UPPER_BOUND_VALUE": "8",
                   "LOWER_BOUND_VALUE": "0", "NUMERIC_FIELD_LIST": "age", "STRING_FIELD_LIST": "email",
                   "( LIST )": "[1,2,3]"}
+    field_map = {"NUMERIC_VALUE":"0","STRING_VALUES":"\"a@b.c\""}
 
     def tearDown(self):
         super(EventingRQG, self).tearDown()
@@ -129,12 +130,12 @@ class EventingRQG(EventingBaseTest):
                 log.error(e)
             finally:
                 self.undeploy_delete_all_functions()
-                self.delete_temp_handler_code()
+        self.delete_temp_handler_code()
         self.verify_n1ql_stats(s)
 
 
     def create_function_and_deploy(self, query, replace=True):
-        log.debug("creating handler code for :",query)
+        log.info("creating handler code for :{}".format(query))
         if replace:
             file_path = self.generate_eventing_file(self._convert_template_n1ql(query))
         else:
@@ -147,12 +148,19 @@ class EventingRQG(EventingBaseTest):
 
 
     def _convert_template_n1ql(self, query):
-        n1ql = str(query).replace("BUCKET_NAME", self.src_bucket_name);
-        n1ql = str(n1ql).replace("TRUNCATE", "TRUNC");
-        if "GROUP BY" in n1ql:
+        n1ql = str(query).replace("BUCKET_NAME", self.src_bucket_name)
+        n1ql = str(n1ql).replace("TRUNCATE", "TRUNC")
+        for k, v in self.field_map.items():
+            n1ql = str(n1ql).replace(k, v)
+        if "HAVING" in n1ql:
             for k, v in self.having_map.items():
                 n1ql=str(n1ql).replace(k,v)
             group_fields = re.search(r'GROUP BY(.*?)HAVING', n1ql).group(1)
+            n1ql = n1ql.replace("GROUPBY_FIELDS", group_fields)
+        elif "GROUP BY" in n1ql:
+            for k, v in self.having_map.items():
+                n1ql=str(n1ql).replace(k,v)
+            group_fields = re.search(r'GROUP BY(.*?);', n1ql).group(1)
             n1ql = n1ql.replace("GROUPBY_FIELDS", group_fields)
         if "UPDATE" in n1ql:
             for k,v in self.update_map.items():
@@ -164,10 +172,18 @@ class EventingRQG(EventingBaseTest):
         return n1ql
 
     def generate_eventing_file(self, query):
-        if not os.path.exists(HANDLER_CODE.N1QL_TEMP_PATH):
-            os.makedirs(HANDLER_CODE.N1QL_TEMP_PATH)
+        h_code = self.input.param('handler_code', 'n1ql_with_exec')
+        if h_code == "n1ql_with_exec":
+            handler_code = HANDLER_CODE.N1QL_TEMP
+        else:
+            handler_code = HANDLER_CODE.N1QL_TEMP_WITHOUT_EXEC
+        try:
+            if not os.path.exists(HANDLER_CODE.N1QL_TEMP_PATH):
+                os.makedirs(HANDLER_CODE.N1QL_TEMP_PATH)
+        except OSError as err:
+            print(err)
         script_dir = os.path.dirname(__file__)
-        abs_file_path = os.path.join(script_dir, HANDLER_CODE.N1QL_TEMP)
+        abs_file_path = os.path.join(script_dir, handler_code)
         fh = open(abs_file_path, "r")
         code = Template(fh.read()).substitute(n1ql=query)
         fh.close()
@@ -193,6 +209,7 @@ class EventingRQG(EventingBaseTest):
 
 
     def delete_temp_handler_code(self, path=HANDLER_CODE.N1QL_TEMP_PATH):
+        log.info("deleting all the handler codes")
         script_dir = os.path.dirname(__file__)
         dirPath = os.path.join(script_dir, path)
         fileList = os.listdir(dirPath)

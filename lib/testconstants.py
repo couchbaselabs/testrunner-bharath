@@ -5,42 +5,56 @@ MEMBASE_DATA_PATH = "/opt/membase/var/lib/membase/data/"
 MEMBASE_VERSIONS = ["1.5.4", "1.6.5.4-win64", "1.7.0", "1.7.1", "1.7.1.1", "1.7.2"]
 COUCHBASE_DATA_PATH = "/opt/couchbase/var/lib/couchbase/data/"
 # remember update WIN_REGISTER_ID also when update COUCHBASE_VERSION
-COUCHBASE_VERSIONS = ["1.8.0r", "1.8.0", "1.8.1", "2.0.0", "2.0.1", "2.0.2", "2.1.0",
+COUCHBASE_VERSIONS = ["0.0.0",
+                      "1.8.0r", "1.8.0", "1.8.1", "2.0.0", "2.0.1", "2.0.2", "2.1.0",
                       "2.1.1", "2.2.0", "2.2.1", "2.5.0", "2.5.1", "2.5.2", "3.0.0",
                       "3.0.1", "3.0.2", "3.0.3", "3.1.0", "3.1.1", "3.1.2", "3.1.3",
                       "3.1.4", "3.1.5", "3.1.6", "3.5.0", "4.0.0", "4.0.1", "4.1.0",
                       "4.1.1", "4.1.2", "4.5.0", "4.5.1", "4.6.0", "4.6.1", "4.6.2",
                       "4.6.3", "4.6.4", "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2",
-                      "5.1.0", "5.5.0"]
-CB_RELEASE_BUILDS = {"2.1.1":"764", "2.2.0":"821", "2.5.0":"1059", "2.5.1":"1083",
+                      "5.1.0", "5.1.1", "5.1.2", "5.5.0", "5.5.1", "6.0.0", "6.5.0"]
+CB_RELEASE_BUILDS = {"0.0.0":"0000",
+                     "2.1.1":"764", "2.2.0":"821", "2.5.0":"1059", "2.5.1":"1083",
                      "2.5.2":"1154","3.0.3":"1716", "3.1.5":"1859","3.1.6":"1904",
                      "4.0.0":"4051", "4.1.0":"5005", "4.1.1":"5914", "4.1.2":"6088",
                      "4.5.0":"2601", "4.5.1":"2844", "4.6.0":"3573", "4.6.1":"3652",
-                     "4.6.2":"3905", "4.6.3":"4136", "4.6.4":"0000",  "4.7.0":"0000",
-                     "4.6.5":"0000", "5.0.0":"3519", "5.0.1":"0000", "5.0.2":"0000",
-                     "5.1.0":"0000", "5.5.0":"0000"}
+                     "4.6.2":"3905", "4.6.3":"4136", "4.6.4":"4590",  "4.7.0":"0000",
+                     "4.6.5":"4742", "5.0.0":"3519", "5.0.1":"5003", "5.0.2":"0000",
+                     "5.1.0":"5552", "5.1.1":"5723", "5.1.2":"0000", "5.5.0":"2958",
+                     "5.5.1":"0000", "6.0.0":"0000", "6.5.0":"0000"}
 COUCHBASE_FROM_VERSION_3 = ["3.0.0", "3.0.1", "3.0.2", "3.0.3", "3.1.0", "3.1.1",
                             "3.1.2", "3.1.3", "3.1.4", "3.1.5", "3.1.6", "3.5.0",
                             "4.0.0", "4.0.1", "4.1.0", "4.1.1", "4.1.2", "4.5.0",
                             "4.5.1", "4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4",
                             "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0",
-                            "5.5.0"]
+                            "5.1.1", "5.1.2", "5.5.0", "5.5.1", "6.0.0", "6.5.0"]
 COUCHBASE_RELEASE_FROM_VERSION_3 = ["3.0.0", "3.0.1", "3.0.2", "3.0.3", "3.1.0",
                                     "3.1.1", "3.1.2", "3.1.3", "3.1.5", "4.0.0",
                                     "4.1.0", "4.1.1", "4.1.2", "4.5.0", "4.5.1",
-                                    "4.6.0", "4.6.1", "4.6.2", "4.6.3", "5.0.0"]
-COUCHBASE_FROM_VERSION_4 = ["4.0.0", "4.0.1", "4.1.0", "4.1.1", "4.1.2", "4.5.0",
+                                    "4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4",
+                                    "4.6.5", "5.0.0", "5.0.1", "5.1.0", "5.1.1",
+                                    "5.5.0"]
+COUCHBASE_FROM_VERSION_4 = ["0.0.0",
+                            "4.0.0", "4.0.1", "4.1.0", "4.1.1", "4.1.2", "4.5.0",
                             "4.5.1", "4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4",
-                            "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.5.0"]
+                            "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0",
+                            "5.1.1", "5.1.2", "5.5.0", "5.5.1", "6.0.0", "6.5.0"]
 COUCHBASE_FROM_SHERLOCK = ["4.0.0", "4.0.1", "4.1.0", "4.1.1", "4.1.2", "4.5.0",
                            "4.5.1", "4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4",
-                           "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.5.0"]
+                           "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0",
+                           "5.1.1", "5.1.2", "5.5.0", "5.5.1", "6.0.0", "6.5.0"]
 COUCHBASE_FROM_4DOT6 = ["4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4", "4.6.5", "4.7.0",
-                        "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.5.0"]
-COUCHBASE_FROM_WATSON = ["4.5.0", "4.5.1", "4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4",
-                         "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.5.0"]
-COUCHBASE_FROM_SPOCK = ["4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.5.0"]
-COUCHBASE_FROM_VULCAN = ["5.5.0"]
+                        "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.1.1", "5.1.2", "5.5.0",
+                        "5.5.1", "6.0.0", "6.5.0"]
+COUCHBASE_FROM_WATSON = ["0.0.0",
+                         "4.5.0", "4.5.1", "4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4",
+                         "4.6.5", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.1.1",
+                         "5.1.2", "5.5.0", "5.5.1", "6.0.0", "6.5.0"]
+COUCHBASE_FROM_SPOCK = ["0.0.0", "4.7.0", "5.0.0", "5.0.1", "5.0.2", "5.1.0", "5.1.1",
+                        "5.1.2", "5.5.0", "5.5.1", "6.0.0", "6.5.0"]
+COUCHBASE_FROM_VULCAN = ["0.0.0", "5.5.0", "5.5.1", "6.0.0", "6.5.0"]
+COUCHBASE_FROM_ALICE = ["0.0.0", "6.0.0", "6.5.0"]
+COUCHBASE_FROM_MAD_HATTER = ["0.0.0", "6.5.0"]
 COUCHBASE_RELEASE_VERSIONS_3 = ["3.0.1", "3.0.1-1444", "3.0.2", "3.0.2-1603", "3.0.3",
                                 "3.0.3-1716", "3.1.0", "3.1.0-1797", "3.1.1", "3.1.1-1807",
                                 "3.1.2", "3.1.2-1815", "3.1.3", "3.1.3-1823", "3.1.5"]
@@ -56,8 +70,9 @@ WIN_CB_VERSION_3 = ["3.0.0", "3.0.1", "3.0.2", "3.0.3", "3.1.0", "3.1.1","3.1.2"
                     "3.1.3", "3.1.4", "3.1.5", "3.1.6"]
 SHERLOCK_VERSION = ["4.0.0", "4.0.1", "4.0", "4.1.0", "4.1", "4.1.1", "4.1.2"]
 WATSON_VERSION = ["4.5.0", "4.5.1", "4.6.0", "4.6.1", "4.6.2", "4.6.3", "4.6.4", "4.6.5"]
-CB_VERSION_NAME = {"4.0":"sherlock", "4.1":"sherlock", "4.5":"watson", "4.6":"watson",
-                   "4.7":"spock", "5.0":"spock", "5.1":"spock", "5.5":"vulcan"}
+CB_VERSION_NAME = {"0.0":"master", "4.0":"sherlock", "4.1":"sherlock", "4.5":"watson",
+                   "4.6":"watson", "4.7":"spock", "5.0":"spock", "5.1":"spock", "5.5":"vulcan",
+                   "6.0":"alice", "6.5": "mad-hatter"}
 SYSTEMD_SERVER = ["centos 7", "suse 12", "ubuntu 16.04", "debian gnu/linux 8", "debian gnu/linux 9"]
 WIN_MEMBASE_DATA_PATH = '/cygdrive/c/Program\ Files/Membase/Server/var/lib/membase/data/'
 WIN_COUCHBASE_DATA_PATH = '/cygdrive/c/Program\ Files/Couchbase/Server/var/lib/couchbase/data/'
@@ -109,6 +124,7 @@ WIN_REGISTER_ID = {"1654":"70668C6B-E469-4B72-8FAD-9420736AAF8F",
                    "462":"C4EC4311-8AE1-28D4-4174-A48CD0291F77",
                    "463":"963479CF-8C24-BB54-398E-0FF6F2A0128C",
                    "464":"83E54668-E2D2-A014-815C-CE8B51BE15CB",
+                   "465":"E38D9F16-B7A2-CC64-0D6C-D9D274D44B4F",
                    "470":"5F8BB367-A796-1104-05DE-00BCD7A787A5",
                    "500":"5F8BB367-A796-1104-05DE-00BCD7A787A5"}
 
@@ -129,7 +145,7 @@ MAX_TIME_HOUR = 23
 NUM_ERLANG_THREADS = 16
 MIN_KV_QUOTA = 256
 INDEX_QUOTA = 256
-FTS_QUOTA = 256
+FTS_QUOTA = 512
 EVENTING_QUOTA = 256
 CBAS_QUOTA = 1024
 LINUX_COUCHBASE_BIN_PATH = "/opt/couchbase/bin/"
@@ -146,6 +162,7 @@ WIN_COUCHBASE_SAMPLE_PATH_C = "c:/Program\ Files/Couchbase/Server/samples/"
 WIN_COUCHBASE_BIN_PATH_RAW = 'C:/Program\ Files/Couchbase/Server/bin/'
 WIN_COUCHBASE_PORT_CONFIG_PATH = "/cygdrive/c/Program\ Files/couchbase/Server/etc/couchbase"
 WIN_COUCHBASE_OLD_CONFIG_PATH = "/cygdrive/c/Program\ Files/couchbase/Server/var/lib/couchbase/config"
+WIN_CYGWIN_BIN_PATH = "/cygdrive/c/cygwin64/bin/"
 WIN_TMP_PATH = '/cygdrive/c/tmp/'
 WIN_TMP_PATH_RAW = 'C:/tmp/'
 WIN_BACKUP_C_PATH = "c:/tmp/backup/"
@@ -179,7 +196,17 @@ CLI_COMMANDS = ["cbbackup", "cbbrowse_logs", "cbcollect_info", "cbcompact", "cbd
                 "ct_run", "curl", "curl-config", "derb", "dialyzer", "dump-guts", "epmd", "erl", "erlc", "escript", "genbrk", \
                 "gencfu", "gencnval", "genctd", "generate_cert", "genrb", "icu-config", "install", "makeconv", "mctimings", \
                 "memcached", "moxi", "reports", "sigar_port", "sqlite3", "to_erl", "tools", "typer", "uconv", "vbmap"]
-
+LOG_FILE_NAMES = ['cbcollect_info.log', 'couchbase.log', 'couchstore_local.log', 'ddocs.log', 'diag.log',
+                  'ini.log', 'kv_trace.json', 'master_events.log', 'memcached.log',
+                  'ns_server.analytics_dcpdebug.log', 'ns_server.analytics_debug.log', 'ns_server.analytics_error.log', \
+                  'ns_server.analytics_info.log', 'ns_server.analytics_shutdown.log', 'ns_server.analytics_trace.json', \
+                  'ns_server.analytics_warn.log', 'ns_server.babysitter.log', 'ns_server.couchdb.log', 'ns_server.debug.log',
+                  'ns_server.error.log', 'ns_server.eventing.log', 'ns_server.fts.log', 'ns_server.goxdcr.log',
+                  'ns_server.http_access.log', 'ns_server.http_access_internal.log', 'ns_server.indexer.log',
+                  'ns_server.info.log', 'ns_server.json_rpc.log', 'ns_server.mapreduce_errors.log', 'ns_server.metakv.log',
+                  'ns_server.ns_couchdb.log', 'ns_server.projector.log', 'ns_server.query.log', 'ns_server.reports.log',
+                  'ns_server.stats.log', 'ns_server.views.log', 'ns_server.xdcr_target.log', 'projector_pprof.log',
+                  'stats.log', 'stats_archives.json', 'syslog.tar.gz', 'systemd_journal.gz', 'users.dets']
 # Allow for easy switch to a local mirror of the download stuff
 # (for people outside the mountain view office it's nice to be able to
 # be running this locally without being on VPN (which my test machines isn't)

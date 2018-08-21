@@ -140,7 +140,7 @@ def main():
     query = N1QLQuery(queryString )
     results = cb.n1ql_query( queryString )
 
-
+    framework = None
     for row in results:
         try:
             data = row['QE-Test-Suites']
@@ -178,7 +178,14 @@ def main():
                             mailing_list = data['mailing_list']
                         else:
                             mailing_list = 'qa@couchbase.com'
-
+                        if 'mode' in data:
+                            mode = data["mode"]
+                        else:
+                            mode = 'java'
+                        if 'framework' in data:
+                            framework = data["framework"]
+                        else:
+                            framework = 'testrunner'
                         # if there's an additional pool, get the number
                         # of additional servers needed from the ini
                         addPoolServerCount = getNumberOfAddpoolServers(
@@ -198,7 +205,8 @@ def main():
                             'installParameters':installParameters,
                             'slave': slave,
                             'owner': owner,
-                            'mailing_list': mailing_list
+                            'mailing_list': mailing_list,
+                            'mode': mode
                             })
                 else:
                     print data['component'], data['subcomponent'], ' is not supported in this release'
@@ -224,6 +232,9 @@ def main():
         launchStringBase = launchStringBase + '-docker'
     if options.test:
         launchStringBase = launchStringBase + '-test'
+#     if options.framework.lower() == "jython":
+    if framework == "jython":
+        launchStringBase = launchStringBase + '-jython'
     elif options.jenkins is not None:
         launchStringBase = launchStringBase + '-' + options.jenkins
 
@@ -234,7 +245,7 @@ def main():
                         'version_number={0}&confFile={1}&descriptor={2}&component={3}&subcomponent={4}&' + \
                          'iniFile={5}&parameters={6}&os={7}&initNodes={' \
                          '8}&installParameters={9}&branch={10}&slave={' \
-                         '11}&owners={12}&mailing_list={13}'
+                         '11}&owners={12}&mailing_list={13}&mode={14}&timeout={15}'
     if options.url is not None:
         launchString = launchString + '&url=' + options.url
 
@@ -327,6 +338,13 @@ def main():
                     response, content = httplib2.Http(timeout=60).request(getServerURL, 'GET')
                     print 'response.status', response, content
 
+                    if options.serverType.lower() != 'docker':
+                        # sometimes there could be a race, before a dispatcher process acquires vms,
+                        # another waiting dispatcher process could grab them, resulting in lesser vms
+                        # for the second dispatcher process
+                        if len(json.loads(content)) != testsToLaunch[i]['serverCount']:
+                            continue
+
                     # get additional pool servers as needed
                     if testsToLaunch[i]['addPoolServerCount']:
                         if options.serverType.lower() == 'docker':
@@ -349,6 +367,7 @@ def main():
 
                         response2, content2 = httplib2.Http(timeout=60).request(getServerURL, 'GET')
                         print 'response2.status', response2, content2
+
 
 
                     if response.status == 499 or \
@@ -384,7 +403,9 @@ def main():
                                                   testsToLaunch[i]['slave'],
                                                   urllib.quote(testsToLaunch[i]['owner']),
                                                   urllib.quote(
-                                                      testsToLaunch[i]['mailing_list']))
+                                                      testsToLaunch[i]['mailing_list']),
+                                                  testsToLaunch[i]['mode'],
+                                                  testsToLaunch[i]['timeLimit'])
 
 
                         if options.serverType.lower() != 'docker':

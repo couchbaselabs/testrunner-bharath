@@ -1,21 +1,20 @@
 #!/usr/bin/env python
-import re
-import sys
+import Queue
+import inspect
+import json
+import logging.config
 import math
-import time
+import multiprocessing
+import random
+import re
 import socket
 import string
 import struct
-import random
+import sys
 import threading
-import multiprocessing
-import Queue
-import logging
-import logging.config
+import time
 from collections import deque
 from hashlib import md5
-import json
-import inspect
 
 sys.path.extend(('.', 'lib'))
 
@@ -724,8 +723,8 @@ class Store(object):
         for i in range(5):
             log.debug(("echo get %s | nc %s %s" %
                       (self.cmd_line_get(i, prepare_key(i, self.cfg.get('prefix', ''))),
-                       self.target.split(':')[0],
-                       self.target.split(':')[1])))
+                       self.target.rsplit(':', 1)[0],
+                       self.target.rsplit(':', 1)[1])))
 
     def stats_collector(self, sc):
         self.sc = sc
@@ -816,7 +815,7 @@ class StoreMemcachedBinary(Store):
         self.cfg = cfg
         self.cur = cur
         self.target = target
-        self.host_port = (target + ":11211").split(':')[0:2]
+        self.host_port = (target + ":11211").rsplit(':', 1)[0:2]
         self.host_port[1] = int(self.host_port[1])
         self.connect_host_port(self.host_port[0], self.host_port[1], user, pswd, bucket=bucket)
         self.inflight_reinit()
@@ -846,7 +845,7 @@ class StoreMemcachedBinary(Store):
             self.backups.pop(0)
 
         log.info("StoreMemcachedBinary: reconnect to %s" % self.target)
-        self.host_port = (self.target + ":11211").split(':')[0:2]
+        self.host_port = (self.target + ":11211").rsplit(':', 0)[0:2]
         self.host_port[1] = int(self.host_port[1])
         self.connect_host_port(self.host_port[0], self.host_port[1],
                                self.user, self.pswd, bucket=self.bucket)
@@ -1287,7 +1286,7 @@ class StoreMemcachedAscii(Store):
         self.cfg = cfg
         self.cur = cur
         self.target = target
-        self.host_port = (target + ":11211").split(':')[0:2]
+        self.host_port = (target + ":11211").rsplit(':', 1)[0:2]
         self.host_port[1] = int(self.host_port[1])
         self.skt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.skt.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

@@ -1,17 +1,33 @@
-import Queue
-import copy
-import threading
-
-from couchbase_helper.documentgenerator import BlobGenerator
-from couchbase_helper.tuq_helper import N1QLHelper
-from membase.api.rest_client import RestConnection, RestHelper
-from membase.helper.bucket_helper import BucketOperationHelper
-from membase.helper.cluster_helper import ClusterOperationHelper
 from newupgradebasetest import NewUpgradeBaseTest
-from remote.remote_util import RemoteMachineShellConnection
+import json, re
+import os
+import zipfile
+import pprint
+import Queue
+import json
+import logging
+import copy
+from membase.helper.cluster_helper import ClusterOperationHelper
+import mc_bin_client
+import threading
+from random import randrange, randint
+from fts.fts_base import FTSIndex
+from memcached.helper.data_helper import  VBucketAwareMemcached
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+from membase.api.rest_client import RestConnection, Bucket
+from couchbase_helper.tuq_helper import N1QLHelper
+from couchbase_helper.query_helper import QueryHelper
+from TestInput import TestInputSingleton
+from couchbase_helper.document import View
+from eventing.eventing_base import EventingBaseTest
+from pytests.eventing.eventing_constants import HANDLER_CODE
+from lib.testconstants import STANDARD_BUCKET_PORT
+from pytests.query_tests_helper import QueryHelperTests
+from membase.api.rest_client import RestConnection, RestHelper
+from couchbase_helper.documentgenerator import BlobGenerator
+from membase.helper.bucket_helper import BucketOperationHelper
 
-
-class UpgradeTests(NewUpgradeBaseTest):
+class UpgradeTests(NewUpgradeBaseTest, EventingBaseTest):
 
     def setUp(self):
         super(UpgradeTests, self).setUp()
@@ -34,6 +50,13 @@ class UpgradeTests(NewUpgradeBaseTest):
         self.max_verify = self.input.param("max_verify", None)
         self.verify_after_events = self.input.param("verify_after_events", True)
         self.online_upgrade_type = self.input.param("online_upgrade_type","swap")
+        self.src_bucket_name = self.input.param('src_bucket_name', 'src_bucket')
+        self.eventing_log_level = self.input.param('eventing_log_level', 'INFO')
+        self.dst_bucket_name = self.input.param('dst_bucket_name', 'dst_bucket')
+        self.dst_bucket_name1 = self.input.param('dst_bucket_name1', 'dst_bucket1')
+        self.metadata_bucket_name = self.input.param('metadata_bucket_name', 'metadata')
+        self.create_functions_buckets = self.input.param('create_functions_buckets', True)
+        self.use_memory_manager = self.input.param('use_memory_manager', True)
         self.final_events = []
         self.n1ql_helper = None
         self.total_buckets = 1
@@ -57,29 +80,55 @@ class UpgradeTests(NewUpgradeBaseTest):
         self.after_gen_delete = BlobGenerator('upgrade', 'upgrade',\
                                       self.value_size, start=self.num_items * .5,\
                                                          end=self.num_items* 0.75)
+        initial_services_setting = self.input.param("initial-services-setting", None)
         self._install(self.servers[:self.nodes_init])
+        if not self.init_nodes and initial_services_setting is not None:
+            self.initialize_nodes(self.servers[:self.nodes_init],
+                                  services=initial_services_setting)
         self._log_start(self)
-        self.cluster.rebalance([self.master], self.servers[1:self.nodes_init], [])
+        if len(self.servers[:self.nodes_init]) > 1:
+            if initial_services_setting is None:
+                self.cluster.rebalance(self.servers[:1], self.servers[1:self.nodes_init],
+                                                   [], use_hostnames=self.use_hostnames)
+            else:
+                set_services = self.initial_services(initial_services_setting)
+                for i in range(1, len(set_services)):
+                    self.cluster.rebalance([self.servers[0]], [self.servers[i]], [],
+                                                   use_hostnames=self.use_hostnames,
+                                                         services=[set_services[i]])
+                    self.sleep(10)
+        else:
+            self.cluster.rebalance([self.servers[0]], self.servers[1:], [],
+                                         use_hostnames=self.use_hostnames)
+        self.sleep(10)
         """ sometimes, when upgrade failed and node does not install couchbase
             server yet, we could not set quota at beginning of the test.  We
             have to wait to install new couchbase server to set it properly here """
-        self.quota = self._initialize_nodes(self.cluster, self.servers,\
-                                         self.disabled_consistent_view,\
-                                    self.rebalanceIndexWaitingDisabled,\
-                                    self.rebalanceIndexPausingDisabled,\
-                                              self.maxParallelIndexers,\
-                                       self.maxParallelReplicaIndexers,\
-                                                             self.port)
+        servers_available = copy.deepcopy(self.servers)
+        if len(self.servers) > int(self.nodes_init):
+            servers_available = servers_available[:self.nodes_init]
+        if not self.skip_init_check_cbserver:
+            self.quota = self._initialize_nodes(self.cluster, servers_available,\
+                                             self.disabled_consistent_view,\
+                                        self.rebalanceIndexWaitingDisabled,\
+                                        self.rebalanceIndexPausingDisabled,\
+                                                  self.maxParallelIndexers,\
+                                           self.maxParallelReplicaIndexers,\
+                                                                 self.port)
+        self.add_built_in_server_user(node=self.master)
         self.bucket_size = self._get_bucket_size(self.quota, self.total_buckets)
         self.create_buckets()
         self.n1ql_server = None
         self.success_run = True
         self.failed_thread = None
         self.generate_map_nodes_out_dist_upgrade(self.after_upgrade_services_out_dist)
-        self.upgrade_services_in = self.get_services(self.in_servers_pool.values(),
+        if self.upgrade_services_in != "same":
+            self.upgrade_services_in = self.get_services(self.in_servers_pool.values(),
                                           self.upgrade_services_in, start_node = 0)
         self.after_upgrade_services_in = self.get_services(self.out_servers_pool.values(),
                                            self.after_upgrade_services_in, start_node = 0)
+        self.fts_obj = None
+        self.index_name_prefix = None
 
     def tearDown(self):
         super(UpgradeTests, self).tearDown()
@@ -88,7 +137,7 @@ class UpgradeTests(NewUpgradeBaseTest):
         self.event_threads = []
         self.after_event_threads = []
         try:
-            self.log.info("*** Start init operations before upgrade begins ***")
+            self.log.info("\n*** Start init operations before upgrade begins ***")
             if self.initialize_events:
                 initialize_events = self.run_event(self.initialize_events)
             self.finish_events(initialize_events)
@@ -97,27 +146,25 @@ class UpgradeTests(NewUpgradeBaseTest):
             self.cluster_stats(self.servers[:self.nodes_init])
             if self.before_events:
                 self.event_threads += self.run_event(self.before_events)
-            self.log.info("*** Start upgrade cluster ***")
+            self.log.info("\n*** Start upgrade cluster ***")
             self.event_threads += self.upgrade_event()
-            if self.in_between_events:
-                self.event_threads += self.run_event(self.in_between_events)
-            self.finish_events(self.event_threads)
             if self.upgrade_type == "online":
                 self.monitor_dcp_rebalance()
-            self.log.info("Will install upgrade version to any free nodes")
+            self.finish_events(self.event_threads)
+            self.log.info("\nWill install upgrade version to any free nodes")
             out_nodes = self._get_free_nodes()
             self.log.info("Here is free nodes {0}".format(out_nodes))
             """ only install nodes out when there is cluster operation """
             cluster_ops = ["rebalance_in", "rebalance_out", "rebalance_in_out"]
             for event in self.after_events[0].split("-"):
                 if event in cluster_ops:
-                    self.log.info("There are cluster ops after upgrade.  Need to "
+                    self.log.info("\n\nThere are cluster ops after upgrade.  Need to "
                                   "install free nodes in upgrade version")
                     self._install(out_nodes)
                     break
             self.generate_map_nodes_out_dist_upgrade(\
                                       self.after_upgrade_services_out_dist)
-            self.log.info("*** Start operations after upgrade is done ***")
+            self.log.info("\n\n*** Start operations after upgrade is done ***")
             self.add_built_in_server_user()
             if self.after_events:
                 self.after_event_threads = self.run_event(self.after_events)
@@ -443,6 +490,7 @@ class UpgradeTests(NewUpgradeBaseTest):
                                             + str(self.total_buckets)
             self.rest = RestConnection(self.master)
             self._bucket_creation()
+            self.sleep(5, "sleep after create bucket")
             self.total_buckets +=1
             bucket_created = True
         except Exception, ex:
@@ -501,6 +549,8 @@ class UpgradeTests(NewUpgradeBaseTest):
                         "rebalance done ".format(self.after_upgrade_services_in[0]))
                 self.after_upgrade_services_in.pop(0)
             self.sleep(10, "wait 10 seconds after rebalance")
+            if free_node_in and free_node_in[0] not in self.servers:
+                self.servers.append(free_node_in[0])
         except Exception, ex:
             self.log.info(ex)
             if queue is not None:
@@ -579,6 +629,41 @@ class UpgradeTests(NewUpgradeBaseTest):
         if create_index and queue is not None:
             queue.put(True)
 
+    def create_index_with_replica_and_query(self, queue=None):
+        """ ,groups=simple,reset_services=True
+        """
+        self.log.info("Create index with replica and query")
+        self.n1ql_node = self.get_nodes_from_services_map(service_type="n1ql")
+        self._initialize_n1ql_helper()
+        self.index_name_prefix = "random_index_" + str(randint(100000, 999999))
+        create_index_query = "CREATE INDEX " + self.index_name_prefix + \
+              " ON default(age) USING GSI WITH {{'num_replica': {0}}};"\
+                                        .format(self.num_index_replicas)
+        try:
+            self.create_index()
+            self.n1ql_helper.run_cbq_query(query=create_index_query,
+                                           server=self.n1ql_node)
+        except Exception, e:
+            self.log.info(e)
+        self.sleep(30)
+        index_map = self.get_index_map()
+        self.log.info(index_map)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([self.index_name_prefix],
+                                                    index_map,
+                                                    self.num_index_replicas)
+
+    def verify_index_with_replica_and_query(self, queue=None):
+        index_map = self.get_index_map()
+        try:
+            self.n1ql_helper.verify_replica_indexes([self.index_name_prefix],
+                                                    index_map,
+                                                    self.num_index_replicas)
+        except Exception, e:
+            self.log.info(e)
+            if queue is not None:
+                queue.put(False)
+
     def create_views(self, queue=None):
         self.log.info("*** create_views ***")
         """ default is 1 ddoc. Change number of ddoc by param ddocs_num=new_number
@@ -637,6 +722,88 @@ class UpgradeTests(NewUpgradeBaseTest):
             self.log.info(ex)
             raise
 
+    def create_eventing_services(self, queue=None):
+        """ Only work after cluster upgrade to 5.5.0 completely """
+        try:
+            rest = RestConnection(self.master)
+            cb_version = rest.get_nodes_version()
+            if 5.5 > float(cb_version[:3]):
+                self.log.info("This eventing test is only for cb version 5.5 and later.")
+                return
+
+            bucket_params = self._create_bucket_params(server=self.master, size=128,
+                                                       replicas=self.num_replicas)
+            self.cluster.create_standard_bucket(name=self.src_bucket_name, port=STANDARD_BUCKET_PORT + 1,
+                                                bucket_params=bucket_params)
+            self.buckets = RestConnection(self.master).get_buckets()
+            self.src_bucket = RestConnection(self.master).get_buckets()
+            self.cluster.create_standard_bucket(name=self.dst_bucket_name, port=STANDARD_BUCKET_PORT + 1,
+                                                bucket_params=bucket_params)
+            self.cluster.create_standard_bucket(name=self.metadata_bucket_name, port=STANDARD_BUCKET_PORT + 1,
+                                                bucket_params=bucket_params)
+            self.buckets = RestConnection(self.master).get_buckets()
+            self.gens_load = self.generate_docs(self.docs_per_day)
+            self.expiry = 3
+
+            self.restServer = self.get_nodes_from_services_map(service_type="eventing")
+            """ must be self.rest to pass in deploy_function"""
+            self.rest = RestConnection(self.restServer)
+            self.load(self.gens_load, buckets=self.buckets, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
+            function_name = "Function_{0}_{1}".format(randint(1, 1000000000), self._testMethodName)
+            self.function_name = function_name[0:90]
+            body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_ON_UPDATE, worker_count=3)
+            bk_events_created = False
+            rs_events_created = False
+            try:
+                self.deploy_function(body)
+                bk_events_created = True
+                self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
+            except Exception as e:
+                self.log.error(e)
+            finally:
+                self.undeploy_and_delete_function(body)
+        except Exception, e:
+            self.log.info(e)
+
+    def create_cbas_services(self, queue=None):
+        """
+           This test only need max 4 servers to run and only upgrade to vulcan and later
+           Command to run:
+            upgrade.upgrade_tests.UpgradeTests.test_upgrade,items=5000,initial_version=4.6.4-xxxx,
+            nodes_init=3,initialize_events=kv_ops_initialize,upgrade_services_in='kv:index',
+            after_events=rebalance_in-create_cbas_services,after_upgrade_services_in=cbas,
+            dgm_run=true,upgrade_test=True,skip_init_check_cbserver=true,released_upgrade_version=5.5.0-xxx
+        """
+        try:
+            self.validate_error = False
+            rest = RestConnection(self.master)
+            cb_version = rest.get_nodes_version()
+            if 5.5 > float(cb_version[:3]):
+                self.log.info("This analytic test is only for cb version 5.5 and later.")
+                return
+            self.log.info("Get cbas nodes in cluster")
+            cbas_node = self.get_nodes_from_services_map(service_type="cbas")
+            cbas_rest = RestConnection(self.servers[self.nodes_init])
+            self.get_services_map()
+
+            kv_nodes = copy.deepcopy(self.servers)
+            kv_maps = [x.replace(":8091", "") for x in self.services_map["kv"]]
+            self.log.info("Get kv node in cluster")
+            for i, node in enumerate(kv_nodes):
+                if node.ip not in kv_maps:
+                    del kv_nodes[i]
+            self.cbas_node = cbas_node
+            self.load_sample_buckets(servers=kv_nodes, bucketName="travel-sample",
+                                              total_items=31591, rest=cbas_rest)
+            self.test_create_dataset_on_bucket()
+        except Exception as e:
+            self.log.info(e)
+            if queue is not None:
+                queue.put(False)
+        if queue is not None:
+            queue.put(True)
+
     def online_upgrade(self):
         try:
             self.log.info("online_upgrade")
@@ -663,6 +830,7 @@ class UpgradeTests(NewUpgradeBaseTest):
         for i in range(self.nodes_init / self.swap_num_servers):
             servers_in = {}
             new_servers = copy.deepcopy(servers)
+            servicesNodeOut = ""
             for key in out_servers.keys():
                 servers_in[key] = out_servers[key]
                 out_servers[key].upgraded = True
@@ -670,6 +838,7 @@ class UpgradeTests(NewUpgradeBaseTest):
                 if len(servers_in) == self.swap_num_servers:
                     break
             servers_out = {}
+            node_out = None
             new_servers.update(servers_in)
             for key in servers.keys():
                 if len(servers_out) == self.swap_num_servers:
@@ -678,21 +847,39 @@ class UpgradeTests(NewUpgradeBaseTest):
                     servers_out[key] = servers[key]
                     new_servers.pop(key)
             out_servers.update(servers_out)
-            self.log.info("current {0}".format(servers))
-            self.log.info("will come inside {0}".format(servers_in))
-            self.log.info("will go out {0}".format(servers_out))
+            rest = RestConnection(servers.values()[0])
+            self.log.info("****************************************".format(servers))
+            self.log.info("cluster nodes = {0}".format(servers.values()))
+            self.log.info("cluster service map = {0}".format(rest.get_nodes_services()))
+            self.log.info("cluster version map = {0}".format(rest.get_nodes_version()))
+            self.log.info("to include in cluster = {0}".format(servers_in.values()))
+            self.log.info("to exclude from cluster = {0}".format(servers_out.values()))
+            self.log.info("****************************************".format(servers))
+            rest = RestConnection(servers_out.values()[0])
+            servicesNodeOut = rest.get_nodes_services()
+            servicesNodeOut = ",".join(servicesNodeOut[servers_out.keys()[0]] )
             self._install(servers_in.values())
+            self.sleep(10, "Wait for ns server is ready")
             old_vbucket_map = self._record_vbuckets(self.master, servers.values())
-            if self.upgrade_services_in != None and len(self.upgrade_services_in) > 0:
-                self.cluster.rebalance(servers.values(),
-                                    servers_in.values(),
-                      servers_out.values(), services = \
-                   self.upgrade_services_in[start_services_num:start_services_num+\
-                                                         len(servers_in.values())])
-                start_services_num += len(servers_in.values())
-            else:
-                self.cluster.rebalance(servers.values(), servers_in.values(),\
-                                                         servers_out.values())
+            try:
+                if self.upgrade_services_in == "same":
+                    self.cluster.rebalance(servers.values(), servers_in.values(),\
+                                                             servers_out.values(),
+                                        services=[servicesNodeOut])
+                elif self.upgrade_services_in != None and len(self.upgrade_services_in) > 0:
+                    self.cluster.rebalance(servers.values(),
+                                        servers_in.values(),
+                                        servers_out.values(),
+                                        services = \
+                       self.upgrade_services_in[start_services_num:start_services_num+\
+                                                             len(servers_in.values())])
+                    start_services_num += len(servers_in.values())
+                else:
+                    self.cluster.rebalance(servers.values(), servers_in.values(),\
+                                                             servers_out.values())
+            except Exception, ex:
+                self.log.info(ex)
+                raise
             self.out_servers_pool = servers_out
             self.in_servers_pool = new_servers
             servers = new_servers
@@ -701,6 +888,12 @@ class UpgradeTests(NewUpgradeBaseTest):
             if self.verify_vbucket_info:
                 new_vbucket_map = self._record_vbuckets(self.master, self.servers)
                 self._verify_vbuckets(old_vbucket_map, new_vbucket_map)
+            # in the middle of online upgrade events
+            if self.in_between_events:
+                self.event_threads = []
+                self.event_threads += self.run_event(self.in_between_events)
+                self.finish_events(self.event_threads)
+                self.in_between_events = None
 
     def online_upgrade_incremental(self):
         self.log.info("online_upgrade_incremental")
@@ -910,6 +1103,13 @@ class UpgradeTests(NewUpgradeBaseTest):
             self.dataset = "default"
             self.docs_gen_map = self.generate_ops_docs(self.docs_per_day, 0)
             self.async_ops_all_buckets(self.docs_gen_map, batch_size=100)
+        except Exception, ex:
+            self.log.info(ex)
+
+    def create_fts_index_query(self, queue=None):
+        try:
+            self.fts_obj = self.create_fts_index_query_compare()
+            return self.fts_obj
         except Exception, ex:
             self.log.info(ex)
             if queue is not None:

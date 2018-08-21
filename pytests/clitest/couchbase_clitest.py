@@ -2,22 +2,24 @@ import copy
 import json
 import os
 import random
-import re
-import string
+import string, re
 import time
 from threading import Thread
 
 from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
 from couchbase_cli import CouchbaseCLI
+from upgrade.newupgradebasetest import NewUpgradeBaseTest
+from security.rbacmain import rbacmain
+from security.rbac_base import RbacBase
 from membase.api.rest_client import RestConnection
 from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection
-from security.rbac_base import RbacBase
 from testconstants import CLI_COMMANDS, COUCHBASE_FROM_SPOCK, \
-    COUCHBASE_FROM_WATSON, COUCHBASE_FROM_SHERLOCK, \
-    COUCHBASE_FROM_4DOT6
-from upgrade.newupgradebasetest import NewUpgradeBaseTest
+                          COUCHBASE_FROM_WATSON, COUCHBASE_FROM_SHERLOCK,\
+                          COUCHBASE_FROM_4DOT6
+from couchbase_helper.documentgenerator import BlobGenerator
+
 
 help = {'CLUSTER': '--cluster=HOST[:PORT] or -c HOST[:PORT]',
  'COMMAND': {'bucket-compact': 'compact database and index data',
@@ -359,6 +361,7 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
             command = ''.join([self.cli_command_path, cli, option])
             self.log.info("test -h of command {0}".format(cli))
             output, error = shell.execute_command(command, use_channel=True)
+
             """ check if the first line is not empty """
             if not output[0]:
                 self.log.error("this help command {0} may not work!".format(cli))
@@ -380,10 +383,15 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
         if "127.0.0.1" in server_info["otpNode"]:
             server_info["otpNode"] = "ns_1@{0}".format(remote_client.ip)
             server_info["hostname"] = "{0}:8091".format(remote_client.ip)
+        otpNode = remote_client.ip
+        """ need to remove [ ] brackets in ipv6 raw ip address """
+        if "[" in otpNode:
+            otpNode = otpNode.replace("[", "").replace("]", "")
         result = server_info["otpNode"] + " " + server_info["hostname"] + " " \
                + server_info["status"] + " " + server_info["clusterMembership"]
-        self.assertEqual(result, "ns_1@{0} {0}:8091 healthy active" \
-                                           .format(remote_client.ip))
+        self.assertEqual(result.lower(), "ns_1@{0} {1}:8091 healthy active" \
+                                           .format(otpNode.lower(),
+                                                   remote_client.ip.lower()))
 
         cli_command = "bucket-list"
         output, error = remote_client.execute_couchbase_cli(cli_command=cli_command,
@@ -1974,6 +1982,91 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
             self.assertTrue(self.verifyCommandOutput(stdout, expect_error, error_msg),
                             "Expected error message not found")
 
+    def test_mctimings_with_data_monitoring_role(self):
+        """ This role only works from 5.1 and later
+            params: sasl_buckets=2,default_bucket=False,nodes_init=2,
+                    permission=self_bucket
+            if permission=other_bucket, need to add should-fail=True
+        """
+        if 5.1 > float(self.cb_version[:3]):
+            self.log.info("This test only work for version 5.1+")
+            return
+        if len(self.buckets) < 2:
+            self.fail("This test requires minimum of 2 buckets")
+
+        permission = self.input.param("permission", "all")
+        username = "data_monitoring"
+        bucket_names = []
+        bucket_name = ""
+        rest = RestConnection(self.master)
+        shell = RemoteMachineShellConnection(self.master)
+        for bucket in self.buckets:
+            bucket_names.append(bucket.name)
+        if permission == "all":
+            role = '*'
+            bucket_name = bucket_names[random.randint(0,1)]
+        elif permission == "self_bucket":
+            role = "{0}".format(bucket_names[0])
+            bucket_name = bucket_names[0]
+        elif permission == "other_bucket":
+            role = "{0}".format(bucket_names[1])
+            bucket_name = bucket_names[0]
+        testuser = [{"id": username,
+                         "name": username,
+                         "password": "password"}]
+        rolelist = [{"id": username,
+                         "name": username,
+                         "roles": "data_monitoring[{0}]".format(role)}]
+        kv_gen = BlobGenerator('create', 'create', self.value_size, end=self.num_items)
+        self._load_all_buckets(self.master, kv_gen, "create",
+                               self.expire_time, flag=self.item_flag)
+        try:
+            status = self.add_built_in_server_user(testuser, rolelist)
+            if not status:
+                self.fail("Failed to add user: {0} with role: {1} "\
+                                             .format(username, role))
+            cmd = self.cli_command_path + "mctimings" + self.cmd_ext
+            cmd += " -h " + self.master.ip + ":11210 -u " + username
+            cmd += " -P password -b " + bucket_name + " --verbose "
+            output, _ = shell.execute_command(cmd)
+            if not self.should_fail:
+                self.assertTrue(self._check_output("The following data is collected", output))
+            else:
+                if self._check_output("The following data is collected", output):
+                    self.fail("This user should not allow to monitor data in this bucket {0}"\
+                                                                      .format(bucket_name))
+                else:
+                    self.log.info("Alright, user bucket A has no permission to check bucket B")
+        except Exception as e:
+            print e
+        finally:
+            shell.disconnect()
+            if status:
+                self.log.info("Remove user {0}".format(rolelist))
+                RbacBase().remove_user_role(["data_monitoring"], rest)
+
+    def test_cmd_set_stats(self):
+        """ When set any items, cmd_set should increase counting number.
+            params: default_bucket=False,sasl_buckets=1
+        /opt/couchbase/bin/cbstats localhost:11210 all -u Administrator -p password -b bucket0 | grep cmd_set
+        cmd_set: 10011
+        """
+
+        shell = RemoteMachineShellConnection(self.master)
+        cmd = self.cli_command_path + "cbstats" + self.cmd_ext + " "
+        cmd += self.master.ip + ":11210 all -u Administrator -p password "
+        cmd += "-b bucket0 | grep cmd_set"
+
+        output, _ = shell.execute_command(cmd)
+        self.assertTrue(self._check_output("0", output))
+        kv_gen = BlobGenerator('create', 'create', self.value_size, end=1000)
+        self._load_all_buckets(self.master, kv_gen, "create",
+                               self.expire_time, flag=self.item_flag)
+
+        output, _ = shell.execute_command(cmd)
+        self.assertTrue(self._check_output("1000", output))
+        shell.disconnect()
+
     def testNodeInit(self):
         username = self.input.param("username", None)
         password = self.input.param("password", None)
@@ -1990,33 +2083,49 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
         rest.force_eject_node()
 
         node_settings = rest.get_nodes_self()
+        if self.os == "windows":
+            self.log_path = self.log_path.replace("/cygdrive/c/", "c:/")
 
-        if data_path is not None and data_path == "valid":
-            data_path = self.log_path
+        if data_path is not None:
+            if data_path == "valid":
+                data_path = self.log_path
+            elif self.os == "windows" and data_path[:1] == "/":
+                data_path = "c:" + data_path
 
-        if index_path is not None and index_path == "valid":
-            index_path = self.log_path
+        if index_path is not None:
+            if index_path == "valid":
+                index_path = self.log_path
+            elif self.os == "windows" and index_path[:1] == "/":
+                index_path = "c:" + index_path
 
         if initialized:
             cli = CouchbaseCLI(server, server.rest_username, server.rest_password)
-            _, _, success = cli.cluster_init(256, 256, None, "data", None, None, server.rest_username,
+            _, _, success = cli.cluster_init(256, 256, None, "data", None, None,
+                                             server.rest_username,
                                              server.rest_password, None)
             self.assertTrue(success, "Cluster initialization failed during test setup")
         time.sleep(5)
         cli = CouchbaseCLI(server, username, password)
+
         stdout, _, errored = cli.node_init(data_path, index_path, hostname)
 
         if not expect_error:
             self.assertTrue(errored, "Expected command to succeed")
             if data_path is None:
                 data_path = node_settings.storage[0].path
+            elif self.os == "windows":
+                data_path = data_path.replace("\\", "")[:-1]
+
             if index_path is None:
                 index_path = node_settings.storage[0].index_path
-            self.assertTrue(self.verify_node_settings(server, data_path, index_path, hostname),
+            elif self.os == "windows":
+                index_path = index_path.replace("\\", "")[:-1]
+            self.assertTrue(self.verify_node_settings(server, data_path,
+                                                      index_path, hostname),
                             "Node settings not changed")
-        else:
+        elif self.os != "windows":
             self.assertTrue(self.verifyCommandOutput(stdout, expect_error, error_msg),
-                            "Expected error message not found")
+                                                    "Expected error message not found")
 
     def testGroupManage(self):
         username = self.input.param("username", None)
@@ -2484,44 +2593,33 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
 
     def test_reset_admin_password(self):
         remote_client = RemoteMachineShellConnection(self.master)
-        cli_command = "reset-admin-password"
 
         options = ''
-        output, error = remote_client.execute_couchbase_cli(
-            cli_command=cli_command, options=options, cluster_host="localhost",
-            cluster_port=8091, user="Administrator", password="password")
-        self.assertTrue(self._check_output('No parameters specified', output))
+        cli_command = "{0}couchbase-cli{1} reset-admin-password ".format(self.cli_command_path,
+                                                                         self.cmd_ext)
+        output, error = remote_client.execute_command("{0} {1}".format(cli_command, options))
+        self.assertTrue(self._check_output('usage: couchbase-cli reset-admin-password', output))
 
         options = '--blabla'
-        output, error = remote_client.execute_couchbase_cli(
-            cli_command=cli_command, options=options, cluster_host="localhost",
-            cluster_port=8091, user="Administrator", password="password")
-        self.assertTrue(self._check_output("unrecognized arguments:", output))
+        output, error = remote_client.execute_command("{0} {1}".format(cli_command, options))
+        self.assertTrue(self._check_output("unrecognized arguments:", error))
 
         options = '--new-password aaa'
-        output, error = remote_client.execute_couchbase_cli(
-            cli_command=cli_command, options=options, cluster_host="127.0.0.5",
-            cluster_port=8091, user="Administrator", password="password")
+        output, error = remote_client.execute_command("{0} {1}".format(cli_command, options))
         self.assertTrue(self._check_output("The password must be at least 6 characters long",
                                            output))
 
-        output, error = remote_client.execute_couchbase_cli(
-            cli_command=cli_command, options=options, cluster_host="127.0.0.1",
-            cluster_port=8091, user="Administrator", password="password")
-        self.assertTrue(self._check_output("The password must be at least 6 characters long",
-                                            output))
         try:
             options = '--regenerate'
             outputs = []
             for i in xrange(10):
-                output, error = remote_client.execute_couchbase_cli(
-                    cli_command=cli_command, options=options, cluster_host="127.0.0.1",
-                    cluster_port=8091, user="FAKE", password="FAKE")
+                output, error = remote_client.execute_command("{0} {1}".format(cli_command,
+                                                                               options))
                 new_password = ""
                 for x in output:
-                    if not x.startswith("DEPRECATED") and len(x) == 8:
+                    if not x.startswith("DEPRECATED") and len(x) >= 8:
                         new_password = x
-                self.assertEqual(len(new_password), 8)
+                self.assertTrue(len(new_password) >= 8)
                 self.assertTrue(new_password not in outputs)
                 outputs.append(new_password)
 
@@ -2533,9 +2631,8 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
                 chars = string.letters + string.digits
                 new_password = ''.join((random.choice(chars)) for x in range(random.randint(6, 30)))
                 options = '--new-password "%s"' % new_password
-                output, _ = remote_client.execute_couchbase_cli(
-                    cli_command=cli_command, options=options, cluster_host="127.0.0.1",
-                    cluster_port=8091, user="Administrator", password="password")
+                output, _ = remote_client.execute_command("{0} {1}".format(cli_command,
+                                                                           options))
                 self.assertTrue(self._check_output('SUCCESS: Administrator password changed',
                                                    output))
                 server.rest_password = old_password
@@ -2551,12 +2648,11 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
             for i in xrange(5):
                 server = copy.deepcopy(self.servers[0])
                 options = '--regenerate'
-                output, _ = remote_client.execute_couchbase_cli(
-                    cli_command=cli_command, options=options, cluster_host="127.0.0.1",
-                    cluster_port=8091, user="Administrator", password="password")
+                output, _ = remote_client.execute_command("{0} {1}".format(cli_command,
+                                                                           options))
                 new_password = ""
                 for x in output:
-                    if not x.startswith("DEPRECATED") and len(x) == 8:
+                    if not x.startswith("DEPRECATED") and len(x) >= 8:
                         new_password = x
                 server.rest_password = old_password
                 rest = RestConnection(server)
@@ -2566,15 +2662,14 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
 
                 old_password = new_password
                 for m in apis:
-                        getattr(rest_new, m)()
+                    getattr(rest_new, m)()
                 for m in apis:
-                        self.assertRaises(Exception, getattr(rest, m))
+                    self.assertRaises(Exception, getattr(rest, m))
         finally:
             self.log.info("Inside finally block")
             options = '--new-password password'
-            remote_client.execute_couchbase_cli(
-                cli_command=cli_command, options=options, cluster_host="127.0.0.1",
-                cluster_port=8091, user="Administrator", password="password")
+            output, error = remote_client.execute_command("{0} {1}".format(cli_command,
+                                                           options))
 
     def test_cli_with_offline_upgrade(self):
         """
@@ -2857,7 +2952,7 @@ class XdcrCLITest(CliBaseTest):
         xdcr_hostname = self.input.param("xdcr-hostname", None)
         xdcr_username = self.input.param("xdcr-username", None)
         xdcr_password = self.input.param("xdcr-password", None)
-        demand_encyrption = self.input.param("demand-encryption", 0)
+        secure_connection = self.input.param("secure-connection", "none")
         xdcr_cert = self.input.param("xdcr-certificate", None)
         wrong_cert = self.input.param("wrong-certificate", None)
 
@@ -2869,9 +2964,9 @@ class XdcrCLITest(CliBaseTest):
             options += " --xdcr-hostname={0}".format(self.dest_nodes[0].ip)
         options += (" --xdcr-username={0}".format(xdcr_username), "")[xdcr_username is None]
         options += (" --xdcr-password={0}".format(xdcr_password), "")[xdcr_password is None]
-        options += (" --xdcr-demand-encryption={0}".format(demand_encyrption))
+        options += (" --xdcr-secure-connection={0}".format(secure_connection))
 
-        if demand_encyrption and xdcr_hostname is not None and xdcr_cert:
+        if secure_connection != 'none' and xdcr_hostname is not None and xdcr_cert:
             if wrong_cert:
                 cluster_host = "localhost"
             else:

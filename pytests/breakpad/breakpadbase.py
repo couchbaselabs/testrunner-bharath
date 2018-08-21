@@ -4,7 +4,7 @@ import subprocess
 from TestInput import TestInputSingleton
 from basetestcase import BaseTestCase
 from constants import MD_PATH, NS_NUM_NODES
-from lib.cluster_run_manager  import CRManager
+from lib.cluster_run_manager import CRManager
 from logpoll import NSLogPoller
 from membase.api.rest_client import RestConnection
 from memcached.helper.data_helper import VBucketAwareMemcached
@@ -87,6 +87,7 @@ class BreakpadBase(BaseTestCase):
         err=err.rstrip()
         if err == '':
             killed = True
+            time.sleep(5)
         return killed
 
     def mc_pid(self, index):

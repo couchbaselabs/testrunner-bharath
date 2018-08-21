@@ -186,7 +186,8 @@ class Installer(object):
                 openssl = params["openssl"]
 
         if ok:
-            if "url" in params and params["url"] != "":
+            if "url" in params and params["url"] != ""\
+               and isinstance(params["url"], str):
                 direct_build_url = params["url"]
         if ok:
             if "linux_repo" in params and params["linux_repo"].lower() == "true":
@@ -464,13 +465,16 @@ class CouchbaseServerInstaller(Installer):
         Installer.__init__(self)
 
     def initialize(self, params):
-        log.info('*****CouchbaseServerInstaller initialize the application ****')
-
-
+        #log.info('*****CouchbaseServerInstaller initialize the application ****')
         start_time = time.time()
         cluster_initialized = False
         server = params["server"]
         remote_client = RemoteMachineShellConnection(params["server"])
+        success = True
+        success &= remote_client.is_couchbase_installed()
+        if not success:
+            mesg = "\n\nServer {0} failed to install".format(params["server"].ip)
+            sys.exit(mesg)
         while time.time() < start_time + 5 * 60:
             try:
                 rest = RestConnection(server)
@@ -480,7 +484,17 @@ class CouchbaseServerInstaller(Installer):
                     RemoteUtilHelper.use_hostname_for_server_settings(server)
 
                 if params.get('enable_ipv6', 0):
-                    RestConnection(server).rename_node(hostname=server.ip)
+                    status, content = RestConnection(server).rename_node(
+                        hostname=server.ip.replace('[', '').replace(']', ''))
+                    if status:
+                        log.info("Node {0} renamed to {1}".format(server.ip,
+                                                                  server.ip.replace('[', '').
+                                                                  replace(']', '')))
+                    else:
+                        log.error("Error renaming node {0} to {1}: {2}".
+                                  format(server.ip,
+                                         server.ip.replace('[', '').replace(']', ''),
+                                         content))
 
                 # Make sure that data_path and index_path are writable by couchbase user
                 for path in set(filter(None, [server.data_path, server.index_path])):
@@ -1165,7 +1179,10 @@ def main():
             if input.test_params["version"][:5] in COUCHBASE_VERSIONS and \
                 bool(build_pattern.match(build_version)):
                 correct_build_format = True
-        if not correct_build_format:
+        use_direct_url = False
+        if "url" in input.test_params and input.test_params["url"].startswith("http"):
+            use_direct_url = True
+        if not correct_build_format and not use_direct_url:
             log.info("\n========\n"
                      "         Incorrect build pattern.\n"
                      "         It should be 0.0.0-111 or 0.0.0-1111 format\n"
@@ -1197,8 +1214,6 @@ def main():
     else:
         log.info('Doing  serial install****')
         success = InstallerJob().sequential_install(input.servers, input.test_params)
-    if not success:
-        sys.exit(log_install_failed)
     if "product" in input.test_params and input.test_params["product"] in ["couchbase", "couchbase-server", "cb"]:
         print "verify installation..."
         success = True

@@ -6,7 +6,7 @@ from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
 from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection
-from testconstants import COUCHBASE_FROM_VERSION_4
+from testconstants import COUCHBASE_FROM_VERSION_4, COUCHBASE_FROM_MAD_HATTER
 
 
 class CCCP(BaseTestCase):
@@ -108,7 +108,12 @@ class CCCP(BaseTestCase):
         for node in config_json["nodes"]:
             self.assertTrue("couchApiBase" in node and "hostname" in node,
                             "No hostname name in config")
-            self.assertTrue(node["ports"]["proxy"] == 11211 and \
+            if self.cb_version[:5] in COUCHBASE_FROM_MAD_HATTER:
+                """ moxi port is removed from Mad-Hatter 6.5.0 """
+                self.assertTrue(node["ports"]["direct"] == 11210,
+                            "ports are incorrect: %s" % node)
+            else:
+                self.assertTrue(node["ports"]["proxy"] == 11211 and \
                             node["ports"]["direct"] == 11210,
                             "ports are incorrect: %s" % node)
         self.assertTrue(config_json["ddocs"]["uri"] == \
@@ -129,7 +134,7 @@ class CCCP(BaseTestCase):
             return tasks
         if self.ops == 'rebalance_in':
             tasks.append(self.cluster.async_rebalance(self.servers[:self.nodes_init],
-                                                self.servers[self.nodes_init:self.nodes_init + self.nodes_in], []))
+                       self.servers[self.nodes_init:self.nodes_init + self.nodes_in], []))
             self.nodes_init += self.nodes_in
         elif self.ops == 'rebalance_out':
             tasks.append(self.cluster.async_rebalance(self.servers[:self.nodes_init],

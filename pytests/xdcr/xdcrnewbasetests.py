@@ -552,6 +552,7 @@ class XDCRRemoteClusterRef:
         self.__encryption = encryption
         self.__rest_info = {}
         self.__replicator_target_role = replicator_target_role
+        self.__use_scramsha = TestInputSingleton.input.param("use_scramsha", False)
 
         # List of XDCReplication objects
         self.__replications = []
@@ -619,12 +620,22 @@ class XDCRRemoteClusterRef:
             self.dest_user = dest_master.rest_username
             self.dest_pass = dest_master.rest_password
 
-        self.__rest_info = rest_conn_src.add_remote_cluster(
-            dest_master.ip, dest_master.port,
-            self.dest_user,
-            self.dest_pass, self.__name,
-            demandEncryption=self.__encryption,
-            certificate=certificate)
+        if not self.__use_scramsha:
+            self.__rest_info = rest_conn_src.add_remote_cluster(
+                dest_master.ip, dest_master.port,
+                self.dest_user,
+                self.dest_pass, self.__name,
+                demandEncryption=self.__encryption,
+                certificate=certificate)
+        else:
+            print "Using scram-sha authentication"
+            self.__rest_info = rest_conn_src.add_remote_cluster(
+                dest_master.ip, dest_master.port,
+                self.dest_user,
+                self.dest_pass, self.__name,
+                demandEncryption=self.__encryption,
+                encryptionType="half"
+            )
 
         self.__validate_create_event()
 
@@ -634,6 +645,10 @@ class XDCRRemoteClusterRef:
             self.__src_cluster.get_master_node(),
             self.__get_event_expected_results())
 
+    def use_scram_sha_auth(self):
+        self.__use_scramsha = True
+        self.__encryption = True
+        self.modify()
 
     def modify(self, encryption=True):
         """Modify cluster reference to enable SSL encryption
@@ -643,15 +658,23 @@ class XDCRRemoteClusterRef:
         certificate = ""
         if encryption:
             rest_conn_dest = RestConnection(dest_master)
-            certificate = rest_conn_dest.get_cluster_ceritificate()
-            self.__rest_info = rest_conn_src.modify_remote_cluster(
-                dest_master.ip, dest_master.port,
-                self.dest_user,
-                self.dest_pass, self.__name,
-                demandEncryption=encryption,
-                certificate=certificate)
+            if not self.__use_scramsha:
+                certificate = rest_conn_dest.get_cluster_ceritificate()
+                self.__rest_info = rest_conn_src.modify_remote_cluster(
+                    dest_master.ip, dest_master.port,
+                    self.dest_user,
+                    self.dest_pass, self.__name,
+                    demandEncryption=encryption,
+                    certificate=certificate)
+            else:
+                print "Using scram-sha authentication"
+                self.__rest_info = rest_conn_src.modify_remote_cluster(
+                    dest_master.ip, dest_master.port,
+                    self.dest_user,
+                    self.dest_pass, self.__name,
+                    demandEncryption=encryption,
+                    encryptionType="half")
         self.__encryption = encryption
-
         self.__validate_modify_event()
 
     def __validate_remove_event(self):
@@ -989,7 +1012,7 @@ class XDCReplication:
 
 class CouchbaseCluster:
 
-    def __init__(self, name, nodes, log, use_hostname=False):
+    def __init__(self, name, nodes, log, use_hostname=False, sdk_compression=True):
         """
         @param name: Couchbase cluster name. e.g C1, C2 to distinguish in logs.
         @param nodes: list of server objects (read from ini file).
@@ -1011,6 +1034,7 @@ class CouchbaseCluster:
         self.__remote_clusters = []
         self.__clusterop = Cluster()
         self.__kv_gen = {}
+        self.sdk_compression = sdk_compression
 
     def __str__(self):
         return "Couchbase Cluster: %s, Master Ip: %s" % (
@@ -1054,6 +1078,9 @@ class CouchbaseCluster:
 
     def get_remote_clusters(self):
         return self.__remote_clusters
+
+    def clear_all_remote_clusters(self):
+        self.__remote_clusters = []
 
     def get_nodes(self):
         return self.__nodes
@@ -1108,7 +1135,7 @@ class CouchbaseCluster:
 
     def _create_bucket_params(self, server, replicas=1, size=0, port=11211, password=None,
                              bucket_type=None, enable_replica_index=1, eviction_policy='valueOnly',
-                             bucket_priority=None, flush_enabled=1, lww=False):
+                             bucket_priority=None, flush_enabled=1, lww=False, maxttl=None):
         """Create a set of bucket_parameters to be sent to all of the bucket_creation methods
         Parameters:
             server - The server to create the bucket on. (TestInputServer)
@@ -1143,6 +1170,7 @@ class CouchbaseCluster:
         bucket_params['bucket_priority'] = bucket_priority
         bucket_params['flush_enabled'] = flush_enabled
         bucket_params['lww'] = lww
+        bucket_params['maxTTL'] = maxttl
         return bucket_params
 
     def set_global_checkpt_interval(self, value):
@@ -1214,7 +1242,8 @@ class CouchbaseCluster:
     def create_sasl_buckets(
             self, bucket_size, num_buckets=1, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
-            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False):
+            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False,
+            maxttl=None):
         """Create sasl buckets.
         @param bucket_size: size of the bucket.
         @param num_buckets: number of buckets to create.
@@ -1230,7 +1259,7 @@ class CouchbaseCluster:
                                                      size=bucket_size, replicas=num_replicas,
                                                      eviction_policy=eviction_policy,
                                                      bucket_priority=bucket_priority,
-                                                     lww=lww)
+                                                     lww=lww, maxttl=maxttl)
             bucket_tasks.append(self.__clusterop.async_create_sasl_bucket(name=name,password='password',
                                                                           bucket_params=sasl_params))
 
@@ -1240,7 +1269,8 @@ class CouchbaseCluster:
                     num_replicas=num_replicas, bucket_size=bucket_size,
                     eviction_policy=eviction_policy,
                     bucket_priority=bucket_priority,
-                    lww=lww
+                    lww=lww,
+                    maxttl=maxttl
                 ))
 
         for task in bucket_tasks:
@@ -1249,7 +1279,7 @@ class CouchbaseCluster:
     def create_standard_buckets(
             self, bucket_size, num_buckets=1, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
-            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False):
+            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False, maxttl=None):
         """Create standard buckets.
         @param bucket_size: size of the bucket.
         @param num_buckets: number of buckets to create.
@@ -1267,7 +1297,8 @@ class CouchbaseCluster:
                 replicas=num_replicas,
                 eviction_policy=eviction_policy,
                 bucket_priority=bucket_priority,
-                lww=lww)
+                lww=lww,
+                maxttl=maxttl)
 
             bucket_tasks.append(self.__clusterop.async_create_standard_bucket(name=name, port=STANDARD_BUCKET_PORT+i,
                                                                               bucket_params=standard_params))
@@ -1283,7 +1314,8 @@ class CouchbaseCluster:
                     port=STANDARD_BUCKET_PORT + i,
                     eviction_policy=eviction_policy,
                     bucket_priority=bucket_priority,
-                    lww=lww
+                    lww=lww,
+                    maxttl=maxttl
                 ))
 
         for task in bucket_tasks:
@@ -1292,8 +1324,8 @@ class CouchbaseCluster:
     def create_default_bucket(
             self, bucket_size, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
-            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False
-    ):
+            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False,
+            maxttl=None):
         """Create default bucket.
         @param bucket_size: size of the bucket.
         @param num_replicas: number of replicas (1-3).
@@ -1307,8 +1339,9 @@ class CouchbaseCluster:
             replicas=num_replicas,
             eviction_policy=eviction_policy,
             bucket_priority=bucket_priority,
-            lww=lww
-        )
+            lww=lww,
+            maxttl=maxttl)
+
         self.__clusterop.create_default_bucket(bucket_params)
         self.__buckets.append(
             Bucket(
@@ -1319,7 +1352,8 @@ class CouchbaseCluster:
                 bucket_size=bucket_size,
                 eviction_policy=eviction_policy,
                 bucket_priority=bucket_priority,
-                lww=lww
+                lww=lww,
+                maxttl=maxttl
             ))
 
     def get_buckets(self):
@@ -1405,7 +1439,7 @@ class CouchbaseCluster:
         task = self.__clusterop.async_load_gen_docs(
             self.__master_node, bucket.name, gen, bucket.kvs[kv_store],
             OPS.CREATE, exp, flag, only_store_hash, batch_size, pause_secs,
-            timeout_secs)
+            timeout_secs, compression=self.sdk_compression)
         return task
 
     def load_bucket(self, bucket, num_items, value_size=512, exp=0,
@@ -1460,7 +1494,7 @@ class CouchbaseCluster:
                 self.__clusterop.async_load_gen_docs(
                     self.__master_node, bucket.name, gen, bucket.kvs[kv_store],
                     OPS.CREATE, exp, flag, only_store_hash, batch_size,
-                    pause_secs, timeout_secs)
+                    pause_secs, timeout_secs, compression=self.sdk_compression)
             )
         return tasks
 
@@ -1511,7 +1545,8 @@ class CouchbaseCluster:
                 self.__clusterop.async_load_gen_docs(
                     self.__master_node, bucket.name, kv_gen,
                     bucket.kvs[kv_store], ops, exp, flag,
-                    only_store_hash, batch_size, pause_secs, timeout_secs)
+                    only_store_hash, batch_size, pause_secs, timeout_secs,
+                    compression=self.sdk_compression)
             )
         for task in tasks:
             task.result()
@@ -1542,7 +1577,7 @@ class CouchbaseCluster:
                 self.__clusterop.async_load_gen_docs(
                     self.__master_node, bucket.name, kv_gen,
                     bucket.kvs[kv_store], ops, exp, flag,
-                    only_store_hash, batch_size, pause_secs, timeout_secs)
+                    only_store_hash, batch_size, pause_secs, timeout_secs, compression=self.sdk_compression)
             )
         return tasks
 
@@ -1592,7 +1627,7 @@ class CouchbaseCluster:
                 tasks.append(self.__clusterop.async_load_gen_docs(
                     self.__master_node, bucket.name, kv_gen, bucket.kvs[kv_store],
                     OPS.CREATE, exp, flag, only_store_hash, batch_size,
-                    pause_secs, timeout_secs))
+                    pause_secs, timeout_secs, compression=self.sdk_compression))
 
                 for task in tasks:
                     task.result()
@@ -1679,7 +1714,8 @@ class CouchbaseCluster:
                     bucket.kvs[kv_store],
                     op_type,
                     expiration,
-                    batch_size=1000)
+                    batch_size=1000,
+                    compression=self.sdk_compression)
             )
         return tasks
 
@@ -2350,7 +2386,8 @@ class CouchbaseCluster:
                                 max_verify,
                                 only_store_hash,
                                 batch_size,
-                                timeout_sec=60))
+                                timeout_sec=60,
+                                compression=self.sdk_compression))
         for task in tasks:
             task.result(timeout)
 
@@ -2565,6 +2602,7 @@ class XDCRNewBaseTest(unittest.TestCase):
 
     def __setup_for_test(self):
         use_hostanames = self._input.param("use_hostnames", False)
+        sdk_compression = self._input.param("sdk_compression", True)
         counter = 1
         for _, nodes in self._input.clusters.iteritems():
             cluster_nodes = copy.deepcopy(nodes)
@@ -2573,7 +2611,7 @@ class XDCRNewBaseTest(unittest.TestCase):
             self.__cb_clusters.append(
                 CouchbaseCluster(
                     "C%s" % counter, cluster_nodes,
-                    self.log, use_hostanames))
+                    self.log, use_hostanames, sdk_compression=sdk_compression))
             counter += 1
 
         self.__cleanup_previous()
@@ -2680,6 +2718,7 @@ class XDCRNewBaseTest(unittest.TestCase):
             self._input.param("active_resident_threshold", 100)
         CHECK_AUDIT_EVENT.CHECK = self._input.param("verify_audit", 0)
         self._max_verify = self._input.param("max_verify", 100000)
+        self._sdk_compression = self._input.param("sdk_compression", True)
         self._evict_with_compactor = self._input.param("evict_with_compactor", False)
         self._replicator_role = self._input.param("replicator_role",False)
         self._replicator_all_buckets = self._input.param("replicator_all_buckets",False)
@@ -2830,6 +2869,8 @@ class XDCRNewBaseTest(unittest.TestCase):
         num_buckets = self.__num_sasl_buckets + \
             self.__num_stand_buckets + int(self._create_default_bucket)
 
+        maxttl = self._input.param("maxttl", None)
+
         for cb_cluster in self.__cb_clusters:
             total_quota = cb_cluster.get_mem_quota()
             bucket_size = self.__calculate_bucket_size(
@@ -2842,19 +2883,22 @@ class XDCRNewBaseTest(unittest.TestCase):
                     self._num_replicas,
                     eviction_policy=self.__eviction_policy,
                     bucket_priority=bucket_priority,
-                    lww=self.__lww)
+                    lww=self.__lww,
+                    maxttl=maxttl)
 
             cb_cluster.create_sasl_buckets(
                 bucket_size, num_buckets=self.__num_sasl_buckets,
                 num_replicas=self._num_replicas,
                 eviction_policy=self.__eviction_policy,
-                bucket_priority=bucket_priority, lww=self.__lww)
+                bucket_priority=bucket_priority, lww=self.__lww,
+                maxttl=maxttl)
 
             cb_cluster.create_standard_buckets(
                 bucket_size, num_buckets=self.__num_stand_buckets,
                 num_replicas=self._num_replicas,
                 eviction_policy=self.__eviction_policy,
-                bucket_priority=bucket_priority, lww=self.__lww)
+                bucket_priority=bucket_priority, lww=self.__lww,
+                maxttl=maxttl)
 
     def create_buckets_on_cluster(self, cluster_name):
         # if mixed priority is set by user, set high priority for sasl and
@@ -3217,7 +3261,8 @@ class XDCRNewBaseTest(unittest.TestCase):
                         repl.get_src_bucket(),
                         repl.get_src_bucket().kvs[kv_store],
                         repl.get_dest_bucket().kvs[kv_store],
-                        max_verify=self._max_verify)
+                        max_verify=self._max_verify,
+                        compression=self._sdk_compression)
                 tasks.append(task_info)
         for task in tasks:
             if self._dgm_run:
@@ -3535,12 +3580,14 @@ class XDCRNewBaseTest(unittest.TestCase):
                     finally:
                         rev_err_count = self.verify_rev_ids(remote_cluster_ref.get_replications(), skip=skip_verify_revid)
                         # we're done with the test, now report specific errors
+                        # following errors are important only if there is a rev id mismatch
+                        # if revids matched then these errors can be ignored
                         if (not(src_active_passed and dest_active_passed)) and \
-                            (not(src_dcp_queue_drained and dest_dcp_queue_drained)):
+                            (not(src_dcp_queue_drained and dest_dcp_queue_drained)) and rev_err_count:
                             self.fail("Incomplete replication: Keys stuck in dcp queue")
-                        if not (src_active_passed and dest_active_passed):
+                        if not (src_active_passed and dest_active_passed) and rev_err_count:
                             self.fail("Incomplete replication: Active key count is incorrect")
-                        if not (src_replica_passed and dest_replica_passed):
+                        if not (src_replica_passed and dest_replica_passed) and rev_err_count:
                             self.fail("Incomplete intra-cluster replication: "
                                       "replica count did not match active count")
                         if rev_err_count > 0:

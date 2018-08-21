@@ -7,7 +7,6 @@ from fts_base import FTSBaseTest
 from lib.membase.api.exception import FTSException, ServerUnavailableException
 from lib.membase.api.rest_client import RestConnection
 from membase.helper.cluster_helper import ClusterOperationHelper
-from remote.remote_util import RemoteMachineShellConnection
 
 
 class StableTopFTS(FTSBaseTest):
@@ -39,6 +38,21 @@ class StableTopFTS(FTSBaseTest):
                 self.sleep(60, "Waiting for updates to get indexed...")
         self.wait_for_indexing_complete()
         self.validate_index_count(equal_bucket_doc_count=True)
+
+    def test_maxttl_setting(self):
+        self.create_simple_default_index()
+        maxttl = int(self._input.param("maxttl", None))
+        self.sleep(maxttl,
+                "Waiting for expiration at the elapse of bucket maxttl")
+        self._cb_cluster.run_expiry_pager()
+        self.wait_for_indexing_complete(item_count=0)
+        self.validate_index_count(must_equal=0)
+        for index in self._cb_cluster.get_indexes():
+            query = eval(self._input.param("query", str(self.sample_query)))
+            hits, _, _, _ = index.execute_query(query,
+                                             zero_results_ok=True,
+                                             expected_hits=0)
+            self.log.info("Hits: %s" % hits)
 
     def query_in_dgm(self):
         self.create_simple_default_index()
@@ -149,13 +163,15 @@ class StableTopFTS(FTSBaseTest):
                                                 consistency_vectors=self.consistency_vectors)
             self.log.info("Hits: %s" % hits)
             try:
-                shell = RemoteMachineShellConnection(fts_node)
-                shell.stop_server()
+                from fts_base import NodeHelper
+                NodeHelper.stop_couchbase(fts_node)
                 for i in xrange(self.consistency_vectors.values()[0].values()[0]):
                     self.async_perform_update_delete(self.upd_del_fields)
             finally:
-                shell = RemoteMachineShellConnection(fts_node)
-                shell.start_server()
+                NodeHelper.start_couchbase(fts_node)
+                NodeHelper.wait_service_started(fts_node)
+                self.sleep(10)
+
             # "status":"remote consistency error" => expected_hits=-1
             hits, _, _, _ = index.execute_query(query,
                                                 zero_results_ok=zero_results_ok,
@@ -350,10 +366,10 @@ class StableTopFTS(FTSBaseTest):
         index, alias = self.create_simple_alias()
         hits1, _, _, _ = alias.execute_query(self.sample_query)
         self.log.info("Hits: {0}".format(hits1))
-        new_index = copy.copy(index)
         index.delete()
         self.log.info("Recreating deleted index ...")
-        new_index.create()
+        bucket = self._cb_cluster.get_bucket_by_name('default')
+        self.create_index(bucket, "default_index")
         self.wait_for_indexing_complete()
         hits2, _, _, _ = alias.execute_query(self.sample_query)
         self.log.info("Hits: {0}".format(hits2))
@@ -424,7 +440,7 @@ class StableTopFTS(FTSBaseTest):
             index.build_custom_plan_params(new_plan_param)
         index.index_definition['uuid'] = index.get_uuid()
         index.update()
-        self.sleep(5, "Wait for index to get updated...")
+        self.sleep(10, "Wait for index to get updated...")
         self.is_index_partitioned_balanced(index=index)
         _, defn = index.get_index_defn()
         self.log.info(defn['indexDef'])
@@ -1661,7 +1677,7 @@ class StableTopFTS(FTSBaseTest):
         f.write(cert)
         f.close()
 
-        cmd = "curl -k -E cert.pem "+\
+        cmd = "curl -g -k "+\
               "-XPUT -H \"Content-Type: application/json\" "+\
               "-u Administrator:password "+\
               "https://{0}:{1}/api/index/default_idx -d ".\
@@ -1671,7 +1687,7 @@ class StableTopFTS(FTSBaseTest):
         self.log.info("Running command : {0}".format(cmd))
         output = subprocess.check_output(cmd, shell=True)
         if json.loads(output) == {"status":"ok"}:
-            query = "curl -k -E cert.pem " + \
+            query = "curl -g -k " + \
                     "-XPOST -H \"Content-Type: application/json\" " + \
                     "-u Administrator:password " + \
                     "https://{0}:18094/api/index/default_idx/query -d ". \
@@ -1684,3 +1700,32 @@ class StableTopFTS(FTSBaseTest):
                 self.fail("Query over ssl failed!")
         else:
             self.fail("Index could not be created over ssl")
+
+
+    def test_json_types(self):
+        self.load_data()
+        self.create_simple_default_index()
+        master = self._cb_cluster.get_master_node()
+        dic ={}
+        dic['null'] = None
+        dic['number'] = 12345
+        dic['date'] = "2018-01-21T18:25:43-05:00"
+        dic['bool'] = True
+        dic['string'] = "sample string json"
+        dic['array'] = ['element1', 1234, True]
+        try:
+            from couchbase.cluster import Cluster
+            from couchbase.cluster import PasswordAuthenticator
+            cluster = Cluster('couchbase://{0}'.format(master.ip))
+            authenticator = PasswordAuthenticator('Administrator', 'password')
+            cluster.authenticate(authenticator)
+            cb = cluster.open_bucket('default')
+            for key, value in dic.iteritems():
+                cb.upsert(key, value)
+        except Exception as e:
+            self.fail(e)
+        self.wait_for_indexing_complete()
+        self.validate_index_count(equal_bucket_doc_count=True)
+        for index in self._cb_cluster.get_indexes():
+            self.generate_random_queries(index, 5, self.query_types)
+            self.run_query_and_compare(index)

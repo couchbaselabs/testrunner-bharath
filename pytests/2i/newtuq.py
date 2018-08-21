@@ -29,13 +29,14 @@ class QueryTests(BaseTestCase):
         # Set indexer storage mode
         indexer_rest = RestConnection(indexer_node[0])
         doc = {"indexer.settings.storage_mode": self.gsi_type}
-        indexer_rest.set_index_settings(doc)
+        indexer_rest.set_index_settings_internal(doc)
+        doc = {"indexer.api.enableTestServer": True}
+        indexer_rest.set_index_settings_internal(doc)
         self.indexer_scanTimeout = self.input.param("indexer_scanTimeout", None)
         if self.indexer_scanTimeout is not None:
             for server in indexer_node:
                 rest = RestConnection(server)
                 rest.set_index_settings({"indexer.settings.scan_timeout": self.indexer_scanTimeout})
-
         if self.input.tuq_client and "client" in self.input.tuq_client:
             self.shell = RemoteMachineShellConnection(self.input.tuq_client["client"])
         else:
@@ -97,7 +98,7 @@ class QueryTests(BaseTestCase):
             if hasattr(self, 'skip_cleanup') and not self.skip_cleanup:
                 self.n1ql_node = self.get_nodes_from_services_map(service_type="n1ql")
                 self.n1ql_helper.drop_primary_index(using_gsi=self.use_gsi_for_primary, server=self.n1ql_node)
-        if hasattr(self, 'shell'):
+        if hasattr(self, 'shell') and self.shell is not None:
             if not self.skip_cleanup:
                 self.n1ql_helper._restart_indexer()
                 self.n1ql_helper.killall_tuq_process()

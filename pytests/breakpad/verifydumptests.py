@@ -1,11 +1,11 @@
 import os
-import re
-import time
-import logger
 import threading
+import time
+
+import logger
 from breakpadbase import BreakpadBase
-from membase.api.rest_client import RestConnection
 from logpoll import NSLogPoller
+from membase.api.rest_client import RestConnection
 
 log = logger.Logger.get_logger()
 
@@ -120,11 +120,17 @@ class BreakpadVerifyDumpTests(BreakpadBase):
             assert self.kill_memcached(i)
 
             # get restart msg
-	    msg = p.getEventQItem()
-	    assert msg
+            msg = p.getEventQItem()
+            assert msg
 
             # get dump item
             dmp_path = p.getDumpQItem()
+            if dmp_path is None:
+                try:
+                    time.sleep(5)
+                    dmp_path = p.getDumpQItem()
+                except Exception as e:
+                    raise Exception("Failed to get dump path: {0}".format(e))
             assert dmp_path and os.access(dmp_path, os.R_OK)
 
     def verify_crash_during_rebalance(self):

@@ -1,24 +1,25 @@
 from __future__ import absolute_import
-from app.celery import celery
-from celery.task.sets import TaskSet
-import app.postcondition_handlers as phandler
-import app.sdk_client_tasks as client
-import json
-import uuid
-import time
+
 import copy
-import re
-from rabbit_helper import PersistedMQ, RabbitHelper
-from celery import current_task
-from celery import Task
-from cache import ObjCacher, CacheHelper
-from app.query import updateQueryBuilders
-from app.rest_client_tasks import create_rest, http_ping
+import json
 import random
-import testcfg as cfg
-from celery.exceptions import TimeoutError
+import re
+import time
+import uuid
+
+from celery import current_task
 from celery.signals import task_postrun
 from celery.utils.log import get_task_logger
+
+import app.postcondition_handlers as phandler
+import app.sdk_client_tasks as client
+import testcfg as cfg
+from app.celery import celery
+from app.query import updateQueryBuilders
+from app.rest_client_tasks import create_rest, http_ping
+from cache import ObjCacher, CacheHelper
+from membase.helper.cluster_helper import ClusterOperationHelper
+from rabbit_helper import PersistedMQ, RabbitHelper
 
 logger = get_task_logger(__name__)
 
@@ -823,8 +824,7 @@ class ClusterStatus(object):
             address = {'server_ip' : ref_node.ip, 'port' : ref_node.port}
             rest = create_rest(**address)
 
-            command = "node(global:whereis_name(ns_orchestrator))"
-            status, content = rest.diag_eval(command)
+            status, content = ClusterOperationHelper.find_orchestrator_with_rest(rest)
 
             if status == True:
                 content = re.sub(r".*@", "", content).strip("'").split(':')

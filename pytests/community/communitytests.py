@@ -1,11 +1,27 @@
 import json
+import time
+import unittest
 import urllib
+import testconstants
+from TestInput import TestInputSingleton
 
 from community.community_base import CommunityBaseTest
 from community.community_base import CommunityXDCRBaseTest
-from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import  MemcachedClientHelper
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
+from membase.helper.rebalance_helper import RebalanceHelper
+from membase.api.exception import RebalanceFailedException
+from couchbase_helper.documentgenerator import BlobGenerator
 from remote.remote_util import RemoteMachineShellConnection
-from testconstants import COUCHBASE_FROM_WATSON, COUCHBASE_FROM_SPOCK
+from membase.helper.cluster_helper import ClusterOperationHelper
+from scripts.install import InstallerJob
+from testconstants import SHERLOCK_VERSION
+from testconstants import COUCHBASE_FROM_WATSON, COUCHBASE_FROM_SPOCK,\
+                          COUCHBASE_FROM_VULCAN
+from testconstants import WIN_BACKUP_PATH, WIN_BACKUP_C_PATH, WIN_COUCHBASE_BIN_PATH
+from testconstants import LINUX_COUCHBASE_BIN_PATH
+
+
 
 
 class CommunityTests(CommunityBaseTest):
@@ -100,6 +116,11 @@ class CommunityTests(CommunityBaseTest):
                 self.fail("CE does not support kv and n1ql on same node")
             else:
                 self.log.info("services enforced in CE")
+        elif self.services == "kv,eventing":
+            if status:
+                self.fail("CE does not support kv and eventing on same node")
+            else:
+                self.log.info("services enforced in CE")
         elif self.services == "index,n1ql":
             if status:
                 self.fail("CE does not support index and n1ql on same node")
@@ -112,7 +133,12 @@ class CommunityTests(CommunityBaseTest):
             else:
                 self.fail("Failed to set kv, index and query services on CE")
         elif self.version[:5] in COUCHBASE_FROM_WATSON:
-            if self.services == "fts,index,kv":
+            if self.version[:5] in COUCHBASE_FROM_VULCAN and "eventing" in self.services:
+                if status:
+                    self.fail("CE does not support eventing in vulcan")
+                else:
+                    self.log.info("services enforced in CE")
+            elif self.services == "fts,index,kv":
                 if status:
                     self.fail("CE does not support fts, index and kv on same node")
                 else:
@@ -194,7 +220,7 @@ class CommunityTests(CommunityBaseTest):
                         self.fail("maybe bug in add node")
                 elif self.version in COUCHBASE_FROM_WATSON:
                     if self.start_node_services in ["kv", "index,kv,n1ql",
-                         "index,kv,n1ql,fts"] and self.add_node_services not in \
+                         "fts,index,kv,n1ql"] and self.add_node_services not in \
                                     ["kv", "index,kv,n1ql", "fts,index,kv,n1ql"]:
                         self.log.info("services are enforced in CE")
                     elif self.start_node_services not in ["kv", "index,kv,n1ql",
@@ -229,12 +255,12 @@ class CommunityTests(CommunityBaseTest):
         output, error = self.remote.execute_command("ls -lh {0}*/"
                                         .format(self.backup_location))
         self.remote.log_command_output(output, error)
-        o, e = self.remote.execute_command("{0}cbtransfer -u Administrator "\
+        output, error = self.remote.execute_command("{0}cbtransfer -u Administrator "\
                                            "-p password {1}*/*-full/ " \
                                            "stdout: | grep set | uniq | wc -l"\
                                            .format(self.bin_path,
                                                    self.backup_c_location))
-        self.remote.log_command_output(o, e)
+        self.remote.log_command_output(output, error)
         if int(output[0]) != 1000:
             self.fail("full backup did not work in CE. "
                       "Expected 1000, actual: {0}".format(output[0]))
@@ -251,13 +277,13 @@ class CommunityTests(CommunityBaseTest):
         output, error = self.remote.execute_command("ls -lh {0}"
                                                      .format(self.backup_location))
         self.remote.log_command_output(output, error)
-        o, e = self.remote.execute_command("{0}cbtransfer -u Administrator "\
+        output, error = self.remote.execute_command("{0}cbtransfer -u Administrator "\
                                            "-p password {1}*/*-{2}/ stdout: "\
                                            "| grep set | uniq | wc -l"\
                                            .format(self.bin_path,
                                                    self.backup_c_location,
                                                    self.backup_option))
-        self.remote.log_command_output(o, e)
+        self.remote.log_command_output(output, error)
         if int(output[0]) == 2000:
             self.log.info("backup option 'diff' is enforced in CE")
         elif int(output[0]) == 1000:
@@ -410,10 +436,185 @@ class CommunityTests(CommunityBaseTest):
                 self.log.info("cbbackupmgr is enforced in CE")
         self.remote.disconnect()
 
+    def test_max_ttl_bucket(self):
+        """
+            From vulcan, EE bucket has has an option to set --max-ttl, not it CE.
+            This test is make sure CE could not create bucket with option --max-ttl
+            This test must pass default_bucket=False
+        """
+        if self.cb_version[:5] not in COUCHBASE_FROM_VULCAN:
+            self.log.info("This test only for vulcan and later")
+            return
+        cmd = 'curl -X POST -u Administrator:password \
+                                    http://{0}:8091/pools/default/buckets \
+                                 -d name=bucket0 \
+                                 -d maxTTL=100 \
+                                 -d authType=sasl \
+                                 -d ramQuotaMB=100 '.format(self.master.ip)
+        if self.cli_test:
+            cmd = "{0}couchbase-cli bucket-create -c {1}:8091 --username Administrator \
+                --password password --bucket bucket0 --bucket-type couchbase \
+                --bucket-ramsize 512 --bucket-replica 1 --bucket-priority high \
+                --bucket-eviction-policy fullEviction --enable-flush 0 \
+                --enable-index-replica 1 --max-ttl 200".format(self.bin_path,
+                                                               self.master.ip)
+        conn = RemoteMachineShellConnection(self.master)
+        output, error = conn.execute_command(cmd)
+        conn.log_command_output(output, error)
+        mesg = "Max TTL is supported in enterprise edition only"
+        if self.cli_test:
+            mesg = "Maximum TTL can only be configured on enterprise edition"
+        if output and mesg not in str(output[0]):
+            self.fail("max ttl feature should not in Community Edition")
+        buckets = RestConnection(self.master).get_buckets()
+        if buckets:
+            for bucket in buckets:
+                self.log.info("bucekt in cluser: {0}".format(bucket.name))
+                if bucket.name == "bucket0":
+                    self.fail("Failed to enforce feature max ttl in CE.")
+        conn.disconnect()
+
+    def test_setting_audit(self):
+        """
+           CE does not allow to set audit from vulcan 5.5.0
+        """
+        if self.cb_version[:5] not in COUCHBASE_FROM_VULCAN:
+            self.log.info("This test only for vulcan and later")
+            return
+        cmd = 'curl -X POST -u Administrator:password \
+              http://{0}:8091/settings/audit \
+              -d auditdEnabled=true '.format(self.master.ip)
+        if self.cli_test:
+            cmd = "{0}couchbase-cli setting-audit -c {1}:8091 -u Administrator \
+                -p password --audit-enabled 1 --audit-log-rotate-interval 604800 \
+                --audit-log-path /opt/couchbase/var/lib/couchbase/logs "\
+                .format(self.bin_path, self.master.ip)
+
+        conn = RemoteMachineShellConnection(self.master)
+        output, error = conn.execute_command(cmd)
+        conn.log_command_output(output, error)
+        mesg = "This http API endpoint requires enterprise edition"
+        if output and mesg not in str(output[0]):
+            self.fail("setting-audit feature should not in Community Edition")
+        conn.disconnect()
+
+    def test_setting_autofailover_enterprise_only(self):
+        """
+           CE does not allow set auto failover if disk has issue
+           and failover group from vulcan 5.5.0
+        """
+        if self.cb_version[:5] not in COUCHBASE_FROM_VULCAN:
+            self.log.info("This test only for vulcan and later")
+            return
+        self.failover_disk_period = self.input.param("failover_disk_period", False)
+        self.failover_server_group = self.input.param("failover_server_group", False)
+
+        failover_disk_period = ""
+        if self.failover_disk_period:
+            if self.cli_test:
+                failover_disk_period = "--failover-data-disk-period 300"
+            else:
+                failover_disk_period = "-d failoverOnDataDiskIssues[timePeriod]=300"
+        failover_server_group = ""
+        if self.failover_server_group and self.cli_test:
+            failover_server_group = "--enable-failover-of-server-group 1"
+
+
+        cmd = 'curl -X POST -u Administrator:password \
+              http://{0}:8091/settings/autoFailover -d enabled=true -d timeout=120 \
+              -d maxCount=1 \
+              -d failoverOnDataDiskIssues[enabled]=true {1} \
+              -d failoverServerGroup={2}'.format(self.master.ip, failover_disk_period,
+                                                 self.failover_server_group)
+        if self.cli_test:
+            cmd = "{0}couchbase-cli setting-autofailover -c {1}:8091 \
+                   -u Administrator -p password \
+                   --enable-failover-on-data-disk-issues 1 {2} {3} "\
+                  .format(self.bin_path, self.master.ip,
+                          failover_disk_period,
+                          failover_server_group)
+        conn = RemoteMachineShellConnection(self.master)
+        output, error = conn.execute_command(cmd)
+        conn.log_command_output(output, error)
+        mesg = "Auto failover on Data Service disk issues can only be " + \
+               "configured on enterprise edition"
+        if not self.cli_test:
+            if self.failover_disk_period or \
+                                   self.failover_server_group:
+                if output and not error:
+                    self.fail("setting autofailover disk issues feature\
+                               should not in Community Edition")
+        else:
+            if self.failover_server_group:
+                mesg = "--enable-failover-of-server-groups can only be " + \
+                       "configured on enterprise edition"
+
+        if output and mesg not in str(output[0]):
+            self.fail("Setting EE autofailover features \
+                       should not in Community Edition")
+        else:
+            self.log.info("EE setting autofailover are disable in CE")
+        conn.disconnect()
+
+    def test_set_bucket_compression(self):
+        """
+           CE does not allow to set bucket compression to bucket
+           from vulcan 5.5.0.   Mode compression: off,active,passive
+           Note: must set defaultbucket=False for this test
+        """
+        if self.cb_version[:5] not in COUCHBASE_FROM_VULCAN:
+            self.log.info("This test only for vulcan and later")
+            return
+        self.compression_mode = self.input.param("compression_mode", "off")
+        cmd = 'curl -X POST -u Administrator:password \
+                                    http://{0}:8091/pools/default/buckets \
+                                 -d name=bucket0 \
+                                 -d compressionMode={1} \
+                                 -d authType=sasl \
+                                 -d ramQuotaMB=100 '.format(self.master.ip,
+                                                            self.compression_mode)
+        if self.cli_test:
+            cmd = "{0}couchbase-cli bucket-create -c {1}:8091 --username Administrator \
+                --password password --bucket bucket0 --bucket-type couchbase \
+                --bucket-ramsize 512 --bucket-replica 1 --bucket-priority high \
+                --bucket-eviction-policy fullEviction --enable-flush 0 \
+                --enable-index-replica 1 --compression-mode {2}".format(self.bin_path,
+                                                                 self.master.ip,
+                                                                 self.compression_mode)
+        conn = RemoteMachineShellConnection(self.master)
+        output, error = conn.execute_command(cmd)
+        conn.log_command_output(output, error)
+        mesg = "Compression mode is supported in enterprise edition only"
+        if self.cli_test:
+            mesg = "Compression mode can only be configured on enterprise edition"
+        if output and mesg not in str(output[0]):
+            self.fail("Setting bucket compression should not in CE")
+        conn.disconnect()
+
 
 class CommunityXDCRTests(CommunityXDCRBaseTest):
     def setUp(self):
         super(CommunityXDCRTests, self).setUp()
+        self.master = self._servers[0]
+        self.cli_test = self._input.param("cli_test", False)
+        self.bin_path = LINUX_COUCHBASE_BIN_PATH
+        remote = RemoteMachineShellConnection(self.master)
+        type = remote.extract_remote_info().distribution_type
+        if type.lower() == 'windows':
+            self.is_linux = False
+            self.backup_location = WIN_BACKUP_PATH
+            self.backup_c_location = WIN_BACKUP_C_PATH
+            self.bin_path = WIN_COUCHBASE_BIN_PATH
+            self.file_extension = ".exe"
+        else:
+            self.is_linux = True
+        self.cb_version = None
+        if RestHelper(RestConnection(self.master)).is_ns_server_running():
+            """ since every new couchbase version, there will be new features
+                that test code will not work on previous release.  So we need
+                to get couchbase version to filter out those tests. """
+            self.cb_version = RestConnection(self.master).get_nodes_version()
+        remote.disconnect()
 
     def tearDown(self):
         super(CommunityXDCRTests, self).tearDown()
@@ -450,7 +651,41 @@ class CommunityXDCRTests(CommunityXDCRBaseTest):
                                                     '-d authType=sasl '
                                                     '-d ramQuotaMB=100 '.format(server.ip))
         conn.log_command_output(output, error)
-        if output and "Conflict resolution type 'lww' is supported only in enterprise edition" not in str(output[0]):
+        if output and "Conflict resolution type 'lww' is supported only in enterprise edition"\
+                  not in str(output[0]):
             self.fail("XDCR LWW feature should not be available in Community Edition")
         self.log.info("XDCR LWW feature not available in Community Edition as expected")
+        conn.disconnect()
+
+    def test_xdcr_compression(self):
+        """
+           flag --enable-compression should not work in CE from vulcan
+        """
+        self.compression_mode = self._input.param("compression_mode", "Auto")
+        if self.cb_version[:5] not in COUCHBASE_FROM_VULCAN:
+            self.log.info("This test only for vulcan and later")
+            return
+        self.log.info("Remove any existing replican")
+        RestConnection(self.src_master).remove_all_replications()
+        conn = RemoteMachineShellConnection(self.src_master)
+
+        cmd = 'curl -X POST -u Administrator:password \
+                              http://{0}:8091/controller/createReplication \
+                                 -d fromBucket=default \
+                                 -d toBucket=default \
+                                 -d toCluster=cluster1 \
+                                 -d replicationType=continuous \
+                                 -d compressionType={1}'.format(self.src_master.ip,
+                                                            self.compression_mode)
+        if self.cli_test:
+            cmd = "{0}couchbase-cli setting-xdcr -c {1}:8091 -u Administrator \
+                   -p password --enable-compression 1 ".format(self.bin_path,
+                                                                 self.src_master.ip)
+        output, error = conn.execute_command(cmd)
+
+        mesg = '"compressionType":"The value can be specified only in enterprise edition"'
+        if self.cli_test:
+            mesg = "ERROR: --enable-compression can only be configured on enterprise edition"
+        if output and mesg not in str(output[0]):
+            self.fail("Setting bucket compression should not in CE")
         conn.disconnect()

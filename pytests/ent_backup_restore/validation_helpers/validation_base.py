@@ -1,7 +1,7 @@
 import json
 import os
-import logger
 
+import logger
 from couchbase_helper.data_analysis_helper import DataAnalyzer, DataAnalysisResultAnalyzer, DataCollector
 from membase.api.rest_client import RestConnection
 from remote.remote_util import RemoteMachineShellConnection
@@ -189,3 +189,4 @@ class BackupRestoreValidationBase:
                 output = " ".join(output)
             with open(to_file_path, 'w') as f:
                 json.dump(output, f)
+        shell.disconnect()

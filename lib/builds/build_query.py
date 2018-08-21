@@ -1,26 +1,27 @@
 #this class will contain methods which we
 #use later to
 # map a version # -> rpm url
-from datetime import datetime
-import time
-import urllib2
 import re
 import socket
-import BeautifulSoup
-import testconstants
-import logger
-import traceback
 import sys
-from testconstants import WIN_CB_VERSION_3
-from testconstants import SHERLOCK_VERSION
-from testconstants import COUCHBASE_VERSION_2
-from testconstants import COUCHBASE_VERSION_3
-from testconstants import COUCHBASE_VERSION_2_WITH_REL
-from testconstants import COUCHBASE_RELEASE_FROM_VERSION_3
-from testconstants import COUCHBASE_FROM_VERSION_3, COUCHBASE_FROM_SPOCK
-from testconstants import CB_RELEASE_REPO
+import time
+import traceback
+import urllib2
+from datetime import datetime
+
+import BeautifulSoup
+import logger
+import testconstants
 from testconstants import CB_LATESTBUILDS_REPO
+from testconstants import CB_RELEASE_REPO
 from testconstants import CE_EE_ON_SAME_FOLDER
+from testconstants import COUCHBASE_FROM_VERSION_3, COUCHBASE_FROM_SPOCK
+from testconstants import COUCHBASE_RELEASE_FROM_VERSION_3
+from testconstants import COUCHBASE_VERSION_2
+from testconstants import COUCHBASE_VERSION_2_WITH_REL
+from testconstants import COUCHBASE_VERSION_3
+from testconstants import SHERLOCK_VERSION
+from testconstants import WIN_CB_VERSION_3
 
 
 class MembaseBuild(object):
@@ -337,7 +338,10 @@ class BuildQuery(object):
                             else:
                                 os_name = "centos6"
                         elif "suse" in os_version.lower():
-                            os_name = "suse11"
+                            if "11" in os_version.lower():
+                                os_name = "suse11"
+                            elif "12" in os_version.lower():
+                                os_name = "suse12"
                         elif "oracle linux" in os_version.lower():
                             os_name = "oel6"
                         else:
@@ -389,7 +393,10 @@ class BuildQuery(object):
                             else:
                                 os_name = "centos6"
                         elif "suse" in os_version.lower():
-                            os_name = "suse11"
+                            if "11" in os_version.lower():
+                                os_name = "suse11"
+                            elif "12" in os_version.lower():
+                                os_name = "suse12"
                         elif "oracle linux" in os_version.lower():
                             os_name = "oel6"
                         else:
@@ -561,7 +568,7 @@ class BuildQuery(object):
             """ windows build name: couchbase_server-enterprise-windows-amd64-3.0.0-892.exe
                                     couchbase-server-enterprise_3.5.0-952-windows_amd64.exe """
             build.name = build_info
-            deliverable_type = ["exe", "rpm", "deb", "zip"]
+            deliverable_type = ["exe", "msi", "rpm", "deb", "zip"]
             if build_info[-3:] in deliverable_type:
                 build.deliverable_type = build_info[-3:]
                 build_info = build_info[:-4]

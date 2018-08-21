@@ -4,6 +4,7 @@ import os
 import random
 import shutil
 import threading
+import traceback
 import zipfile
 from itertools import combinations
 from os import listdir
@@ -33,6 +34,8 @@ class RQGTests(BaseTestCase):
         self.check_covering_index = self.input.param("check_covering_index", True)
         self.skip_setup_cleanup = True
         self.ansi_joins = self.input.param("ansi_joins", False)
+        self.prepared = self.input.param("prepared", False)
+        self.hash_joins = self.input.param("hash_joins", False)
         self.create_secondary_meta_indexes = self.input.param("create_secondary_meta_indexes", False)
         self.aggregate_pushdown = self.input.param("aggregate_pushdown", False)
         self.create_secondary_ansi_join_indexes = self.input.param("create_secondary_ansi_join_indexes", False)
@@ -85,8 +88,11 @@ class RQGTests(BaseTestCase):
         self.drop_index = self.input.param("drop_index", False)
         self.drop_bucket = self.input.param("drop_bucket", False)
         self.dynamic_indexing = self.input.param("dynamic_indexing", False)
+        self.partitioned_indexes = self.input.param("partitioned_indexes",
+                                                    False)
         self.pushdown = self.input.param("pushdown", False)
         self.subquery = self.input.param("subquery", False)
+        self.drop_secondary_indexes = self.input.param("drop_secondary_indexes", True)
         if self.input_rqg_path is not None:
             self.secondary_index_info_path = self.input_rqg_path+"/index/secondary_index_definitions.txt"
             self.db_dump_path = self.input_rqg_path+"/db_dump/database_dump.zip"
@@ -107,6 +113,7 @@ class RQGTests(BaseTestCase):
                 self.os = self.shell.extract_remote_info().type.lower()
             except Exception, ex:
                 self.log.error('SETUP FAILED')
+                traceback.print_exc()
                 self.tearDown()
 
     def tearDown(self):
@@ -115,7 +122,15 @@ class RQGTests(BaseTestCase):
             self.log.info("cleanup is %s" % self.skip_cleanup)
             if self.use_mysql and self.reset_database and (not self.skip_cleanup):
                 try:
-                    self.client.drop_database(self.database)
+                    client = MySQLClient(database=self.database, host=self.mysql_url, user_id=self.user_id, password=self.password)
+                    columns, rows = client._execute_query(query="select concat('KILL ',id,';') from information_schema.processlist where user='root' and time > 0;")
+                    sql_result = client._gen_json_from_results(columns, rows)
+                    for result in sql_result:
+                        for key in result.keys():
+                            query = result[key]
+                            print(query)
+                            client._db_execute_query(query=query)
+                    client.drop_database(self.database)
                 except Exception, ex:
                     self.log.info(ex)
 
@@ -219,7 +234,8 @@ class RQGTests(BaseTestCase):
             list = [data[data.keys()[0]] for data in test_batch]
             list = self.client._convert_template_query_info(table_map=table_map, n1ql_queries=list,
                                                             define_gsi_index=self.use_secondary_index,
-                                                            gen_expected_result=True)
+                                                            gen_expected_result=True,
+                                                            partitioned_indexes=self.partitioned_indexes)
             # Create threads and run the batch
             for test_case in list:
                 test_case_input = test_case
@@ -276,7 +292,8 @@ class RQGTests(BaseTestCase):
                     n1ql_queries=list,
                     define_gsi_index=self.use_secondary_index,
                     gen_expected_result=False,
-                    ansi_joins=self.ansi_joins)
+                    ansi_joins=self.ansi_joins,
+                    partitioned_indexes=self.partitioned_indexes)
             if not self.subquery:
                 if self.use_secondary_index:
                     self._generate_secondary_indexes_in_batches(list)
@@ -542,7 +559,8 @@ class RQGTests(BaseTestCase):
             list_info = self.client._convert_template_query_info(
                     table_map=table_map,
                     n1ql_queries=list,
-                    define_gsi_index=self.use_secondary_index)
+                    define_gsi_index=self.use_secondary_index,
+                    partitioned_indexes=self.partitioned_indexes)
             thread_list = []
             test_case_number = start_test_case_number
             for test_case_input in list_info:
@@ -563,7 +581,8 @@ class RQGTests(BaseTestCase):
         sql_n1ql_index_map_list = self.client._convert_template_query_info(table_map=table_name_description_map,
                                                                            n1ql_queries=query_template_list,
                                                                            define_gsi_index=self.use_secondary_index,
-                                                                           pushdown=self.aggregate_pushdown)
+                                                                           aggregate_pushdown=self.aggregate_pushdown,
+                                                                           partitioned_indexes=self.partitioned_indexes)
 
         for sql_n1ql_index_map in sql_n1ql_index_map_list:
             sql_n1ql_index_map["n1ql"] = sql_n1ql_index_map['n1ql'].replace("simple_table", self.database+"_"+"simple_table")
@@ -583,7 +602,7 @@ class RQGTests(BaseTestCase):
             for t in thread_list:
                 t.join()
 
-        if self.use_secondary_index:
+        if self.use_secondary_index and self.drop_secondary_indexes:
             self._drop_secondary_indexes_in_batches(sql_n1ql_index_map_list)
 
     def _testrun_crud_worker(self, list_info, table_name, table_map, result_queue=None, failure_record_queue=None):
@@ -613,14 +632,40 @@ class RQGTests(BaseTestCase):
                             table_map=map,
                             n1ql_queries=data_info)
             verification_query = "SELECT * from {0} ORDER by primary_key_id".format(table_name)
+
             self._run_basic_crud_test(data_info[0], verification_query,  test_case_number, result_queue, failure_record_queue=failure_record_queue, table_name=table_name)
             self._populate_delta_buckets(table_name)
+            self.wait_for_num_items(table_name, 1000)
+
+    def wait_for_num_items(self,table, num_items):
+        num_items_reached = False
+        while not num_items_reached:
+            self.sleep(1)
+            query = "SELECT COUNT(*) from {0}".format(self.database+"_"+table)
+            result = self.n1ql_helper.run_cbq_query(query=query, server=self.n1ql_server)
+            if result["results"][0]["$1"] == num_items:
+                num_items_reached = True
 
     def _run_basic_test(self, test_data, test_case_number, result_queue, failure_record_queue=None):
         data = test_data
         n1ql_query = data["n1ql"]
         sql_query = data["sql"]
         aggregate = False
+        if "NUMERIC_VALUE1" in n1ql_query:
+            limit = random.randint(1, 30)
+            n1ql_query = n1ql_query.replace("NUMERIC_VALUE1", str(limit))
+            sql_query = sql_query.replace("NUMERIC_VALUE1", str(limit))
+            if limit < 10:
+                offset = limit - 2
+            else:
+                offset = limit - 10
+            if offset < 0:
+                offset = 0
+            n1ql_query = n1ql_query.replace("NUMERIC_VALUE2", str(offset))
+            sql_query = sql_query.replace("NUMERIC_VALUE2", str(offset))
+            self.log.info(" SQL QUERY :: {0}".format(sql_query))
+            self.log.info(" N1QL QUERY :: {0}".format(n1ql_query))
+
         if (n1ql_query.find("simple_table") > 0) and ((self.database+"_"+"simple_table") not in n1ql_query):
             n1ql_query = n1ql_query.replace("simple_table", self.database+"_"+"simple_table")
         if self.subquery:
@@ -634,11 +679,15 @@ class RQGTests(BaseTestCase):
                 sql_query = sql_query.replace("sum(t_1.productId)", "sum(t_1.qty)")
             n1ql_query = n1ql_query.replace("t_5.simple_table_2 t_1.price", "t_1.price")
             sql_query = sql_query.replace("simple_table_2 t_1.price", "t_1.price")
-            n1ql_query = n1ql_query + " order by meta().id limit 5"
+            n1ql_query = n1ql_query + " order by primary_key_id limit 5"
             sql_query = sql_query + " order by t_5.primary_key_id limit 5"
 
             if "sum" in n1ql_query or "min" in n1ql_query or "max" in n1ql_query or "count" in n1ql_query:
                 aggregate = True
+
+        if self.ansi_joins and self.hash_joins:
+            hash_join_template_list = ["HASH(build)", "HASH(probe)"]
+            n1ql_query.replace(" ON ", "{0} ON ".random.choice(hash_join_template_list))
 
         indexes = data["indexes"]
         expected_result = data["expected_result"]
@@ -650,18 +699,18 @@ class RQGTests(BaseTestCase):
         result_run["sql_query"] = sql_query
         result_run["test_case_number"] = test_case_number
 
-        if self.set_limit > 0 and n1ql_query.find("DISTINCT") > 0:
-            result_limit = self.query_helper._add_limit_to_query(n1ql_query, self.set_limit)
-            query_index_run = self._run_queries_and_verify(aggregate, self.subquery, n1ql_query=result_limit, sql_query=sql_query, expected_result=expected_result)
-            result_run["run_query_with_limit"] = query_index_run
+        # run the query
+        query_index_run = self._run_queries_and_verify(aggregate, self.subquery, n1ql_query=n1ql_query, sql_query=sql_query, expected_result=expected_result)
+        result_run["run_query_without_index_hint"] = query_index_run
 
         if expected_result is None:
             expected_result = self._gen_expected_result(sql_query, test_case_number)
             data["expected_result"] = expected_result
 
-        # run the query
-        query_index_run = self._run_queries_and_verify(aggregate, self.subquery, n1ql_query=n1ql_query, sql_query=sql_query, expected_result=expected_result)
-        result_run["run_query_without_index_hint"] = query_index_run
+        if self.set_limit > 0 and n1ql_query.find("DISTINCT") > 0:
+            result_limit = self.query_helper._add_limit_to_query(n1ql_query, self.set_limit)
+            query_index_run = self._run_queries_and_verify(aggregate, self.subquery, n1ql_query=result_limit, sql_query=sql_query, expected_result=expected_result)
+            result_run["run_query_with_limit"] = query_index_run
 
         # add primary index hint and run query
         if self.run_query_with_primary:
@@ -669,6 +718,8 @@ class RQGTests(BaseTestCase):
             query = self.query_helper._add_index_hints_to_query(n1ql_query, [index_info])
             query_index_run = self._run_queries_and_verify(aggregate, self.subquery, n1ql_query=query, sql_query=sql_query, expected_result=expected_result)
             result_run["run_query_with_primary"] = query_index_run
+            if self.aggregate_pushdown == "primary":
+                result_run["aggregate_explain_check::#primary"] = self._run_query_with_pushdown_check(n1ql_query, index_info)
 
         # adds USE INDEX and runs query
         if self.run_query_with_secondary:
@@ -682,10 +733,58 @@ class RQGTests(BaseTestCase):
         if self.run_explain_with_hints:
             result = self._run_queries_with_explain(n1ql_query, indexes)
             result_run.update(result)
+
+        if self.aggregate_pushdown:
+            for index_name in indexes.keys():
+                result_run["aggregate_explain_check::"+str(index_name)] = self._run_query_with_pushdown_check(n1ql_query, indexes[index_name])
+
+        if self.ansi_joins and self.hash_joins:
+            self._verify_query_with_hash_joins(n1ql_query)
+                   
         result_queue.put(result_run)
         self._check_and_push_failure_record_queue(result_run, data, failure_record_queue)
         self.query_count += 1
         self.log.info(" <<<<<<<<<<<<<<<<<<<<<<<<<<<< END RUNNING TEST {0}  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>".format(test_case_number))
+
+    def _run_query_with_pushdown_check(self, n1ql_query, index):
+        message = "Pass"
+        explain_check = False
+        query = self.query_helper._add_index_hints_to_query(n1ql_query, [index])
+        explain_n1ql = "EXPLAIN " + query
+        try:
+            actual_result = self.n1ql_helper.run_cbq_query(query=explain_n1ql, server=self.n1ql_server)
+            if "index_group_aggs" in str(actual_result):
+                explain_check = True
+            if not explain_check:
+                message = "aggregate query {0} with index {1} failed explain result, index_group_aggs not found".format(n1ql_query, index)
+                self.log.info(message)
+                self.log.info(str(actual_result))
+        except Exception, ex:
+            self.log.info(ex)
+            message = ex
+            explain_check = False
+        finally:
+            return {"success": explain_check, "result": message}
+
+    def _verify_query_with_hash_joins(self, n1ql_query):
+        message = "Pass"
+        explain_check = True
+        explain_n1ql = "EXPLAIN " + n1ql_query
+        hash_query_count = n1ql_query.count("HASH")
+        try:
+            actual_result = self.n1ql_helper.run_cbq_query(query=explain_n1ql, server=self.n1ql_server)
+            hash_explain_count = str(actual_result).count("HashJoin")
+            explain_check = (hash_query_count == hash_explain_count)
+            if not explain_check:
+                message = "Join query {0} with failed explain result, HashJoins not found".format(n1ql_query)
+                self.log.info(message)
+                self.log.info(str(actual_result))
+        except Exception, ex:
+            self.log.info(ex)
+            message = ex
+            explain_check = False
+        finally:
+            return {"success": explain_check, "result": message}
 
     def _generate_test_data(self, test_data):
         data = test_data
@@ -697,10 +796,6 @@ class RQGTests(BaseTestCase):
 
     def _run_basic_crud_test(self, test_data, verification_query, test_case_number, result_queue, failure_record_queue=None, table_name=None):
         self.log.info(" <<<<<<<<<<<<<<<<<<<<<<<<<<<< BEGIN RUNNING TEST {0}  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>".format(test_case_number))
-        if table_name is not None:
-            client = self.client_map[table_name]
-        else:
-            client = self.client
         result_run = {}
         n1ql_query = test_data["n1ql_query"]
         if n1ql_query.find("copy_simple_table") > 0:
@@ -712,19 +807,24 @@ class RQGTests(BaseTestCase):
 
         test_data["n1ql_query"] = n1ql_query
         sql_query = test_data["sql_query"]
+
         result_run["n1ql_query"] = n1ql_query
         result_run["sql_query"] = sql_query
         result_run["test_case_number"] = test_case_number
+
         self.log.info("SQL :: {0}".format(sql_query))
         self.log.info("N1QL :: {0}".format(n1ql_query))
+
         crud_ops_run_result = None
-        self._run_queries_and_verify_crud(n1ql_query=verification_query, sql_query=verification_query, expected_result=None, table_name=table_name)
+        client = MySQLClient(database=self.database, host=self.mysql_url, user_id=self.user_id, password=self.password)
         try:
             self.n1ql_helper.run_cbq_query(n1ql_query, self.n1ql_server)
-            client._db_execute_query(query=sql_query)
+            client._insert_execute_query(query=sql_query)
         except Exception, ex:
             self.log.info(ex)
-            crud_ops_run_result ={"success": False, "result": str(ex)}
+            crud_ops_run_result = {"success": False, "result": str(ex)}
+            client._close_mysql_connection()
+        client._close_mysql_connection()
         if crud_ops_run_result is None:
             query_index_run = self._run_queries_and_verify_crud(n1ql_query=verification_query, sql_query=verification_query, expected_result=None, table_name=table_name)
         else:
@@ -766,14 +866,18 @@ class RQGTests(BaseTestCase):
                         keyword_map[keyword] = 1
                     else:
                         keyword_map[keyword] += 1
-                failure_map[test_case_number] = {"sql_query" :sql_query, "n1ql_query": n1ql_query,
+                failure_map[test_case_number] = {"sql_query": sql_query, "n1ql_query": n1ql_query,
                                                  "run_result": message, "keyword_list": keyword_list}
-        summary = " Total Queries Run = {0}, Pass = {1}, Fail = {2}, Pass Percentage = {3} %".format(total, pass_case, fail_case, ((pass_case*100)/total))
+        pass_percent = 0
+        if total > 0:
+            summary = " Total Queries Run = {0}, Pass = {1}, Fail = {2}, Pass Percentage = {3} %".format(total, pass_case, fail_case, ((pass_case*100)/total))
+        else:
+            summary = " No Query Results Found"
         if len(keyword_map) > 0:
             summary += "\n [ KEYWORD FAILURE DISTRIBUTION ] \n"
         for keyword in keyword_map.keys():
             summary += keyword+" :: " + str((keyword_map[keyword]*100)/total)+"%\n "
-        if len(failure_reason_map)  > 0:
+        if len(failure_reason_map) > 0:
             summary += "\n [ FAILURE TYPE DISTRIBUTION ] \n"
             for keyword in failure_reason_map.keys():
                 summary += keyword+" :: " + str((failure_reason_map[keyword]*100)/total)+"%\n "
@@ -874,10 +978,14 @@ class RQGTests(BaseTestCase):
                 rows = []
             else:
                 columns, rows = client._execute_query(query=sql)
-            sql_result = self.client._gen_json_from_results(columns, rows)
+            if self.aggregate_pushdown:
+                sql_result = client._gen_json_from_results_repeated_columns(columns, rows)
+            else:
+                sql_result = client._gen_json_from_results(columns, rows)
             client._close_mysql_connection()
         except Exception, ex:
             self.log.info(ex)
+            traceback.print_exc()
             if ex.message.__contains__("SQL syntax") or ex.message.__contains__("ERROR"):
                 print "Error in sql syntax"
         return sql_result
@@ -908,20 +1016,10 @@ class RQGTests(BaseTestCase):
     def _run_queries_and_verify(self, aggregate, subquery, n1ql_query=None, sql_query=None, expected_result=None):
         if not self.create_primary_index:
             n1ql_query = n1ql_query.replace("USE INDEX(`#primary` USING GSI)", " ")
+        if self.prepared:
+            n1ql_query = "PREPARE " + n1ql_query
         self.log.info(" SQL QUERY :: {0}".format(sql_query))
         self.log.info(" N1QL QUERY :: {0}".format(n1ql_query))
-        if "NUMERIC_VALUE1" in n1ql_query:
-            limit = random.randint(1, 30)
-            n1ql_query = n1ql_query.replace("NUMERIC_VALUE1", str(limit))
-            sql_query = sql_query.replace("NUMERIC_VALUE1", str(limit))
-            if limit < 10:
-                offset = limit - 2
-            else:
-                offset = limit - 10
-            n1ql_query = n1ql_query.replace("NUMERIC_VALUE2", str(offset))
-            sql_query = sql_query.replace("NUMERIC_VALUE2", str(offset))
-            self.log.info(" SQL QUERY :: {0}".format(sql_query))
-            self.log.info(" N1QL QUERY :: {0}".format(n1ql_query))
         # Run n1ql query
         hints = self.query_helper._find_hints(sql_query)
         for i, item in enumerate(hints):
@@ -933,13 +1031,23 @@ class RQGTests(BaseTestCase):
             else:
                 query_params={}
             actual_result = self.n1ql_helper.run_cbq_query(query=n1ql_query, server=self.n1ql_server, query_params=query_params, scan_consistency="request_plus")
+            if self.prepared:
+                name = actual_result["results"][0]['name']
+                prepared_query = "EXECUTE '%s'" % name
+                self.log.info(" N1QL QUERY :: {0}".format(prepared_query))
+                actual_result = self.n1ql_helper.run_cbq_query(query=prepared_query, server=self.n1ql_server, query_params=query_params, scan_consistency="request_plus")
             n1ql_result = actual_result["results"]
 
             # Run SQL Query
             sql_result = expected_result
+            client = MySQLClient(database=self.database, host=self.mysql_url, user_id=self.user_id, password=self.password)
             if expected_result is None:
-                columns, rows = self.client._execute_query(query=sql_query)
-                sql_result = self.client._gen_json_from_results(columns, rows)
+                columns, rows = client._execute_query(query=sql_query)
+                if self.aggregate_pushdown:
+                    sql_result = client._gen_json_from_results_repeated_columns(columns, rows)
+                else:
+                    sql_result = client._gen_json_from_results(columns, rows)
+            client._close_mysql_connection()
             self.log.info(" result from n1ql query returns {0} items".format(len(n1ql_result)))
             self.log.info(" result from sql query returns {0} items".format(len(sql_result)))
 
@@ -952,35 +1060,37 @@ class RQGTests(BaseTestCase):
                         return {"success": True, "result": "Pass"}
                 return {"success": False, "result": str("different results")}
             try:
-                self.n1ql_helper._verify_results_rqg(subquery, aggregate, sql_result=sql_result, n1ql_result=n1ql_result, hints=hints)
+                self.n1ql_helper._verify_results_rqg(subquery, aggregate, sql_result=sql_result, n1ql_result=n1ql_result, hints=hints, aggregate_pushdown=self.aggregate_pushdown)
             except Exception, ex:
                 self.log.info(ex)
+                traceback.print_exc()
                 return {"success": False, "result": str(ex)}
             return {"success": True, "result": "Pass"}
         except Exception, ex:
+            self.log.info(ex)
+            traceback.print_exc()
             return {"success": False, "result": str(ex)}
 
     def _run_queries_and_verify_crud(self, n1ql_query=None, sql_query=None, expected_result=None, table_name=None):
         self.log.info(" SQL QUERY :: {0}".format(sql_query))
         self.log.info(" N1QL QUERY :: {0}".format(n1ql_query))
-        n1ql_query = n1ql_query.replace("simple_table",self.database+"_"+"simple_table")
-        if table_name is not None:
-            client = self.client_map[table_name]
-        else:
-            client = self.client
-        # Run n1ql query
+        if n1ql_query.find(self.database) <= 0:
+            n1ql_query = n1ql_query.replace("simple_table", self.database+"_"+"simple_table")
         hints = self.query_helper._find_hints(sql_query)
         for i, item in enumerate(hints):
             if "simple_table" in item:
                 hints[i] = hints[i].replace("simple_table", self.database+"_"+"simple_table")
+
         try:
             actual_result = self.n1ql_helper.run_cbq_query(query=n1ql_query, server=self.n1ql_server, scan_consistency="request_plus")
             n1ql_result = actual_result["results"]
             # Run SQL Query
             sql_result = expected_result
+            client = MySQLClient(database=self.database, host=self.mysql_url, user_id=self.user_id, password=self.password)
             if expected_result is None:
                 columns, rows = client._execute_query(query=sql_query)
                 sql_result = client._gen_json_from_results(columns, rows)
+            client._close_mysql_connection()
             self.log.info(" result from n1ql query returns {0} items".format(len(n1ql_result)))
             self.log.info(" result from sql query returns {0} items".format(len(sql_result)))
 
@@ -988,6 +1098,7 @@ class RQGTests(BaseTestCase):
                 self.log.info("number of results returned from sql and n1ql are different")
                 self.log.info("sql query is {0}".format(sql_query))
                 self.log.info("n1ql query is {0}".format(n1ql_query))
+
                 if (len(sql_result) == 0 and len(n1ql_result) == 1) or (len(n1ql_result) == 0 and len(sql_result) == 1) or (len(sql_result) == 0):
                     return {"success": True, "result": "Pass"}
             try:
@@ -1038,7 +1149,7 @@ class RQGTests(BaseTestCase):
         run_result = {}
         # Run n1ql query
         for index_name in indexes:
-            hint = "USE INDEX({0} USING {1})".format(index_name,indexes[index_name]["type"])
+            hint = "USE INDEX({0} USING {1})".format(index_name, indexes[index_name]["type"])
             n1ql = self.query_helper._add_explain_with_hints(n1ql_query, hint)
             self.log.info(n1ql)
             message = "Pass"
@@ -1053,7 +1164,7 @@ class RQGTests(BaseTestCase):
 
             if "NOT" in n1ql or "not" in n1ql or fieldsnotcovered and self.check_covering_index:
                 key = "Explain for index {0}".format(index_name)
-                run_result[key] = {"success":check, "result":message}
+                run_result[key] = {"success": check, "result": message}
             else:
                 try:
                     actual_result = self.n1ql_helper.run_cbq_query(query=n1ql, server=self.n1ql_server)
@@ -1103,7 +1214,7 @@ class RQGTests(BaseTestCase):
             self._setup_and_load_buckets_from_files()
 
         self._initialize_n1ql_helper()
-        #create copy of simple table if this is a merge operation
+        # create copy of simple table if this is a merge operation
         self.sleep(10)
         if self.gsi_type == "memory_optimized":
             os.system("curl -X POST  http://Administrator:password@{1}:8091/pools/default -d memoryQuota={0} -d indexMemoryQuota={2}".format(self.ram_quota, self.n1ql_server.ip, self.indexer_memQuota))
@@ -1120,7 +1231,7 @@ class RQGTests(BaseTestCase):
                   'int_field1','varchar_field1']
         if self.create_secondary_indexes:
             if self.use_mysql:
-                self.sec_index_map = self.client._gen_index_combinations_for_tables()
+                self.sec_index_map = self.client._gen_index_combinations_for_tables(partitioned_indexes=self.partitioned_indexes)
             else:
                 self.sec_index_map = self._extract_secondary_index_map_from_file(self.secondary_index_info_path)
         if not self.generate_input_only:
@@ -1166,7 +1277,10 @@ class RQGTests(BaseTestCase):
 
     def _build_primary_indexes(self, using_gsi=True):
         if self.create_primary_index:
-            self.n1ql_helper.create_primary_index(using_gsi=using_gsi, server=self.n1ql_server)
+            if not self.partitioned_indexes:
+                self.n1ql_helper.create_primary_index(using_gsi=using_gsi, server=self.n1ql_server)
+            else:
+                self.n1ql_helper.create_partitioned_primary_index(using_gsi=using_gsi, server=self.n1ql_server)
 
     def _load_data_in_buckets_using_mc_bin_client(self, bucket, data_set):
         client = VBucketAwareMemcached(RestConnection(self.master), bucket)
@@ -1220,7 +1334,7 @@ class RQGTests(BaseTestCase):
 
     def _initialize_n1ql_helper(self):
         self.n1ql_helper = N1QLHelper(version="sherlock", shell=None, max_verify=self.max_verify,
-                                      buckets=self.buckets, item_flag=None, n1ql_port=self.n1ql_server.n1ql_port,
+                                      buckets=self.buckets, item_flag=None, n1ql_port=getattr(self.n1ql_server, 'n1ql_port', 8903),
                                       full_docs_list=[], log=self.log, input=self.input, master=self.master,
                                       database=self.database, use_rest=self.use_rest)
 
@@ -1357,10 +1471,13 @@ class RQGTests(BaseTestCase):
             t.start()
             thread_list.append(t)
         for t in thread_list:
-                t.join()
+            t.join()
 
     def _gen_secondary_indexes_per_table(self, table_name="", index_map={}, sleep_time=2):
-        defer_mode = str({"defer_build": "true"})
+        if self.partitioned_indexes:
+            defer_mode = str({"defer_build": "true", "num_partition":2})
+        else:
+            defer_mode = str({"defer_build": "true"})
         build_index_list = []
         batch_index_definitions = index_map
         if self.pushdown:
@@ -1377,7 +1494,13 @@ class RQGTests(BaseTestCase):
                     for i in xrange(1, len(input)):
                         index_name = "ix_" + str(i) + str(x)
                     fields_indexed = fields_indexed+"," + str(x[i])
-                query = "CREATE INDEX {0} ON {1}({2})".format(index_name, table_name, fields_indexed)
+                if self.partitioned_indexes:
+                    query = "CREATE INDEX {0} ON {1}({2}) PARTITION BY HASH(meta().id)".format(
+                        index_name, table_name, fields_indexed)
+                else:
+                    query = "CREATE INDEX {0} ON {1}({2})".format(index_name,
+                                                                  table_name,
+                                                                  fields_indexed)
                 build_index_list.append(index_name)
                 self.log.info(" Running Query {0} ".format(query))
                 try:
@@ -1401,7 +1524,8 @@ class RQGTests(BaseTestCase):
         else:
             for index_name in batch_index_definitions.keys():
                 query = "{0} WITH {1}".format(
-                    batch_index_definitions[index_name]["definition"], defer_mode)
+                        batch_index_definitions[index_name]["definition"],
+                        defer_mode)
                 build_index_list.append(index_name)
                 self.log.info(" Running Query {0} ".format(query))
                 try:
@@ -1409,6 +1533,7 @@ class RQGTests(BaseTestCase):
                     build_index_list.append(index_name)
                 except Exception, ex:
                     self.log.info(ex)
+                    traceback.print_exc()
                     raise
         # Run Build Query
         if build_index_list is not None and len(build_index_list) > 0:
@@ -1430,6 +1555,7 @@ class RQGTests(BaseTestCase):
                     self.sleep(15, "sleep after building index")
                 except Exception, ex:
                     self.log.info(ex)
+                    traceback.print_exc()
                     raise
                 self.sleep(sleep_time)
 
@@ -1447,6 +1573,7 @@ class RQGTests(BaseTestCase):
                     build_index_list.append(index_name)
                 except Exception, ex:
                     self.log.info(ex)
+                    traceback.print_exc()
                     raise
             # Run Build Query
             if build_index_list is not None and len(build_index_list) > 0:
@@ -1456,6 +1583,7 @@ class RQGTests(BaseTestCase):
                     self.log.info(actual_result)
                 except Exception, ex:
                     self.log.info(ex)
+                    traceback.print_exc()
                     raise
                 # Monitor till the index is built
                 tasks = []
@@ -1465,6 +1593,7 @@ class RQGTests(BaseTestCase):
                     for task in tasks:
                         task.result()
                 except Exception, ex:
+                    traceback.print_exc()
                     self.log.info(ex)
 
     def _extract_secondary_index_map_from_file(self, file_path="/tmp/index.txt"):
@@ -1475,6 +1604,8 @@ class RQGTests(BaseTestCase):
         if self.generate_input_only:
             return
         defer_mode = str({"defer_build": "true"})
+        if self.partitioned_indexes:
+            defer_mode = str({"defer_build": "true", "num_partition":2})
         batch_index_definitions = {}
         build_index_list = []
         # add indexes to batch_index_definitions
@@ -1484,6 +1615,8 @@ class RQGTests(BaseTestCase):
         for index_name in batch_index_definitions.keys():
             query = "{0} WITH {1}".format(batch_index_definitions[index_name]["definition"], defer_mode)
             query = query.replace("ON simple_table", "ON "+self.database+"_"+"simple_table")
+            if self.aggregate_pushdown:
+                query = query.replace("limit 10 offset 4", "")
             self.log.info(" Running Query {0} ".format(query))
             try:
                 self.n1ql_helper.run_cbq_query(query=query, server=self.n1ql_server)
@@ -1491,6 +1624,7 @@ class RQGTests(BaseTestCase):
                     build_index_list.append(index_name)
             except Exception, ex:
                 self.log.info(ex)
+                traceback.print_exc()
                 raise
         # Run Build Query
         if build_index_list is not None and len(build_index_list) > 0:
@@ -1500,6 +1634,7 @@ class RQGTests(BaseTestCase):
                 self.log.info(actual_result)
             except Exception, ex:
                 self.log.info(ex)
+                traceback.print_exc()
                 raise
             # Monitor till the index is built
             tasks = []
@@ -1513,6 +1648,7 @@ class RQGTests(BaseTestCase):
                 for task in tasks:
                     task.result()
             except Exception, ex:
+                traceback.print_exc()
                 self.log.info(ex)
 
     def async_monitor_index(self, bucket, index_name=None):
@@ -1580,7 +1716,7 @@ class RQGTests(BaseTestCase):
                 if not result[key]["success"]:
                     failure_types.append(key)
                     message += " Scenario ::  {0} \n".format(key)
-                    message += " Reason :: "+result[key]["result"]+"\n"
+                    message += " Reason :: " + str(result[key]["result"]) + "\n"
         return check, message, failure_types
 
     def _check_and_push_failure_record_queue(self, result, data, failure_record_queue):
@@ -1810,5 +1946,3 @@ class RQGTests(BaseTestCase):
                                       char_value, orderid1, qty1, price1, primary_key_value, orderid2, qty2,
                                       price2, primary_key_value)
             self.n1ql_helper.run_cbq_query(query=n1ql_insert_template, server=self.n1ql_server)
-
-

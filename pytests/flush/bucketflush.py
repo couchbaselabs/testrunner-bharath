@@ -1,10 +1,11 @@
-import json
 import time
+from threading import Thread
+
 from basetestcase import BaseTestCase
 from couchbase_helper.documentgenerator import BlobGenerator
 from mc_bin_client import MemcachedError
-from threading import Thread
 from memcached.helper.data_helper import MemcachedClientHelper
+
 
 class BucketFlushTests(BaseTestCase):
 
@@ -84,7 +85,8 @@ class BucketFlushTests(BaseTestCase):
         else:
             self.fail("All buckets may not have been flushed")
 
-    """Test case to check client behavior with bucket flush while loading/updating/deleting data via Moxi client(ascii,non-ascii)"""
+    """Test case to check client behavior with bucket flush while loading/updating/
+       deleting data via Moxi client(ascii,non-ascii)"""
     def bucketflush_with_data_ops_moxi(self):
 
         version = self._get_version()
@@ -93,7 +95,8 @@ class BucketFlushTests(BaseTestCase):
             return
         self.err = None
 
-        thread = Thread(target=self.data_ops_with_moxi, args=(self.master, self.data_op, self.buckets, self.num_items, self.use_ascii))
+        thread = Thread(target=self.data_ops_with_moxi, args=(self.master, self.data_op,\
+                                           self.buckets, self.num_items, self.use_ascii))
         thread.start()
 
         for bucket in self.buckets:

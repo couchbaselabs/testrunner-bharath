@@ -1,12 +1,19 @@
+import paramiko
+import logger
 import json
+import uuid
+import math
+import re
 import time
-
 import testconstants
+import datetime
+import time
+from datetime import date
 from couchbase_helper.tuq_generators import TuqGenerators
-from membase.api.exception import CBQError
-from membase.api.rest_client import RestConnection
 from remote.remote_util import RemoteMachineShellConnection
-
+from membase.api.exception import CBQError, ReadDocumentException
+from membase.api.rest_client import RestConnection
+import copy
 
 class N1QLHelper():
     def __init__(self, version=None, master=None, shell=None,  max_verify=0, buckets=[], item_flag=0,
@@ -105,9 +112,8 @@ class N1QLHelper():
         if actual_result != expected_result:
             raise Exception(msg)
 
-    def _verify_results_rqg(self, subquery, aggregate=False, n1ql_result=[], sql_result=[], hints=["a1"]):
+    def _verify_results_rqg(self, subquery, aggregate=False, n1ql_result=[], sql_result=[], hints=["a1"], aggregate_pushdown=False):
         new_n1ql_result = []
-
         for result in n1ql_result:
             if result != {}:
                 new_n1ql_result.append(result)
@@ -115,7 +121,7 @@ class N1QLHelper():
         n1ql_result = new_n1ql_result
 
         if self._is_function_in_result(hints):
-            return self._verify_results_rqg_for_function(n1ql_result, sql_result)
+            return self._verify_results_rqg_for_function(n1ql_result, sql_result, aggregate_pushdown=aggregate_pushdown)
 
         check = self._check_sample(n1ql_result, hints)
         actual_result = n1ql_result
@@ -130,7 +136,7 @@ class N1QLHelper():
 
         if len(actual_result) != len(expected_result):
             extra_msg = self._get_failure_message(expected_result, actual_result)
-            raise Exception("Results are incorrect.Actual num %s. Expected num: %s.:: %s \n" % (len(actual_result), len(expected_result), extra_msg))
+            raise Exception("Results are incorrect. Actual num %s. Expected num: %s. :: %s \n" % (len(actual_result), len(expected_result), extra_msg))
 
         msg = "The number of rows match but the results mismatch, please check"
         if subquery:
@@ -178,9 +184,10 @@ class N1QLHelper():
             actual_result = self._gen_dict(n1ql_result)
         actual_result = sorted(actual_result)
         expected_result = sorted(sql_result)
+
         if len(actual_result) != len(expected_result):
             extra_msg = self._get_failure_message(expected_result, actual_result)
-            raise Exception("Results are incorrect.Actual num %s. Expected num: %s.:: %s \n" % (len(actual_result), len(expected_result), extra_msg))
+            raise Exception("Results are incorrect. Actual num %s. Expected num: %s.:: %s \n" % (len(actual_result), len(expected_result), extra_msg))
         if not self._result_comparison_analysis(actual_result, expected_result):
             msg = "The number of rows match but the results mismatch, please check"
             extra_msg = self._get_failure_message(expected_result, actual_result)
@@ -241,24 +248,28 @@ class N1QLHelper():
             return True
         return False
 
-    def _verify_results_rqg_for_function(self, n1ql_result=[], sql_result=[], hints=["a1"]):
-        actual_result = n1ql_result
-        sql_result, actual_result= self._analyze_for_special_case_using_func(sql_result, actual_result)
-        if len(sql_result) != len(actual_result):
-            msg = "the number of results do not match :: expected = {0}, actual = {1}".format(len(n1ql_result), len(sql_result))
-            extra_msg = self._get_failure_message(sql_result, actual_result)
+    def _verify_results_rqg_for_function(self, n1ql_result=[], sql_result=[], hints=["a1"], aggregate_pushdown=False):
+        if not aggregate_pushdown:
+            sql_result, n1ql_result = self._analyze_for_special_case_using_func(sql_result, n1ql_result)
+        if len(sql_result) != len(n1ql_result):
+            msg = "the number of results do not match :: sql = {0}, n1ql = {1}".format(len(sql_result), len(n1ql_result))
+            extra_msg = self._get_failure_message(sql_result, n1ql_result)
             raise Exception(msg+"\n"+extra_msg)
         n1ql_result = self._gen_dict_n1ql_func_result(n1ql_result)
         n1ql_result = sorted(n1ql_result)
         sql_result = self._gen_dict_n1ql_func_result(sql_result)
         sql_result = sorted(sql_result)
-        if len(sql_result) == 0 and len(actual_result) == 0:
+        if len(sql_result) == 0 and len(n1ql_result) == 0:
             return
         if sql_result != n1ql_result:
-            max = 2
-            if len(sql_result) < 5:
-                max = len(sql_result)
-            msg = "mismatch in results :: expected [0:{0}]:: {1}, actual [0:{0}]:: {2} ".format(max, sql_result[0:max], n1ql_result[0:max])
+            i = 0
+            for sql_value, n1ql_value in zip(sql_result, n1ql_result):
+                if sql_value != n1ql_value:
+                    break
+                i = i + 1
+            num_results = len(sql_result)
+            last_idx = min(i+5, num_results)
+            msg = "mismatch in results :: result length :: {3}, first mismatch position :: {0}, sql value :: {1}, n1ql value :: {2} ".format(i, sql_result[i:last_idx], n1ql_result[i:last_idx], num_results)
             raise Exception(msg)
 
     def _convert_to_number(self, val):
@@ -427,6 +438,36 @@ class N1QLHelper():
                             raise Exception(" Timed-out Exception while building primary index for bucket {0} !!!".format(bucket.name))
                     else:
                         raise Exception(" Primary Index Already present, This looks like a bug !!!")
+                except Exception, ex:
+                    self.log.error('ERROR during index creation %s' % str(ex))
+                    raise ex
+
+    def create_partitioned_primary_index(self, using_gsi=True, server=None):
+        if server is None:
+            server = self.master
+        for bucket in self.buckets:
+            self.query = "CREATE PRIMARY INDEX ON %s " % bucket.name
+            if using_gsi:
+                self.query += " PARTITION BY HASH(meta().id) USING GSI"
+            if not using_gsi:
+                self.query += " USING VIEW "
+            if self.use_rest:
+                try:
+                    check = self._is_index_in_list(bucket.name, "#primary",
+                                                   server=server)
+                    if not check:
+                        self.run_cbq_query(server=server,
+                                           query_params={'timeout': '900s'})
+                        check = self.is_index_online_and_in_list(bucket.name,
+                                                                 "#primary",
+                                                                 server=server)
+                        if not check:
+                            raise Exception(
+                                " Timed-out Exception while building primary index for bucket {0} !!!".format(
+                                    bucket.name))
+                    else:
+                        raise Exception(
+                            " Primary Index Already present, This looks like a bug !!!")
                 except Exception, ex:
                     self.log.error('ERROR during index creation %s' % str(ex))
                     raise ex
@@ -601,6 +642,8 @@ class N1QLHelper():
             for value in result_set:
                 if isinstance(value, float):
                     new_result_set.append(round(value, 0))
+                elif value == 'None':
+                    new_result_set.append(None)
                 else:
                     new_result_set.append(value)
         else:

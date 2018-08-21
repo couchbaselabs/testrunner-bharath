@@ -526,6 +526,7 @@ class FTSIndex:
         self._source_name = source_name
         self._one_time = False
         self.index_type = index_type
+        self.index_storage_type = TestInputSingleton.input.param("index_type", None)
         self.num_pindexes = 0
         self.index_definition = {
             "type": "fulltext-index",
@@ -581,6 +582,16 @@ class FTSIndex:
             "mossStoreOptions": {}
         }
 
+        if self.index_storage_type :
+            self.index_definition['params']['store']['indexType'] =  self.index_storage_type
+
+        if TestInputSingleton.input.param("num_snapshots_to_keep", None):
+            self.index_definition['params']['store']['numSnapshotsToKeep'] = int(
+                    TestInputSingleton.input.param(
+                        "num_snapshots_to_keep",
+                        None)
+                    )
+
         if TestInputSingleton.input.param("level_compaction", None):
             self.index_definition['params']['store']['mossStoreOptions']= {
                 "CompactionLevelMaxSegments": 9,
@@ -606,6 +617,27 @@ class FTSIndex:
             if 'store' not in self.index_definition['params'].keys():
                 self.index_definition['params']['store'] = {}
             self.index_definition['params']['store']['kvStoreMossAllow'] = False
+
+    def is_scorch(self):
+        return self.get_index_type() == "scorch"
+
+    def is_upside_down(self):
+        return self.get_index_type() == "upside_down"
+
+    def is_type_unspecified(self):
+        return self.get_index_type() ==  None
+
+    def get_index_type(self):
+        try:
+            _, defn = self.get_index_defn()
+            index_type = defn['indexDef']['params']['store']['indexType']
+            self.__log.info("Index type of {0} is {1}".
+                          format(self.name,
+                                 defn['indexDef']['params']['store']['indexType']))
+            return index_type
+        except Exception:
+            self.__log.error("No 'indexType' present in index definition")
+            return None
 
     def generate_new_custom_map(self, seed):
         from custom_map_generator.map_generator import CustomMapGenerator
@@ -878,6 +910,46 @@ class FTSIndex:
             rest.ip))
         rest.update_fts_index(self.name, self.index_definition)
 
+    def update_index_to_upside_down(self):
+        if self.is_upside_down():
+            self.__log.info("The index {0} is already upside_down index, conversion not needed!")
+        else:
+            self.index_definition['params']['store']['indexType'] = "upside_down"
+            self.index_definition['uuid'] = self.get_uuid()
+            self.update()
+            time.sleep(5)
+            _, defn = self.get_index_defn()
+            if defn['indexDef']['params']['store']['indexType'] == "upside_down":
+                self.__log.info("SUCCESS: The index type is now upside_down!")
+            else:
+                self.__log.error("defn['indexDef']['params']['store']['indexType']")
+                raise Exception("Unable to convert index to upside_down")
+
+    def update_index_to_scorch(self):
+        if self.is_scorch():
+            self.__log.info("The index {0} is already scorch index, conversion not needed!")
+        else:
+            self.index_definition['params']['store']['indexType'] = "scorch"
+            self.index_definition['uuid'] = self.get_uuid()
+            self.update()
+            time.sleep(5)
+            _, defn = self.get_index_defn()
+            if defn['indexDef']['params']['store']['indexType'] == "scorch":
+                self.__log.info("SUCCESS: The index type is now scorch!")
+            else:
+                self.__log.error("defn['indexDef']['params']['store']['indexType']")
+                raise Exception("Unable to convert index to scorch")
+
+    def update_num_pindexes(self, new):
+        self.index_definition['planParams']['maxPartitionsPerPIndex'] = new
+        self.index_definition['uuid'] = self.get_uuid()
+        self.update()
+
+    def update_num_replicas(self, new):
+        self.index_definition['planParams']['numReplicas'] = new
+        self.index_definition['uuid'] = self.get_uuid()
+        self.update()
+
     def delete(self, rest=None):
         if not rest:
             rest = RestConnection(self.__cluster.get_random_fts_node())
@@ -913,6 +985,14 @@ class FTSIndex:
         if not rest:
             rest = RestConnection(self.__cluster.get_random_fts_node())
         return rest.get_fts_index_doc_count(self.name)
+
+    def get_num_mutations_to_index(self, rest=None):
+        if not rest:
+            rest = RestConnection(self.__cluster.get_random_fts_node())
+        status, stat_value = rest.get_fts_stats(index_name=self.name,
+                                                bucket_name=self._source_name,
+                                                stat_name='num_mutations_to_index')
+        return stat_value
 
     def get_src_bucket_doc_count(self):
         return self.__cluster.get_doc_count_in_bucket(self.source_bucket)
@@ -1471,7 +1551,7 @@ class FTSIndex:
 
 
 class CouchbaseCluster:
-    def __init__(self, name, nodes, log, use_hostname=False):
+    def __init__(self, name, nodes, log, use_hostname=False, sdk_compression=True):
         """
         @param name: Couchbase cluster name. e.g C1, C2 to distinguish in logs.
         @param nodes: list of server objects (read from ini file).
@@ -1499,10 +1579,17 @@ class CouchbaseCluster:
         # to avoid querying certain nodes that undergo crash/reboot scenarios
         self.__bypass_fts_nodes = []
         self.__separate_nodes_on_services()
+        self.__set_fts_ram_quota()
+        self.sdk_compression = sdk_compression
 
     def __str__(self):
         return "Couchbase Cluster: %s, Master Ip: %s" % (
             self.__name, self.__master_node.ip)
+
+    def __set_fts_ram_quota(self):
+        fts_quota = TestInputSingleton.input.param("fts_quota", None)
+        if fts_quota:
+            RestConnection(self.__master_node).set_fts_ram_quota(fts_quota)
 
     def get_node(self, ip, port):
         for node in self.__nodes:
@@ -1611,17 +1698,18 @@ class CouchbaseCluster:
             retry = 0
             while count != 0:
                 count, err = shell.execute_command(
-                    "ls {0}/@fts |grep {1}*.pindex | wc -l".
+                    "ls {0}/@fts |grep ^{1} | wc -l".
                         format(data_dir, index_name))
                 if isinstance(count, list):
                     count = int(count[0])
                 else:
                     count = int(count)
                 self.__log.info(count)
+                time.sleep(2)
                 retry += 1
                 if retry > 5:
                     files, err = shell.execute_command(
-                        "ls {0}/@fts |grep {1}*.pindex".
+                        "ls {0}/@fts |grep ^{1}".
                             format(data_dir, index_name))
                     self.__log.info(files)
                     return False
@@ -1741,7 +1829,7 @@ class CouchbaseCluster:
 
     def _create_bucket_params(self, server, replicas=1, size=0, port=11211, password=None,
                              bucket_type='membase', enable_replica_index=1, eviction_policy='valueOnly',
-                             bucket_priority=None, flush_enabled=1, lww=False):
+                             bucket_priority=None, flush_enabled=1, lww=False, maxttl=None):
         """Create a set of bucket_parameters to be sent to all of the bucket_creation methods
         Parameters:
             server - The server to create the bucket on. (TestInputServer)
@@ -1772,13 +1860,14 @@ class CouchbaseCluster:
         bucket_params['bucket_priority'] = bucket_priority
         bucket_params['flush_enabled'] = flush_enabled
         bucket_params['lww'] = lww
+        bucket_params['maxTTL'] = maxttl
         return bucket_params
 
     def create_sasl_buckets(
             self, bucket_size, num_buckets=1, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
             bucket_priority=BUCKET_PRIORITY.HIGH,
-            bucket_type=None):
+            bucket_type=None, maxttl=None):
         """Create sasl buckets.
         @param bucket_size: size of the bucket.
         @param num_buckets: number of buckets to create.
@@ -1796,7 +1885,8 @@ class CouchbaseCluster:
                 replicas=num_replicas,
                 eviction_policy=eviction_policy,
                 bucket_priority=bucket_priority,
-                bucket_type=bucket_type)
+                bucket_type=bucket_type,
+                maxttl=maxttl)
 
             bucket_tasks.append(self.__clusterop.async_create_sasl_bucket(name=name,password='password',
                                                                           bucket_params=sasl_params))
@@ -1805,7 +1895,8 @@ class CouchbaseCluster:
                     name=name, authType="sasl", saslPassword="password",
                     num_replicas=num_replicas, bucket_size=bucket_size,
                     eviction_policy=eviction_policy,
-                    bucket_priority=bucket_priority
+                    bucket_priority=bucket_priority,
+                    maxttl=maxttl
                 ))
 
         for task in bucket_tasks:
@@ -1816,7 +1907,7 @@ class CouchbaseCluster:
             port=None, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
             bucket_priority=BUCKET_PRIORITY.HIGH,
-            bucket_type=None):
+            bucket_type=None, maxttl=None):
         """Create standard buckets.
         @param bucket_size: size of the bucket.
         @param num_buckets: number of buckets to create.
@@ -1841,7 +1932,8 @@ class CouchbaseCluster:
                 replicas=num_replicas,
                 eviction_policy=eviction_policy,
                 bucket_priority=bucket_priority,
-                bucket_type=bucket_type)
+                bucket_type=bucket_type,
+                maxttl=maxttl)
 
             bucket_tasks.append(
                 self.__clusterop.async_create_standard_bucket(
@@ -1858,7 +1950,7 @@ class CouchbaseCluster:
                     port=start_port + i,
                     eviction_policy=eviction_policy,
                     bucket_priority=bucket_priority,
-
+                    maxttl=maxttl
                 ))
 
         for task in bucket_tasks:
@@ -1868,7 +1960,7 @@ class CouchbaseCluster:
             self, bucket_size, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
             bucket_priority=BUCKET_PRIORITY.HIGH,
-            bucket_type=None):
+            bucket_type=None, maxttl=None):
         """Create default bucket.
         @param bucket_size: size of the bucket.
         @param num_replicas: number of replicas (1-3).
@@ -1881,7 +1973,8 @@ class CouchbaseCluster:
             replicas=num_replicas,
             eviction_policy=eviction_policy,
             bucket_priority=bucket_priority,
-            bucket_type=bucket_type
+            bucket_type=bucket_type,
+            maxttl=maxttl
         )
         self.__clusterop.create_default_bucket(bucket_params)
         self.__buckets.append(
@@ -1892,7 +1985,8 @@ class CouchbaseCluster:
                 num_replicas=num_replicas,
                 bucket_size=bucket_size,
                 eviction_policy=eviction_policy,
-                bucket_priority=bucket_priority
+                bucket_priority=bucket_priority,
+                maxttl=maxttl
             ))
 
     def create_fts_index(self, name, source_type='couchbase',
@@ -1983,6 +2077,8 @@ class CouchbaseCluster:
         return total_hits, hit_list, time_taken, status, facets
 
     def get_buckets(self):
+        if not self.__buckets:
+            self.__buckets = RestConnection(self.__master_node).get_buckets()
         return self.__buckets
 
     def get_bucket_by_name(self, bucket_name):
@@ -2029,6 +2125,36 @@ class CouchbaseCluster:
                 bucket))
         [task.result() for task in tasks]
 
+    def load_from_high_ops_loader(self, bucket):
+        input = TestInputSingleton.input
+        batch_size = input.param("batch_size", 1000)
+        instances = input.param("instances", 8)
+        threads = input.param("threads", 8)
+        items = input.param("items", 6000000)
+        self.__clusterop.load_buckets_with_high_ops(
+            server=self.__master_node,
+            bucket=bucket,
+            items=items,
+            batch=batch_size,
+            threads=threads,
+            start_document=0,
+            instances=instances,
+            ttl=0)
+
+    def check_dataloss_with_high_ops_loader(self, bucket):
+        self.__clusterop.check_dataloss_for_high_ops_loader(
+            self.__master_node,
+            bucket,
+            TestInputSingleton.input.param("items", 6000000),
+            batch=20000,
+            threads=5,
+            start_document=0,
+            updated=False,
+            ops=0,
+            ttl=0,
+            deleted=False,
+            deleted_items=0)
+
     def async_load_bucket(self, bucket, num_items, exp=0,
                           kv_store=1, flag=0, only_store_hash=True,
                           batch_size=1000, pause_secs=1, timeout_secs=30):
@@ -2056,7 +2182,7 @@ class CouchbaseCluster:
         task = self.__clusterop.async_load_gen_docs(
             self.__master_node, bucket.name, gen, bucket.kvs[kv_store],
             OPS.CREATE, exp, flag, only_store_hash, batch_size, pause_secs,
-            timeout_secs)
+            timeout_secs, compression=self.sdk_compression)
         return task
 
     def load_bucket(self, bucket, num_items, value_size=512, exp=0,
@@ -2108,7 +2234,7 @@ class CouchbaseCluster:
                 self.__clusterop.async_load_gen_docs(
                     self.__master_node, bucket.name, gen, bucket.kvs[kv_store],
                     OPS.CREATE, exp, flag, only_store_hash, batch_size,
-                    pause_secs, timeout_secs)
+                    pause_secs, timeout_secs, compression=self.sdk_compression)
             )
         return tasks
 
@@ -2171,13 +2297,15 @@ class CouchbaseCluster:
             self._kv_gen[ops] = kv_gen
 
         tasks = []
+        if not self.__buckets:
+            self.__buckets = RestConnection(self.__master_node).get_buckets()
         for bucket in self.__buckets:
             kv_gen = copy.deepcopy(self._kv_gen[ops])
             tasks.append(
                 self.__clusterop.async_load_gen_docs(
                     self.__master_node, bucket.name, kv_gen,
                     bucket.kvs[kv_store], ops, exp, flag,
-                    only_store_hash, batch_size, pause_secs, timeout_secs)
+                    only_store_hash, batch_size, pause_secs, timeout_secs, compression=self.sdk_compression)
             )
         return tasks
 
@@ -2203,7 +2331,7 @@ class CouchbaseCluster:
             self.__clusterop.async_load_gen_docs(
                 self.__master_node, bucket.name, kv_gen,
                 bucket.kvs[kv_store], ops, exp, flag,
-                only_store_hash, batch_size, pause_secs, timeout_secs)
+                only_store_hash, batch_size, pause_secs, timeout_secs, compression=self.sdk_compression)
         )
         return task
 
@@ -2231,52 +2359,58 @@ class CouchbaseCluster:
         self.__log.info("Now loading extra keys to reach dgm limit")
         seed = "%s-" % self.__name
         end = 0
-        for bucket in self.__buckets:
+        current_active_resident = StatsCommon.get_stats(
+            [self.__master_node],
+            self.__buckets[0],
+            '',
+            'vb_active_perc_mem_resident')[self.__master_node]
+        start = items
+        while int(current_active_resident) > active_resident_ratio:
+            batch_size = 1000
+            if int(current_active_resident) - active_resident_ratio > 5:
+                end = start + batch_size * 100
+                batch_size = batch_size * 100
+            else:
+                end = start + batch_size * 10
+                batch_size = batch_size * 10
+
+            self.__log.info("Generating %s keys ..." % (end - start))
+            kv_gen = JsonDocGenerator(seed,
+                                      encoding="utf-8",
+                                      start=start,
+                                      end=end)
+            self.__log.info("Loading %s keys ..." % (end - start))
+            tasks = []
+            for bucket in self.__buckets:
+                tasks.append(self.__clusterop.async_load_gen_docs(
+                    self.__master_node, bucket.name, copy.deepcopy(kv_gen), bucket.kvs[kv_store],
+                    OPS.CREATE, exp, flag, only_store_hash, batch_size,
+                    pause_secs, timeout_secs, compression=self.sdk_compression))
+
+            if es:
+                tasks.append(es.async_bulk_load_ES(index_name='default_es_index',
+                                                       gen=kv_gen,
+                                                       op_type='create'))
+
+            for task in tasks:
+                task.result(timeout=2000)
+
+            start = end
             current_active_resident = StatsCommon.get_stats(
                 [self.__master_node],
                 bucket,
                 '',
                 'vb_active_perc_mem_resident')[self.__master_node]
-            start = items
-            while int(current_active_resident) > active_resident_ratio:
-                end = start + batch_size * 10
-                self.__log.info("loading %s keys ..." % (end - start))
+            self.__log.info(
+                "Current resident ratio: %s, desired: %s bucket %s" % (
+                    current_active_resident,
+                    active_resident_ratio,
+                    bucket.name))
+            self._kv_gen[OPS.CREATE].gen_docs.update(kv_gen.gen_docs)
+            self._kv_gen[OPS.CREATE].end = kv_gen.end
+        self.__log.info("Loaded a total of %s keys into bucket %s"
+                        % (end, bucket.name))
 
-                kv_gen = JsonDocGenerator(seed,
-                                          encoding="utf-8",
-                                          start=start,
-                                          end=end)
-
-                tasks = []
-                tasks.append(self.__clusterop.async_load_gen_docs(
-                    self.__master_node, bucket.name, kv_gen, bucket.kvs[kv_store],
-                    OPS.CREATE, exp, flag, only_store_hash, batch_size,
-                    pause_secs, timeout_secs))
-
-                if es:
-                    tasks.append(es.async_bulk_load_ES(index_name='default_es_index',
-                                                       gen=kv_gen,
-                                                       op_type='create'))
-
-                for task in tasks:
-                    task.result()
-                start = end
-                current_active_resident = StatsCommon.get_stats(
-                    [self.__master_node],
-                    bucket,
-                    '',
-                    'vb_active_perc_mem_resident')[self.__master_node]
-                self.__log.info(
-                    "Current resident ratio: %s, desired: %s bucket %s" % (
-                        current_active_resident,
-                        active_resident_ratio,
-                        bucket.name))
-            self.__log.info("Loaded a total of %s keys into bucket %s"
-                            % (end, bucket.name))
-        self._kv_gen[OPS.CREATE] = JsonDocGenerator(seed,
-                                                    encoding="utf-8",
-                                                    start=0,
-                                                    end=end)
         return self._kv_gen[OPS.CREATE]
 
     def update_bucket(self, bucket, fields_to_update=None, exp=0,
@@ -2332,7 +2466,7 @@ class CouchbaseCluster:
         task = self.__clusterop.async_load_gen_docs(
             self.__master_node, bucket.name, self._kv_gen[OPS.UPDATE],
             bucket.kvs[kv_store], OPS.UPDATE, exp, flag, only_store_hash,
-            batch_size, pause_secs, timeout_secs)
+            batch_size, pause_secs, timeout_secs, compression=self.sdk_compression)
         return task
 
     def update_delete_data(
@@ -2402,7 +2536,8 @@ class CouchbaseCluster:
                     bucket.kvs[kv_store],
                     op_type,
                     expiration,
-                    batch_size=1000)
+                    batch_size=1000,
+                    compression=self.sdk_compression)
             )
         return tasks
 
@@ -2910,12 +3045,14 @@ class FTSBaseTest(unittest.TestCase):
     def __setup_for_test(self):
         use_hostanames = self._input.param("use_hostnames", False)
         no_buckets = self._input.param("no_buckets", False)
+        sdk_compression = self._input.param("sdk_compression", True)
         master = self._input.servers[0]
         first_node = copy.deepcopy(master)
         self._cb_cluster = CouchbaseCluster("C1",
                                             [first_node],
                                             self.log,
-                                            use_hostanames)
+                                            use_hostanames,
+                                            sdk_compression=sdk_compression)
         self.__cleanup_previous()
         if self.compare_es:
             self.setup_es()
@@ -3062,7 +3199,8 @@ class FTSBaseTest(unittest.TestCase):
         if self.consistency_vectors != {}:
             self.consistency_vectors = eval(self.consistency_vectors)
             if self.consistency_vectors is not None and self.consistency_vectors != '':
-                self.consistency_vectors = json.loads(self.consistency_vectors)
+                if type(self.consistency_vectors) != dict:
+                    self.consistency_vectors = json.loads(self.consistency_vectors)
 
     def __initialize_error_count_dict(self):
         """
@@ -3123,6 +3261,7 @@ class FTSBaseTest(unittest.TestCase):
             num_buckets)
 
         bucket_type = TestInputSingleton.input.param("bucket_type", "membase")
+        maxttl = TestInputSingleton.input.param("maxttl", None)
 
         if self._create_default_bucket:
             self._cb_cluster.create_default_bucket(
@@ -3130,21 +3269,24 @@ class FTSBaseTest(unittest.TestCase):
                 self._num_replicas,
                 eviction_policy=self.__eviction_policy,
                 bucket_priority=bucket_priority,
-                bucket_type=bucket_type)
+                bucket_type=bucket_type,
+                maxttl=maxttl)
 
         self._cb_cluster.create_sasl_buckets(
             bucket_size, num_buckets=self.__num_sasl_buckets,
             num_replicas=self._num_replicas,
             eviction_policy=self.__eviction_policy,
             bucket_priority=bucket_priority,
-            bucket_type=bucket_type)
+            bucket_type=bucket_type,
+            maxttl=maxttl)
 
         self._cb_cluster.create_standard_buckets(
             bucket_size, num_buckets=self.__num_stand_buckets,
             num_replicas=self._num_replicas,
             eviction_policy=self.__eviction_policy,
             bucket_priority=bucket_priority,
-            bucket_type=bucket_type)
+            bucket_type=bucket_type,
+            maxttl=maxttl)
 
     def create_buckets_on_cluster(self):
         # if mixed priority is set by user, set high priority for sasl and
@@ -3376,7 +3518,7 @@ class FTSBaseTest(unittest.TestCase):
         """
         retry = self._input.param("index_retry", 20)
         for index in self._cb_cluster.get_indexes():
-            if index.index_type == "alias":
+            if index.index_type == "fulltext-alias":
                 continue
             retry_count = retry
             prev_count = 0
@@ -3400,10 +3542,11 @@ class FTSBaseTest(unittest.TestCase):
                                          index_doc_count,
                                          es_index_count))
                     if bucket_doc_count == 0:
-                        self.sleep(5,
-                            "looks like docs haven't been loaded yet...")
-                        retry_count -= 1
-                        continue
+                        if item_count and item_count != 0:
+                            self.sleep(5,
+                                "looks like docs haven't been loaded yet...")
+                            retry_count -= 1
+                            continue
 
                     if item_count and index_doc_count > item_count:
                         break
@@ -3424,6 +3567,17 @@ class FTSBaseTest(unittest.TestCase):
                     self.log.info(e)
                     retry_count -= 1
                 time.sleep(6)
+            # now wait for num_mutations_to_index to become zero to handle the pure
+            # updates scenario - where doc count remains unchanged
+            retry_mut_count = 20
+            if item_count == None:
+                while True and retry_count:
+                    num_mutations_to_index = index.get_num_mutations_to_index()
+                    if num_mutations_to_index > 0:
+                        self.sleep(5, "num_mutations_to_index: {0} > 0".format(num_mutations_to_index))
+                        retry_mut_count -= 1
+                    else:
+                        break
 
     def construct_plan_params(self):
         plan_params = {}
@@ -3516,6 +3670,7 @@ class FTSBaseTest(unittest.TestCase):
                 self.sleep(10, "pIndexes not distributed across %s nodes yet"
                            % num_fts_nodes)
                 nodes_partitions = self.populate_node_partition_map(index)
+                nodes_with_pindexes = len(nodes_partitions.keys())
             else:
                 self.log.info("Validated: pIndexes are distributed across %s "
                               % nodes_partitions.keys())
@@ -3764,7 +3919,7 @@ class FTSBaseTest(unittest.TestCase):
         self.dataset = "earthquakes"
         self.log.info("Loading earthquakes.json ...")
         self.async_load_data()
-
+        self.sleep(10, "Waiting to load earthquakes.json ...")
         self.wait_for_indexing_complete()
         return geo_index
 

@@ -8,6 +8,7 @@ from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection, RestHelper
 from remote.remote_util import RemoteMachineHelper, \
     RemoteMachineShellConnection
+from testconstants import LOG_FILE_NAMES
 
 LOG_FILE_NAME_LIST = ["couchbase.log", "diag.log", "ddocs.log", "ini.log", "syslog.tar.gz",
                       "ns_server.couchdb.log", "ns_server.debug.log", "ns_server.babysitter.log",
@@ -70,7 +71,11 @@ class CollectinfoTests(CliBaseTest):
         """ This is the folder generated after unzip the log package """
         self.shell.delete_files("cbcollect_info*")
 
+        cb_server_started = False
         if self.node_down:
+            """ set autofailover to off """
+            rest = RestConnection(self.master)
+            rest.update_autofailover_settings(False, 60)
             if self.os == 'linux':
                 output, error = self.shell.execute_command(
                                     "killall -9 memcached & killall -9 beam.smp")
@@ -80,26 +85,30 @@ class CollectinfoTests(CliBaseTest):
 
         if self.os != "windows":
             if len(error) > 0:
-                """ Restart cb server if test node down """
-                if self.node_down:
-                    self.shell.start_server()
                 raise Exception("Command throw out error: %s " % error)
 
             for output_line in output:
                 if output_line.find("ERROR") >= 0 or output_line.find("Error") >= 0:
                     if "from http endpoint" in output_line.lower():
                         continue
-                    if self.node_down:
-                        self.shell.start_server()
                     raise Exception("Command throw out error: %s " % output_line)
         try:
-            self.verify_results(self, self.log_filename)
-        finally:
             if self.node_down:
                 if self.os == 'linux':
                     self.shell.start_server()
                     rest = RestConnection(self.master)
-                    RestHelper(rest).is_ns_server_running(timeout_in_seconds=60)
+                    if RestHelper(rest).is_ns_server_running(timeout_in_seconds=60):
+                        cb_server_started = True
+                    else:
+                        self.fail("CB server failed to start")
+            self.verify_results(self, self.log_filename)
+        finally:
+            if self.node_down and not cb_server_started:
+                if self.os == 'linux':
+                    self.shell.start_server()
+                    rest = RestConnection(self.master)
+                    if not RestHelper(rest).is_ns_server_running(timeout_in_seconds=60):
+                        self.fail("CB server failed to start")
 
     def test_cbcollectinfo_detect_container(self):
         """ this test only runs inside docker host and
@@ -121,6 +130,29 @@ class CollectinfoTests(CliBaseTest):
                 self.fail("cbcollect info could not detect docker container")
         os.system("docker exec %s rm testlog.zip" % (docker_id))
 
+    def test_not_collect_stats_hash_in_cbcollectinfo(self):
+        """ this test verifies we don't collect stats hash
+            in when run cbcollectinfo
+            params: nodes_init=2
+        """
+        check_version = ["5.1.2", "5.5.1"]
+        mesg = "memcached stats ['hash', 'detail']"
+        if self.cb_version[:5] not in check_version \
+                                   or float(self.cb_version[:3]) < 6.0:
+            self.log.info("\nThis version {0} does not need to test {1}"\
+                                          .format(self.cb_version, mesg))
+            return
+        self.shell.delete_files("{0}.zip".format(self.log_filename))
+        """ This is the folder generated after unzip the log package """
+        self.shell.delete_files("cbcollect_info*")
+        output, error = self.shell.execute_cbcollect_info("%s.zip"
+                                                           % (self.log_filename))
+        if output:
+            for x in output:
+                if x.startswith(mesg):
+                    self.fail("cbcollectinfo should not collect {0}".format(mesg))
+        self.log.info("cbcollectinfo does not collect {0}".format(mesg))
+
     @staticmethod
     def verify_results(self, output_file_name):
         try:
@@ -134,6 +166,7 @@ class CollectinfoTests(CliBaseTest):
             if os == "linux":
                 command = "unzip %s" % (zip_file)
                 output, error = self.shell.execute_command(command)
+                self.sleep(2)
                 if self.debug_logs:
                     self.shell.log_command_output(output, error)
                 if len(error) > 0:
@@ -146,7 +179,24 @@ class CollectinfoTests(CliBaseTest):
                 if len(error) > 0:
                     raise Exception("unable to list the files. Check ls command output for help")
                 missing_logs = False
-                for x in LOG_FILE_NAME_LIST:
+                nodes_services = RestConnection(self.master).get_nodes_services()
+                for node, services in nodes_services.iteritems():
+                    for service in services:
+                        if service.encode("ascii") == "fts" and \
+                                     self.master.ip in node and \
+                                    "fts_diag.json" not in LOG_FILE_NAMES:
+                            LOG_FILE_NAMES.append("fts_diag.json")
+                        if service.encode("ascii") == "index" and \
+                                            self.master.ip in node:
+                            if "indexer_mprof.log" not in LOG_FILE_NAMES:
+                                LOG_FILE_NAMES.append("indexer_mprof.log")
+                            if "indexer_pprof.log" not in LOG_FILE_NAMES:
+                                LOG_FILE_NAMES.append("indexer_pprof.log")
+                if self.debug_logs:
+                    self.log.info('\nlog files sample: {0}'.format(LOG_FILE_NAMES))
+                    self.log.info('\nlog files in zip: {0}'.format(output))
+
+                for x in LOG_FILE_NAMES:
                     find_log = False
                     for output_line in output:
                         if output_line.find(x) >= 0:

@@ -53,11 +53,18 @@ class auditTest(BaseTestCase):
         content =  rest.set_user_roles(user_id=username,payload=payload)
 
     #Wrapper around auditmain
-    def checkConfig(self, eventID, host, expectedResults):
+    def checkConfig(self, eventID, host, expectedResults, n1ql_audit=False):
         Audit = audit(eventID=self.eventID, host=host)
-        fieldVerification, valueVerification = Audit.validateEvents(expectedResults)
+        fieldVerification, valueVerification = Audit.validateEvents(expectedResults, n1ql_audit)
         self.assertTrue(fieldVerification, "One of the fields is not matching")
         self.assertTrue(valueVerification, "Values for one of the fields is not matching")
+
+    #Check to make sure the audit code DOES NOT appear in the logs (for audit n1ql filtering)
+    def checkFilter(self, eventID, host):
+        Audit = audit(eventID=eventID, host=host)
+        exists, entry = Audit.validateEmpty()
+        self.assertTrue(exists, "There was an audit entry found. Audits for the code %s should not be logged. Here is the entry: %s" % (eventID, entry))
+
 
     #Tests to check for bucket events
     def test_bucketEvents(self):
@@ -72,21 +79,21 @@ class auditTest(BaseTestCase):
                                'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", \
                                 "flush_enabled":False, "num_threads":3, "source":source, \
                                "user":user, "ip":self.ipAddress, "port":57457, 'sessionid':'', 'conflict_resolution_type':'seqno', \
-                               'storage_mode':'couchstore'}
+                               'storage_mode':'couchstore','max_ttl':400,'compression_mode':'passive'}
             rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                               '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly')
+                               '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly', maxTTL=expectedResults['max_ttl'])
 
         elif (ops in ['update']):
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':209715200, 'num_replicas':1, 'replica_index':False, 'eviction_policy':'value_only', 'type':'membase', \
                                'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", "flush_enabled":'true', "num_threads":3, "source":source, \
-                               "user":user, "ip":self.ipAddress, "port":57457 , 'sessionid':'','storage_mode':'couchstore'}
+                               "user":user, "ip":self.ipAddress, "port":57457 , 'sessionid':'','storage_mode':'couchstore', 'max_ttl':400}
             rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], '11211', 'membase', \
-                               0, expectedResults['num_threads'], 0 , 'valueOnly')
+                               0, expectedResults['num_threads'], 0 , 'valueOnly', maxTTL=expectedResults['max_ttl'])
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':104857600, 'num_replicas':1, 'replica_index':True, 'eviction_policy':'value_only', 'type':'membase', \
                                'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", "flush_enabled":True, "num_threads":3, "source":source, \
-                               "user":user, "ip":self.ipAddress, "port":57457,'storage_mode':'couchstore'}
+                               "user":user, "ip":self.ipAddress, "port":57457,'storage_mode':'couchstore', 'max_ttl':200}
             rest.change_bucket_props(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                                     '11211', 1, 1)
+                                     '11211', 1, 1, maxTTL=expectedResults['max_ttl'])
 
         elif (ops in ['delete']):
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':104857600, 'num_replicas':1, 'replica_index':True, 'eviction_policy':'value_only', 'type':'membase', \
@@ -177,7 +184,7 @@ class auditTest(BaseTestCase):
             type = self.input.param('type', None)
             self.cluster.failover(self.servers, servs_inout)
             self.cluster.rebalance(self.servers, [], [])
-            expectedResults = {'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457, 'type':type, 'node':'ns_1@' + servs_inout[0].ip}
+            expectedResults = {'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457, 'type':type, 'nodes':'ns_1@' + servs_inout[0].ip}
 
         if (ops == 'nodeRecovery'):
             expectedResults = {'node':'ns_1@' + servs_inout[0].ip, 'type':'delta', 'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457}
@@ -365,7 +372,8 @@ class auditTest(BaseTestCase):
             try:
                 expectedResults = {'node': 'ns_1@' + self.master.ip, 'source':source,
                                 'user':user, 'ip':self.ipAddress, 'port':1234,
-                                'index_path':newPath, 'db_path':currentPath}
+                                'index_path':newPath, 'db_path':currentPath,
+                                'cbas_dirs':currentPath}
 
                 rest.set_data_path(index_path=newPath)
                 self.checkConfig(self.eventID, self.master, expectedResults)

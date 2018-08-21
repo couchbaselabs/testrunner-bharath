@@ -12,6 +12,7 @@ class EnterpriseBackupMergeTest(EnterpriseBackupMergeBase):
             conn = RemoteMachineShellConnection(server)
             conn.extract_remote_info()
             conn.terminate_processes(conn.info, ["cbbackupmgr"])
+            conn.disconnect()
 
     def tearDown(self):
         super(EnterpriseBackupMergeTest, self).tearDown()
@@ -19,6 +20,9 @@ class EnterpriseBackupMergeTest(EnterpriseBackupMergeBase):
     def test_multiple_backups_merges(self):
         self.log.info("*** start to load items to all buckets")
         self.expected_error = self.input.param("expected_error", None)
+        if int(self.active_resident_threshold) > 0:
+            self.log.info("Disable compaction to speed up dgm")
+            RestConnection(self.master).disable_auto_compaction()
         if self.expires:
             for bucket in self.buckets:
                 cb = self._get_python_sdk_client(self.master.ip, bucket, self.backupset.cluster_host)
@@ -64,6 +68,9 @@ class EnterpriseBackupMergeTest(EnterpriseBackupMergeBase):
     def test_multiple_backups_merge_with_tombstoning(self):
         self.log.info("*** start to load items to all buckets")
         self.expected_error = self.input.param("expected_error", None)
+        if int(self.active_resident_threshold) > 0:
+            self.log.info("Disable compaction to speed up dgm")
+            RestConnection(self.master).disable_auto_compaction()
         if self.expires:
             for bucket in self.buckets:
                 cb = self._get_python_sdk_client(self.master.ip, bucket)

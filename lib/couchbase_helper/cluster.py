@@ -133,34 +133,38 @@ class Cluster(object):
         return _task
 
     def async_load_gen_docs(self, server, bucket, generator, kv_store, op_type, exp=0, flag=0, only_store_hash=True,
-                            batch_size=1, pause_secs=1, timeout_secs=5, proxy_client=None):
+                            batch_size=1, pause_secs=1, timeout_secs=5, proxy_client=None, compression=True):
 
         if isinstance(generator, list):
-                _task = LoadDocumentsGeneratorsTask(server, bucket, generator, kv_store, op_type, exp, flag, only_store_hash, batch_size)
+                _task = LoadDocumentsGeneratorsTask(server, bucket, generator, kv_store, op_type, exp, flag,
+                                                    only_store_hash, batch_size, compression=compression)
         else:
-                _task = LoadDocumentsGeneratorsTask(server, bucket, [generator], kv_store, op_type, exp, flag, only_store_hash, batch_size)
+                _task = LoadDocumentsGeneratorsTask(server, bucket, [generator], kv_store, op_type, exp, flag,
+                                                    only_store_hash, batch_size, compression=compression)
 
         self.task_manager.schedule(_task)
         return _task
 
     def async_workload(self, server, bucket, kv_store, num_ops, create, read, update,
-                       delete, exp):
+                       delete, exp, compression=True):
         _task = WorkloadTask(server, bucket, kv_store, num_ops, create, read, update,
-                             delete, exp)
+                             delete, exp, compression=compression)
         self.task_manager.schedule(_task)
         return _task
 
     def async_verify_data(self, server, bucket, kv_store, max_verify=None,
-                          only_store_hash=True, batch_size=1, replica_to_read=None, timeout_sec=5):
+                          only_store_hash=True, batch_size=1, replica_to_read=None, timeout_sec=5, compression=True):
         if batch_size > 1:
-            _task = BatchedValidateDataTask(server, bucket, kv_store, max_verify, only_store_hash, batch_size, timeout_sec)
+            _task = BatchedValidateDataTask(server, bucket, kv_store, max_verify, only_store_hash, batch_size,
+                                            timeout_sec, compression=compression)
         else:
-            _task = ValidateDataTask(server, bucket, kv_store, max_verify, only_store_hash, replica_to_read)
+            _task = ValidateDataTask(server, bucket, kv_store, max_verify, only_store_hash, replica_to_read,
+                                     compression=compression)
         self.task_manager.schedule(_task)
         return _task
 
-    def async_verify_active_replica_data(self, server, bucket, kv_store, max_verify=None):
-        _task = ValidateDataWithActiveAndReplicaTask(server, bucket, kv_store, max_verify)
+    def async_verify_active_replica_data(self, server, bucket, kv_store, max_verify=None, compression=True):
+        _task = ValidateDataWithActiveAndReplicaTask(server, bucket, kv_store, max_verify, compression=compression)
         self.task_manager.schedule(_task)
         return _task
 
@@ -169,13 +173,15 @@ class Cluster(object):
         self.task_manager.schedule(_task)
         return _task
 
-    def async_get_meta_data(self, dest_server, bucket, kv_store):
-        _task = GetMetaDataTask(dest_server, bucket, kv_store)
+    def async_get_meta_data(self, dest_server, bucket, kv_store, compression=True):
+        _task = GetMetaDataTask(dest_server, bucket, kv_store, compression=compression)
         self.task_manager.schedule(_task)
         return _task
 
-    def async_verify_revid(self, src_server, dest_server, bucket, src_kv_store, dest_kv_store, max_verify=None):
-        _task = VerifyRevIdTask(src_server, dest_server, bucket, src_kv_store, dest_kv_store, max_verify=max_verify)
+    def async_verify_revid(self, src_server, dest_server, bucket, src_kv_store, dest_kv_store, max_verify=None,
+                           compression=True):
+        _task = VerifyRevIdTask(src_server, dest_server, bucket, src_kv_store, dest_kv_store, max_verify=max_verify,
+                                compression=compression)
         self.task_manager.schedule(_task)
         return _task
 
@@ -188,7 +194,7 @@ class Cluster(object):
         self.task_manager.schedule(_task)
         return _task
 
-    def async_rebalance(self, servers, to_add, to_remove, use_hostnames=False, services = None):
+    def async_rebalance(self, servers, to_add, to_remove, use_hostnames=False, services=None):
         """Asyncronously rebalances a cluster
 
         Parameters:
@@ -199,7 +205,7 @@ class Cluster(object):
 
         Returns:
             RebalanceTask - A task future that is a handle to the scheduled task"""
-        _task = RebalanceTask(servers, to_add, to_remove, use_hostnames=use_hostnames, services = services)
+        _task = RebalanceTask(servers, to_add, to_remove, use_hostnames=use_hostnames, services=services)
         self.task_manager.schedule(_task)
         return _task
 
@@ -325,26 +331,115 @@ class Cluster(object):
         _task = self.async_rebalance(servers, to_add, to_remove, use_hostnames, services = services)
         return _task.result(timeout)
 
+    def load_buckets_with_high_ops(self, server, bucket, items, batch=20000,
+                                   threads=5, start_document=0, instances=1, ttl=0):
+        import subprocess
+        from lib.membase.api.rest_client import RestConnection
+
+        cmd_format = "python scripts/high_ops_doc_gen.py  --node {0} --bucket {1} --user {2} --password {3} " \
+                     "--count {4} --batch_size {5} --threads {6} --start_document {7} --cb_version {8} --instances {9} --ttl {10}"
+        cb_version = RestConnection(server).get_nodes_version()[:3]
+        cmd = cmd_format.format(server.ip, bucket.name, server.rest_username,
+                                server.rest_password,
+                                items, batch, threads, start_document,
+                                cb_version, instances, ttl)
+        print "Running {}".format(cmd)
+        result = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+        output = result.stdout.read()
+        error = result.stderr.read()
+        if error:
+            print error
+            raise Exception("Failed to run the loadgen.")
+        if output:
+            loaded = output.split('\n')[:-1]
+            total_loaded = 0
+            for load in loaded:
+                total_loaded += int(load.split(':')[1].strip())
+            assert (total_loaded == items),\
+                "Failed to load {} items. Loaded only {} items".format(
+                                 items,
+                                 total_loaded)
+
+    def check_dataloss_for_high_ops_loader(self, server, bucket, items,
+                                           batch=20000, threads=5,
+                                           start_document=0,
+                                           updated=False, ops=0, ttl=0, deleted=False, deleted_items=0):
+        import subprocess
+        from lib.memcached.helper.data_helper import VBucketAwareMemcached
+        from lib.membase.api.rest_client import RestConnection
+
+        cmd_format = "python scripts/high_ops_doc_gen.py  --node {0} --bucket {1} --user {2} --password {3} " \
+                     "--count {4} " \
+                     "--batch_size {5} --threads {6} --start_document {7} --cb_version {8} --validate"
+        cb_version = RestConnection(server).get_nodes_version()[:3]
+        if updated:
+            cmd_format = "{} --updated --ops {}".format(cmd_format, ops)
+        if deleted:
+            cmd_format = "{} --deleted --deleted_items {}".format(cmd_format, deleted_items)
+        if ttl > 0:
+            cmd_format = "{} --ttl {}".format(cmd_format, ttl)
+        cmd = cmd_format.format(server.ip, bucket.name, server.rest_username,
+                                server.rest_password,
+                                int(items), batch, threads, start_document, cb_version)
+        print "Running {}".format(cmd)
+        result = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+        output = result.stdout.read()
+        error = result.stderr.read()
+        errors = []
+        rest = RestConnection(server)
+        VBucketAware = VBucketAwareMemcached(rest, bucket.name)
+        _, _, _ = VBucketAware.request_map(rest, bucket.name)
+        if error:
+            print error
+            raise Exception("Failed to run the loadgen validator.")
+        if output:
+            loaded = output.split('\n')[:-1]
+            for load in loaded:
+                if "Missing keys:" in load:
+                    keys = load.split(":")[1].strip().replace('[', '').replace(']', '')
+                    keys = keys.split(',')
+                    for key in keys:
+                        key = key.strip()
+                        key = key.replace('\'', '').replace('\\', '')
+                        vBucketId = VBucketAware._get_vBucket_id(key)
+                        errors.append(
+                            ("Missing key: {0}, VBucketId: {1}".format(key, vBucketId)))
+                if "Mismatch keys: " in load:
+                    keys = load.split(":")[1].strip().replace('[', '').replace(']', '')
+                    keys = keys.split(',')
+                    for key in keys:
+                        key = key.strip()
+                        key = key.replace('\'', '').replace('\\', '')
+                        vBucketId = VBucketAware._get_vBucket_id(key)
+                        errors.append((
+                            "Wrong value for key: {0}, VBucketId: {1}".format(
+                                key, vBucketId)))
+        return errors
+
     def load_gen_docs(self, server, bucket, generator, kv_store, op_type, exp=0, timeout=None,
-                      flag=0, only_store_hash=True, batch_size=1, proxy_client=None):
+                      flag=0, only_store_hash=True, batch_size=1, proxy_client=None, compression=True):
         _task = self.async_load_gen_docs(server, bucket, generator, kv_store, op_type, exp, flag,
-                                         only_store_hash=only_store_hash, batch_size=batch_size, proxy_client=proxy_client)
+                                         only_store_hash=only_store_hash, batch_size=batch_size,
+                                         proxy_client=proxy_client, compression=compression)
         return _task.result(timeout)
 
-    def workload(self, server, bucket, kv_store, num_ops, create, read, update, delete, exp, timeout=None):
+    def workload(self, server, bucket, kv_store, num_ops, create, read, update, delete, exp, timeout=None,
+                 compression=True):
         _task = self.async_workload(server, bucket, kv_store, num_ops, create, read, update,
-                                    delete, exp)
+                                    delete, exp, compression=compression)
         return _task.result(timeout)
 
-    def verify_data(self, server, bucket, kv_store, timeout=None):
-        _task = self.async_verify_data(server, bucket, kv_store)
+    def verify_data(self, server, bucket, kv_store, timeout=None, compression=True):
+        _task = self.async_verify_data(server, bucket, kv_store, compression=compression)
         return _task.result(timeout)
 
     def wait_for_stats(self, servers, bucket, param, stat, comparison, value, timeout=None):
         """Synchronously wait for stats
 
         Waits for stats to match the criteria passed by the stats variable. See
-        couchbase.stats_tool.StatsCommon.build_stat_check(...) for a description of
+        couchbase.stats_tool.StatsCommon.build_stat_check(...) for a description o
         the stats structure and how it can be built.
 
         Parameters:
@@ -947,7 +1042,10 @@ class Cluster(object):
 
         Returns:
             boolean - Whether or not the bucket was flushed."""
-        _task = self.async_failover(servers, failover_nodes, graceful, use_hostnames)
+        if timeout is None:
+            _task = self.async_failover(servers, failover_nodes, graceful, use_hostnames)
+        else:
+            _task = self.async_failover(servers, failover_nodes, graceful, use_hostnames, timeout)
         return _task.result(timeout)
 
     def async_bucket_flush(self, server, bucket='default'):

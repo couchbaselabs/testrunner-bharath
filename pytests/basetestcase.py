@@ -1,36 +1,45 @@
-import commands
+import logger
+import unittest
 import copy
 import datetime
-import json
-import logging
-import random
-import string
 import time
+import string
+import random
+import logging
+import json
+import commands
+import mc_bin_client
 import traceback
-import unittest
 
-import logger
-import testconstants
-from TestInput import TestInputSingleton
-from couchbase_cli import CouchbaseCLI
-from couchbase_helper.cluster import Cluster
-from couchbase_helper.data_analysis_helper import *
-from couchbase_helper.document import View
+
+from memcached.helper.data_helper import VBucketAwareMemcached
 from couchbase_helper.documentgenerator import BlobGenerator
+from couchbase_helper.cluster import Cluster
+from couchbase_helper.document import View
 from couchbase_helper.documentgenerator import DocumentGenerator
 from couchbase_helper.stats_tools import StatsCommon
 from membase.api.exception import ServerUnavailableException
 from membase.api.rest_client import Bucket, RestHelper
+from TestInput import TestInputSingleton, TestInputServer
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
-from memcached.helper.data_helper import VBucketAwareMemcached
-from remote.remote_util import RemoteUtilHelper
-from scripts.collect_server_info import cbcollectRunner
-from security.rbac_base import RbacBase
-from testconstants import MAX_COMPACTION_THRESHOLD
-from testconstants import MIN_COMPACTION_THRESHOLD
+from memcached.helper.data_helper import MemcachedClientHelper
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+from membase.api.exception import ServerUnavailableException
+from couchbase_helper.data_analysis_helper import *
 from testconstants import STANDARD_BUCKET_PORT
+from testconstants import MIN_COMPACTION_THRESHOLD
+from testconstants import MAX_COMPACTION_THRESHOLD
+from membase.helper.cluster_helper import ClusterOperationHelper
+from security.rbac_base import RbacBase
+
+
+from couchbase_cli import CouchbaseCLI
+import testconstants
+
+from scripts.collect_server_info import cbcollectRunner
 
 
 class BaseTestCase(unittest.TestCase):
@@ -56,6 +65,7 @@ class BaseTestCase(unittest.TestCase):
         self.bucket_base_params = {}
         self.bucket_base_params['membase'] = {}
         self.master = self.servers[0]
+        self.upgrade_test = self.input.param("upgrade_test", False)
         self.indexManager = self.servers[0]
         if not hasattr(self, 'cluster'):
             self.cluster = Cluster()
@@ -168,6 +178,9 @@ class BaseTestCase(unittest.TestCase):
             self.sasl_password=self.input.param("sasl_password", 'password')
             self.lww = self.input.param("lww",
                                         False)  # only applies to LWW but is here because the bucket is created here
+            self.maxttl = self.input.param("maxttl", None)
+            self.compression_mode = self.input.param("compression_mode", 'passive')
+            self.sdk_compression = self.input.param("sdk_compression", True)
             self.sasl_bucket_name = "bucket"
             self.sasl_bucket_priority = self.input.param("sasl_bucket_priority", None)
             self.standard_bucket_priority = self.input.param("standard_bucket_priority", None)
@@ -201,7 +214,8 @@ class BaseTestCase(unittest.TestCase):
                                                        replicas=self.num_replicas,
                                                        enable_replica_index=self.enable_replica_index,
                                                        eviction_policy=self.eviction_policy, bucket_priority=None,
-                                                       lww=self.lww)
+                                                       lww=self.lww, maxttl=self.maxttl,
+                                                       compression_mode=self.compression_mode)
 
             membase_params = copy.deepcopy(shared_params)
             membase_params['bucket_type'] = 'membase'
@@ -254,7 +268,6 @@ class BaseTestCase(unittest.TestCase):
                                                     self.port, \
                                                     self.quota_percent, \
                                                     services=master_services)
-
                 self.change_env_variables()
                 self.change_checkpoint_params()
 
@@ -291,7 +304,8 @@ class BaseTestCase(unittest.TestCase):
                     self.services = self.get_services(self.servers[:self.nodes_init], self.services_init)
                     self.cluster.rebalance(self.servers[:1], \
                                            self.servers[1:self.nodes_init], \
-                                           [], services=self.services)
+                                           [], \
+                                           services=self.services)
                 elif str(self.__class__).find('ViewQueryTests') != -1 and \
                         not self.input.param("skip_rebalance", False):
                     self.services = self.get_services(self.servers, self.services_init)
@@ -301,6 +315,7 @@ class BaseTestCase(unittest.TestCase):
             except BaseException, e:
                 # increase case_number to retry tearDown in setup for the next test
                 self.case_number += 1000
+                traceback.print_exc()
                 self.fail(e)
 
             if self.dgm_run:
@@ -333,7 +348,7 @@ class BaseTestCase(unittest.TestCase):
             self.bucket_base_params['memcached']['size'] = self.bucket_size
 
             if str(self.__class__).find('upgrade_tests') == -1 and \
-                            str(self.__class__).find('newupgradetests') == -1 and not self.skip_bucket_setup:
+                            str(self.__class__).find('newupgradetests') == -1:
                 self._bucket_creation()
             self.log.info("==============  basetestcase setup was finished for test #{0} {1} ==============" \
                           .format(self.case_number, self._testMethodName))
@@ -495,11 +510,27 @@ class BaseTestCase(unittest.TestCase):
                           port=None, quota_percent=None, services=None):
         quota = 0
         init_tasks = []
+        count = 0
         for server in servers:
             init_port = port or server.port or '8091'
-            assigned_services = services
-            if self.master != server:
-                assigned_services = None
+            if not self.upgrade_test:
+                assigned_services = services
+                if self.master != server:
+                    assigned_services = None
+            else:
+                if services is not None:
+                   assigned_services = []
+                   if len(servers) == len(services):
+                       if len(assigned_services) == 1 :
+                           assigned_services[0] = services[count]
+                       else:
+                           assigned_services.append(services[count])
+                       count += 1
+                   elif len(servers) > len(services):
+                       self.log.info("service will set to first element")
+                       assigned_services.append(services[0])
+                else:
+                   assigned_services = None
             init_tasks.append(cluster.async_init_node(server, disabled_consistent_view, rebalanceIndexWaitingDisabled,
                                                       rebalanceIndexPausingDisabled, maxParallelIndexers,
                                                       maxParallelReplicaIndexers, init_port,
@@ -521,7 +552,8 @@ class BaseTestCase(unittest.TestCase):
 
     def _create_bucket_params(self, server, replicas=1, size=0, port=11211, password=None,
                               bucket_type='membase', enable_replica_index=1, eviction_policy='valueOnly',
-                              bucket_priority=None, flush_enabled=1, lww=False):
+                              bucket_priority=None, flush_enabled=1, lww=False, maxttl=None,
+                              compression_mode='passive'):
         """Create a set of bucket_parameters to be sent to all of the bucket_creation methods
         Parameters:
             server - The server to create the bucket on. (TestInputServer)
@@ -554,6 +586,8 @@ class BaseTestCase(unittest.TestCase):
         bucket_params['bucket_priority'] = bucket_priority
         bucket_params['flush_enabled'] = flush_enabled
         bucket_params['lww'] = lww
+        bucket_params['maxTTL'] = maxttl
+        bucket_params['compressionMode'] = compression_mode
         return bucket_params
 
     def _bucket_creation(self):
@@ -562,7 +596,8 @@ class BaseTestCase(unittest.TestCase):
             default_params=self._create_bucket_params(server=self.master, size=self.bucket_size,
                                                              replicas=self.num_replicas, bucket_type=self.bucket_type,
                                                              enable_replica_index=self.enable_replica_index,
-                                                             eviction_policy=self.eviction_policy, lww=self.lww)
+                                                             eviction_policy=self.eviction_policy, lww=self.lww,
+                                                             maxttl=self.maxttl, compression_mode=self.compression_mode)
             self.cluster.create_default_bucket(default_params)
             self.buckets.append(Bucket(name="default", authType="sasl", saslPassword="",
                                        num_replicas=self.num_replicas, bucket_size=self.bucket_size,
@@ -844,7 +879,7 @@ class BaseTestCase(unittest.TestCase):
                                                               bucket.kvs[kv_store],
                                                               op_type, exp, flag, only_store_hash,
                                                               batch_size, pause_secs, timeout_secs,
-                                                              proxy_client))
+                                                              proxy_client, compression=self.sdk_compression))
             else:
                 self._load_memcached_bucket(server, gen, bucket.name)
         return tasks
@@ -920,7 +955,8 @@ class BaseTestCase(unittest.TestCase):
         task = self.cluster.async_load_gen_docs(server, bucket.name, gen,
                                                 bucket.kvs[kv_store], op_type,
                                                 exp, flag, only_store_hash,
-                                                batch_size, pause_secs, timeout_secs)
+                                                batch_size, pause_secs, timeout_secs,
+                                                compression=self.sdk_compression)
         return task
 
     def _load_bucket(self, bucket, server, kv_gen, op_type, exp, kv_store=1, flag=0, only_store_hash=True,
@@ -1048,7 +1084,8 @@ class BaseTestCase(unittest.TestCase):
             if bucket.type == 'memcached':
                 continue
             tasks.append(self.cluster.async_verify_data(server, bucket, bucket.kvs[kv_store], max_verify,
-                                                        only_store_hash, batch_size, replica_to_read))
+                                                        only_store_hash, batch_size, replica_to_read,
+                                                        compression=self.sdk_compression))
         for task in tasks:
             task.result(timeout)
 
@@ -1601,7 +1638,8 @@ class BaseTestCase(unittest.TestCase):
         data_map = {}
         for bucket in self.buckets:
             self.log.info(" Collect data for bucket {0}".format(bucket.name))
-            task = self.cluster.async_get_meta_data(dest_server, bucket, bucket.kvs[kv_store])
+            task = self.cluster.async_get_meta_data(dest_server, bucket, bucket.kvs[kv_store],
+                                                    compression=self.sdk_compression)
             task.result()
             data_map[bucket.name] = task.get_meta_data_store()
         return data_map
@@ -1648,7 +1686,8 @@ class BaseTestCase(unittest.TestCase):
 
     def data_active_and_replica_analysis(self, server, max_verify=None, only_store_hash=True, kv_store=1):
         for bucket in self.buckets:
-            task = self.cluster.async_verify_active_replica_data(server, bucket, bucket.kvs[kv_store], max_verify)
+            task = self.cluster.async_verify_active_replica_data(server, bucket, bucket.kvs[kv_store], max_verify,
+                                                                 self.sdk_compression)
             task.result()
 
     def data_meta_data_analysis(self, dest_server, meta_data_store, kv_store=1):
@@ -2231,14 +2270,40 @@ class BaseTestCase(unittest.TestCase):
                                       .format(server.ip, hostname))
                         server.ip = hostname
                         shell.disconnect()
+                    elif ip.endswith(".svc"):
+                        from kubernetes import client as kubeClient, config as kubeConfig
+                        currNamespace = ip.split('.')[2]
+                        kubeConfig.load_incluster_config()
+                        v1 = kubeClient.CoreV1Api()
+                        nodeList = v1.list_pod_for_all_namespaces(watch=False)
+
+                        for node in nodeList.items:
+                            if node.metadata.namespace == currNamespace and node.status.pod_ip == server.ip:
+                                ip = node.status.pod_ip
+                                break
+                    elif "couchbase.com" in server.ip and "couchbase.com" not in ip:
+                        node = TestInputServer()
+                        node.ip = ip
+                        node.ssh_username = server.ssh_username
+                        node.ssh_password = server.ssh_password
+                        shell = RemoteMachineShellConnection(node)
+                        hostname = shell.get_full_hostname()
+                        self.log.info("convert IP: {0} to hostname: {1}" \
+                                      .format(ip, hostname))
+                        ip = hostname
+                        shell.disconnect()
                     if (port != 8091 and port == int(server.port)) or \
                             (port == 8091 and server.ip.lower() == ip.lower()):
                         list.append(server)
-            self.log.info("list of all nodes in cluster: {0}".format(list))
+            self.log.info("list of {0} nodes in cluster: {1}".format(service_type, list))
             if get_all_nodes:
                 return list
             else:
-                return list[0]
+                try:
+                    return list[0]
+                except IndexError as e:
+                    self.log.info(self.services_map)
+                    raise e
 
     def get_services(self, tgt_nodes, tgt_services, start_node=1):
         services = []
@@ -2266,7 +2331,7 @@ class BaseTestCase(unittest.TestCase):
                 self.nodes_out_list.append(self.servers[1])
             return
         for service_fail_map in self.nodes_out_dist.split("-"):
-            tokens = service_fail_map.split(":")
+            tokens = service_fail_map.rsplit(":", 1)
             count = 0
             service_type = tokens[0]
             service_type_count = int(tokens[1])
@@ -2344,7 +2409,7 @@ class BaseTestCase(unittest.TestCase):
                                                           gens_load[bucket],
                                                           bucket.kvs[kv_store], op_type, exp, flag,
                                                           only_store_hash, batch_size, pause_secs,
-                                                          timeout_secs))
+                                                          timeout_secs, compression=self.sdk_compression))
         for task in tasks:
             task.result()
         self.num_items = items + start_items
@@ -2372,7 +2437,7 @@ class BaseTestCase(unittest.TestCase):
                                                           gens_load[bucket],
                                                           bucket.kvs[kv_store], op_type, exp, flag,
                                                           only_store_hash, batch_size, pause_secs,
-                                                          timeout_secs))
+                                                          timeout_secs, compression=self.sdk_compression))
         self.num_items = items + start_items
         return tasks
 

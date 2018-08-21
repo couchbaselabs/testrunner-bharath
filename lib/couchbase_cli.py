@@ -230,7 +230,7 @@ class CouchbaseCLI:
         if data_path:
             options += " --node-init-data-path " + str(data_path)
         if index_path:
-            options += " --node-init-data-path " + str(index_path)
+            options += " --node-init-index-path " + str(index_path)
         if hostname:
             options += " --node-init-hostname " + str(hostname)
 
@@ -570,6 +570,8 @@ class CouchbaseCLI:
         if fts_ramsize:
             options += " --cluster-fts-ramsize " + str(fts_ramsize)
         if cluster_name:
+            if cluster_name == "empty":
+                cluster_name = " "
             options += " --cluster-name " + str(cluster_name)
         if cluster_port:
             options += " --cluster-port " + str(cluster_port)

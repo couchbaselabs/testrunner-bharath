@@ -2,10 +2,7 @@
 # coding=utf-8
 import copy
 import logging
-
-import couchbase.subdocument as SD
 from couchbase.bucket import Bucket
-
 from lib.couchbase_helper.documentgenerator import BlobGenerator, JsonDocGenerator, JSONNonDocGenerator
 from lib.couchbase_helper.tuq_helper import N1QLHelper
 from lib.membase.api.rest_client import RestConnection
@@ -13,6 +10,8 @@ from lib.membase.helper.cluster_helper import ClusterOperationHelper
 from lib.testconstants import STANDARD_BUCKET_PORT
 from pytests.eventing.eventing_base import EventingBaseTest
 from pytests.eventing.eventing_constants import HANDLER_CODE
+import couchbase.subdocument as SD
+from threading import Thread
 
 log = logging.getLogger()
 
@@ -46,6 +45,18 @@ class EventingDataset(EventingBaseTest):
                                       master=self.master,
                                       use_rest=True
                                       )
+        handler_code = self.input.param('handler_code', 'bucket_op')
+        if handler_code == 'bucket_op':
+            self.handler_code = HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE1
+        elif handler_code == 'bucket_op_with_timers':
+            self.handler_code = HANDLER_CODE.BUCKET_OPS_WITH_TIMERS
+        elif handler_code == 'bucket_op_with_cron_timers':
+            self.handler_code = HANDLER_CODE.BUCKET_OPS_WITH_CRON_TIMERS
+        elif handler_code == 'n1ql_op_with_timers':
+            self.n1ql_helper.create_primary_index(using_gsi=True, server=self.n1ql_node)
+            self.handler_code = HANDLER_CODE.N1QL_OPS_WITH_TIMERS
+        else:
+            self.handler_code = HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE1
 
     def tearDown(self):
         super(EventingDataset, self).tearDown()
@@ -54,16 +65,16 @@ class EventingDataset(EventingBaseTest):
         gen_load = BlobGenerator('binary', 'binary-', self.value_size, end=2016 * self.docs_per_day)
         # load binary and json data
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load, self.buckets[0].kvs[1], 'create',
-                                   exp=0, flag=0, batch_size=1000)
+                                   exp=0, flag=0, batch_size=1000, compression=self.sdk_compression)
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size)
-        body = self.create_save_function_body(self.function_name, HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE)
+        body = self.create_save_function_body(self.function_name, self.handler_code)
         self.deploy_function(body)
         # Wait for eventing to catch up with all the update mutations and verify results
         self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
         # delete both binary and json documents
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load, self.buckets[0].kvs[1], 'delete',
-                                   exp=0, flag=0, batch_size=1000)
+                                   exp=0, flag=0, batch_size=1000, compression=self.sdk_compression)
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size, op_type='delete')
         # Wait for eventing to catch up with all the delete mutations and verify results
@@ -78,20 +89,20 @@ class EventingDataset(EventingBaseTest):
         gen_load_json_del = copy.deepcopy(gen_load_json)
         # load binary data
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_binary, self.buckets[0].kvs[1], "create",
-                                   exp=0, flag=0, batch_size=1000)
-        body = self.create_save_function_body(self.function_name, HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE)
+                                   exp=0, flag=0, batch_size=1000, compression=self.sdk_compression)
+        body = self.create_save_function_body(self.function_name, self.handler_code)
         self.deploy_function(body)
         # convert data from binary to json
         # use the same doc-id's as binary to update from binary to json
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_binary_del, self.buckets[0].kvs[1],
-                                   'delete', batch_size=1000)
+                                   'delete', batch_size=1000, compression=self.sdk_compression)
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_json, self.buckets[0].kvs[1], 'create',
-                                   batch_size=1000)
+                                   batch_size=1000, compression=self.sdk_compression)
         # Wait for eventing to catch up with all the update mutations and verify results
         self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
         # delete all json docs
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_json_del, self.buckets[0].kvs[1],
-                                   'delete', batch_size=1000)
+                                   'delete', batch_size=1000, compression=self.sdk_compression)
         # Wait for eventing to catch up with all the delete mutations and verify results
         self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
         self.undeploy_and_delete_function(body)
@@ -102,16 +113,17 @@ class EventingDataset(EventingBaseTest):
         gen_load_non_json = JSONNonDocGenerator('non_json_docs', values, start=0, end=2016 * self.docs_per_day)
         gen_load_non_json_del = copy.deepcopy(gen_load_non_json)
         # load binary and non json data
-        self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_binary, self.buckets[0].kvs[1], 'create')
+        self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_binary, self.buckets[0].kvs[1], 'create',
+                                   compression=self.sdk_compression)
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_non_json, self.buckets[0].kvs[1],
-                                   'create')
-        body = self.create_save_function_body(self.function_name, HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE)
+                                   'create', compression=self.sdk_compression)
+        body = self.create_save_function_body(self.function_name, self.handler_code)
         self.deploy_function(body)
         # Wait for eventing to catch up with all the update mutations and verify results
         self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
         # delete non json documents
         self.cluster.load_gen_docs(self.master, self.src_bucket_name, gen_load_non_json_del, self.buckets[0].kvs[1],
-                                   'delete')
+                                   'delete', compression=self.sdk_compression)
         # Wait for eventing to catch up with all the delete mutations and verify results
         self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
         self.undeploy_and_delete_function(body)
@@ -134,8 +146,28 @@ class EventingDataset(EventingBaseTest):
             "False",  # boolean key
             "null",  # null key
             "undefined",  # undefined key
+            # Check here for javascript builtin objects : https://mzl.la/1zDsM8O
+            "NaN",
+            "Symbol()",
+            "Symbol(42)"
+            "Symbol(\'foo\')",
+            "isNaN",
+            "Error",
+            "Function",
             "Infinity",
-            "NaN"
+            "Atomics",
+            "Boolean",
+            "ArrayBuffer",
+            "DataView",
+            "Date",
+            "Generator {}",
+            "InternalError",
+            "Intl",
+            "Number",
+            "Math",
+            "Map",
+            "Promise",
+            "Proxy"
         ]
         url = 'couchbase://{ip}/{name}'.format(ip=self.master.ip, name=self.src_bucket_name)
         bucket = Bucket(url, username="cbadminbucket", password="password")
@@ -144,7 +176,7 @@ class EventingDataset(EventingBaseTest):
         # create a doc using n1ql query
         query = "INSERT INTO  " + self.src_bucket_name + " ( KEY, VALUE ) VALUES ('key11111','from N1QL query')"
         self.n1ql_helper.run_cbq_query(query=query, server=self.n1ql_node)
-        body = self.create_save_function_body(self.function_name, HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE)
+        body = self.create_save_function_body(self.function_name, self.handler_code)
         self.deploy_function(body)
         # Wait for eventing to catch up with all the update mutations and verify results
         self.verify_eventing_results(self.function_name, len(keys) + 1, skip_stats_validation=True)
@@ -167,7 +199,7 @@ class EventingDataset(EventingBaseTest):
         bucket = Bucket(url, username="cbadminbucket", password="password")
         for docid in ['customer123', 'customer1234', 'customer12345']:
             bucket.insert(docid, {'some': 'value'})
-        body = self.create_save_function_body(self.function_name, HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE,
+        body = self.create_save_function_body(self.function_name, self.handler_code,
                                               dcp_stream_boundary="from_now")
         # deploy eventing function
         self.deploy_function(body)
@@ -191,12 +223,86 @@ class EventingDataset(EventingBaseTest):
         bucket = Bucket(url, username="cbadminbucket", password="password")
         for docid in ['customer123', 'customer1234', 'customer12345']:
             bucket.upsert(docid, {})
-        body = self.create_save_function_body(self.function_name, HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE,
+        body = self.create_save_function_body(self.function_name, self.handler_code,
                                               dcp_stream_boundary="from_now")
         # deploy eventing function
         self.deploy_function(body)
+        # update multiple xattrs and update the documents
         for docid in ['customer123', 'customer1234', 'customer12345']:
-            bucket.mutate_in(docid, SD.upsert('my', {'value': 1}, xattr=True))
+            bucket.mutate_in(docid, SD.upsert('my1', {'value': 1}, xattr=True))
+            bucket.mutate_in(docid, SD.upsert('my2', {'value': 2}, xattr=True))
             bucket.mutate_in(docid, SD.upsert('fax', '775-867-5309'))
         self.verify_eventing_results(self.function_name, 3, skip_stats_validation=True)
+        # add new multiple xattrs , delete old xattrs and delete the documents
+        for docid in ['customer123', 'customer1234', 'customer12345']:
+            bucket.mutate_in(docid, SD.upsert('my3', {'value': 3}, xattr=True))
+            bucket.mutate_in(docid, SD.upsert('my4', {'value': 4}, xattr=True))
+            bucket.mutate_in(docid, SD.remove('my3', xattr=True))
+            bucket.mutate_in(docid, SD.remove('my4', xattr=True))
+            bucket.remove(docid)
+        self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
+        self.undeploy_and_delete_function(body)
 
+    # See MB-27679
+    def test_eventing_with_large_doc_size(self):
+        document_size = self.input.param('document_size')
+        data_chan_size = self.input.param('data_chan_size', 10)
+        worker_queue_cap = self.input.param('worker_queue_cap', 10)
+        # generate docs with size >=  1MB , See MB-27679
+        gens_load = self.generate_docs_bigdata(self.docs_per_day, document_size=document_size)
+        self.load(gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=10)
+        body = self.create_save_function_body(self.function_name, self.handler_code,
+                                              data_chan_size=data_chan_size, worker_queue_cap=worker_queue_cap)
+        thread = Thread(target=self._change_eventing_quota, args=())
+        thread.start()
+        self.deploy_function(body)
+        # Wait for eventing to catch up with all the update mutations and verify results
+        self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True,
+                                     timeout=1200)
+        self.load(gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=10, op_type='delete')
+        # Wait for eventing to catch up with all the delete mutations and verify results
+        self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True, timeout=1200)
+        self.undeploy_and_delete_function(body)
+        thread.join()
+
+    def test_eventing_with_unicode_character_in_handler_code(self):
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_UNICODE_CHAR)
+        self.deploy_function(body)
+        # Wait for eventing to catch up with all the update mutations and verify results
+        self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size, op_type='delete')
+        # Wait for eventing to catch up with all the delete mutations and verify results
+        self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
+        self.undeploy_and_delete_function(body)
+
+    def _change_eventing_quota(self):
+        for quota in range(256, 512, 4):
+            self.rest.set_service_memoryQuota(service='eventingMemoryQuota', memoryQuota=quota)
+            self.sleep(10)
+
+    def test_eventing_does_not_use_xattrs(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_TIMERS,
+                                              dcp_stream_boundary="from_now")
+        # deploy eventing function
+        self.deploy_function(body)
+        url = 'couchbase://{ip}/{name}'.format(ip=self.master.ip, name=self.src_bucket_name)
+        bucket = Bucket(url, username="cbadminbucket", password="password")
+        for docid in ['customer123', 'customer1234', 'customer12345']:
+            bucket.upsert(docid, {'a': 1})
+        self.verify_eventing_results(self.function_name, 3, skip_stats_validation=True)
+        # add new multiple xattrs , delete old xattrs and delete the documents
+        for docid in ['customer123', 'customer1234', 'customer12345']:
+            r = bucket.mutate_in(docid, SD.get('eventing', xattr=True))
+            log.info(r)
+            if "Could not execute one or more multi lookups or mutations" not in str(r):
+                self.fail("eventing is still using xattrs for timers")
+            r = bucket.mutate_in(docid, SD.get('_eventing', xattr=True))
+            log.info(r)
+            if "Could not execute one or more multi lookups or mutations" not in str(r):
+                self.fail("eventing is still using xattrs for timers")
+        self.undeploy_and_delete_function(body)

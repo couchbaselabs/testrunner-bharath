@@ -201,8 +201,8 @@ class TokenTests(QueryTests):
 
     #This test is specific to beer-sample bucket
     def test_tokens_simple_syntax(self):
-        #self.rest.load_sample("beer-sample")
-        #self.sleep(20)
+        self.rest.load_sample("beer-sample")
+        self.sleep(20)
         created_indexes = []
         try:
             idx1 = "idx_suffixes"
@@ -250,6 +250,7 @@ class TokenTests(QueryTests):
                 for idx in created_indexes:
                     self.query = "DROP INDEX `beer-sample`.%s" % ( idx)
                     self.run_cbq_query()
+                self.rest.delete_bucket("beer-sample")
 
     def test_dynamicindex_limit(self):
         self.rest.load_sample("beer-sample")

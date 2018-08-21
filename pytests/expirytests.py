@@ -1,22 +1,23 @@
-import datetime
-import time
-import unittest
-import uuid
 from Queue import Empty
 from multiprocessing import Queue
 from threading import Thread
-
-import logger
-import mc_bin_client
-import memcacheConstants
+import unittest
+import os
+import testconstants
 from TestInput import TestInputSingleton
+import mc_bin_client
+import uuid
+import logger
+import time
+import datetime
 from membase.api.rest_client import RestConnection
 from membase.api.tap import TapConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
+import memcacheConstants
 from memcached.helper.data_helper import MemcachedClientHelper
+from sdk_client import SDKSmartClient
 from security.rbac_base import RbacBase
-
 
 class ExpiryTests(unittest.TestCase):
     log = None
@@ -33,6 +34,7 @@ class ExpiryTests(unittest.TestCase):
         self._bucket_name = 'default'
 
         serverInfo = self.master
+
         rest = RestConnection(serverInfo)
         info = rest.get_nodes_self()
         self._bucket_port = info.moxi
@@ -54,7 +56,15 @@ class ExpiryTests(unittest.TestCase):
         rest.create_bucket(bucket=self._bucket_name,
                            ramQuotaMB=bucket_ram,
                            proxyPort=info.memcached)
+        
         msg = 'create_bucket succeeded but bucket "default" does not exist'
+        
+        if (testconstants.TESTRUNNER_CLIENT in os.environ.keys()) and os.environ[testconstants.TESTRUNNER_CLIENT] == testconstants.PYTHON_SDK:
+            self.client = SDKSmartClient(serverInfo, self._bucket_name, compression=TestInputSingleton.input.param(
+                "sdk_compression", True))
+        else:
+            self.client = MemcachedClientHelper.direct_client(serverInfo, self._bucket_name)
+            
         self.assertTrue(BucketOperationHelper.wait_for_bucket_creation(self._bucket_name, rest), msg=msg)
         ready = BucketOperationHelper.wait_for_memcached(serverInfo, self._bucket_name)
         self.assertTrue(ready, "wait_for_memcached failed")
@@ -79,7 +89,7 @@ class ExpiryTests(unittest.TestCase):
     #e1
     def test_expired_keys(self):
         serverInfo = self.master
-        client = MemcachedClientHelper.direct_client(serverInfo, self._bucket_name)
+        client = self.client
         expirations = [2, 5, 10]
         for expiry in expirations:
             testuuid = uuid.uuid4()
@@ -121,7 +131,7 @@ class ExpiryTests(unittest.TestCase):
         queue = Queue(maxsize=10000)
         listener = TapListener(queue, server, "CMD_TAP_DELETE")
 
-        client = MemcachedClientHelper.direct_client(server, self._bucket_name)
+        client = self.client
         expirations = [15]
         for expiry in expirations:
             testuuid = uuid.uuid4()

@@ -245,15 +245,18 @@ class SecondaryIndexingOffsetTests(BaseSecondaryIndexingTests):
                             multiscan_content = self._build_multiscan_body(scan_content, global_projection_value,
                                                                            offset=boundary_value,
                                                                            limit=10)
-                            multiscan_result = \
-                                self.rest.multiscan_for_gsi_index_with_rest(
-                                    id_map["id"], json.dumps(multiscan_content))
-                            log.info(multiscan_result)
-                            '''
-                                Not validating with actual data as this is a special case where if the limit is boundary value of int64,
-                                total docs returned does not comply with definition of offset and limit.
-                            '''
-                            self.assertEqual(len(multiscan_result), expected_doc)
+                            try:
+                                multiscan_result = \
+                                    self.rest.multiscan_for_gsi_index_with_rest(
+                                        id_map["id"], json.dumps(multiscan_content))
+                                log.info(multiscan_result)
+                                '''
+                                    Not validating with actual data as this is a special case where if the limit is boundary value of int64,
+                                    total docs returned does not comply with definition of offset and limit.
+                                '''
+                                self.assertEqual(len(multiscan_result), expected_doc)
+                            except Exception, ex:
+                                log.info(str(ex))
 
     def test_with_offset_limit_and_with_array_indexes(self):
         """
@@ -777,7 +780,8 @@ class SecondaryIndexingOffsetTests(BaseSecondaryIndexingTests):
         cluster = Cluster()
         gen_load = BlobGenerator('binary', 'binary-', self.value_size, end=100)
         rc = cluster.load_gen_docs(self.servers[0], self.buckets[0].name, gen_load,
-                                   self.buckets[0].kvs[1], "create", exp=0, flag=0, batch_size=1000)
+                                   self.buckets[0].kvs[1], "create", exp=0, flag=0, batch_size=1000,
+                                   compression=self.sdk_compression)
         for bucket in self.buckets:
             if not id_map:
                 id_map = self.create_index_using_rest(bucket, query_definition2)

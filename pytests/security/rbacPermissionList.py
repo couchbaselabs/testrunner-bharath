@@ -1,16 +1,11 @@
-from membase.api.rest_client import RestConnection
-from membase.helper.cluster_helper import ClusterOperationHelper
-import urllib
-import json
-import httplib2
-from tasks.future import Future
-from tasks.taskmanager import TaskManager
-from tasks.task import *
-import types
-from couchbase_helper.document import View
 import base64
 import time
+import urllib
+
 import logger
+from couchbase_helper.document import View
+from tasks.task import *
+
 log = logger.Logger.get_logger()
 
 class rbacPermissionList():
@@ -516,8 +511,8 @@ class rbacPermissionList():
         _cluster_admin_security_write = {"audit":"settings/audit;POST;{'auditdEnabled':'true'}"}
         result = self._return_http_code(_cluster_admin_security_write,username,password,host=host,port=port, httpCode=httpCode, user_role=user_role)
 
-        _cluster_admin_security_write = {"validateCredentails":"validateCredentials;POST;{'user':'foo','password':'bar'}"}
-        result = self._return_http_code(_cluster_admin_security_write,username,password,host=host,port=port, httpCode=httpCode, user_role=user_role)
+        #_cluster_admin_security_write = {"validateCredentails":"validateCredentials;POST;{'user':'foo','password':'bar'}"}
+        #result = self._return_http_code(_cluster_admin_security_write,username,password,host=host,port=port, httpCode=httpCode, user_role=user_role)
 
         _cluster_admin_security_write = {"regenerateCert":"controller/regenerateCertificate;POST"}
         result = self._return_http_code(_cluster_admin_security_write,username,password,host=host,port=port, httpCode=httpCode, user_role=user_role)
@@ -639,7 +634,7 @@ class rbacPermissionList():
         _cluster_indexes_read = {
             "maxParalledIndexer":"settings/maxParallelIndexers;GET",
             "view_updated":"settings/viewUpdateDaemon;GET",
-            "view_index_stauts":"indexStatus;GET",
+            #"view_index_stauts":"indexStatus;GET",
             "view_index_settings":"settings/indexes;GET"
         }
 
@@ -676,6 +671,7 @@ class rbacPermissionList():
         rest_remote01.create_bucket(bucket='default1', ramQuotaMB=100,proxyPort=11252)
         rest_remote02 = RestConnection(remote_server02)
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(10)
         #replication_id = rest.start_replication('continuous','default',remote_cluster_name)
 
         param_map = {'replicationType': 'continuous','toBucket': 'default1','fromBucket': 'default','toCluster': remote_cluster_name,
@@ -688,6 +684,7 @@ class rbacPermissionList():
         rest.remove_all_remote_clusters()
 
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         replication_id = rest.start_replication('continuous',fromBucket='default',toCluster=remote_cluster_name,toBucket='default1')
         replication_id = replication_id.replace("/","%2F")
 
@@ -697,6 +694,7 @@ class rbacPermissionList():
         rest.remove_all_replications()
         rest.remove_all_remote_clusters()
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         replication_id = rest.start_replication('continuous',fromBucket='default',toCluster=remote_cluster_name,toBucket='default1')
         replication_id = replication_id.replace("/","%2F")
 
@@ -726,6 +724,7 @@ class rbacPermissionList():
         rest_remote01.create_bucket(bucket='default', ramQuotaMB=100)
         rest_remote02 = RestConnection(remote_server02)
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         replication_id = rest.start_replication('continuous','default',remote_cluster_name)
         replication_id = replication_id.replace("/","%2F")
 
@@ -755,6 +754,7 @@ class rbacPermissionList():
         rest_remote01.create_bucket(bucket='default', ramQuotaMB=100)
         rest_remote02 = RestConnection(remote_server02)
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         replication_id = rest.start_replication('continuous','default',remote_cluster_name)
         replication_id = replication_id.replace("/","%2F")
 
@@ -801,6 +801,7 @@ class rbacPermissionList():
 
         #Add remote cluster reference and replications
         rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         replication_id = rest.start_replication('continuous','default',remote_cluster_name)
 
         _cluster_xdcr_remote_clusters_read ={
@@ -840,6 +841,7 @@ class rbacPermissionList():
         rest.remove_all_replications()
         rest.remove_all_remote_clusters()
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         delete_remote = {"delete_remote":"pools/default/remoteClusters/" + str(remote_cluster_name) + ";DELETE"}
         result = self._return_http_code(delete_remote,username,password,host=host,port=port, httpCode=httpCode, user_role=user_role)
 
@@ -863,6 +865,7 @@ class rbacPermissionList():
         rest_remote01.create_bucket(bucket='default', ramQuotaMB=100)
         rest_remote02 = RestConnection(remote_server02)
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         replication_id = rest.start_replication('continuous','default',remote_cluster_name)
         result = self._return_http_code(_cluster_xdcr_settings_read,username,password,host=host,port=port, httpCode=httpCode, user_role=user_role)
         rest.remove_all_replications()
@@ -891,6 +894,7 @@ class rbacPermissionList():
         rest_remote02 = RestConnection(remote_server02)
         rest_remote02.delete_bucket()
         remote_id = rest.add_remote_cluster(remote_server01.ip,8091,'Administrator','password',remote_cluster_name)
+        time.sleep(20)
         replication_id = rest.start_replication('continuous','default',remote_cluster_name)
 
         result = self._return_http_code(_cluster_xdcr_settings_read,username,password,host=host,port=port, httpCode=httpCode, user_role=user_role)

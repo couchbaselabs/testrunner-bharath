@@ -71,7 +71,7 @@ class EventingSanity(EventingBaseTest):
                   batch_size=self.batch_size, op_type='update')
         # Wait for eventing to catch up with all the update mutations and verify results
         self.verify_eventing_results(self.function_name, self.docs_per_day * 2016)
-        self.undeploy_and_delete_function(body) 
+        self.undeploy_and_delete_function(body)
 
     def test_n1ql_query_execution_from_handler_code(self):
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
@@ -138,12 +138,12 @@ class EventingSanity(EventingBaseTest):
         self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
         self.undeploy_and_delete_function(body)
 
-    def test_syntax_error(self):
+    def test_timers_without_context(self):
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size)
-        body = self.create_save_function_body(self.function_name, HANDLER_CODE.SYNTAX_ERROR)
-        try :
-            self.deploy_function(body,deployment_fail=True)
-        except Exception as e:
-            if "Unexpected end of input" not in str(e):
-                self.fail("Deployment is expected to be failed but no message of failure")
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_TIMER_WITHOUT_CONTEXT,
+                                              worker_count=3)
+        self.deploy_function(body)
+        # Wait for eventing to catch up with all the update mutations and verify results
+        self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
+        self.undeploy_and_delete_function(body)

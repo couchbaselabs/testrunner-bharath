@@ -77,6 +77,7 @@ class CliBaseTest(BaseTestCase):
         self.field_substitutions = self.input.param("field-substitutions", None)
         self.check_preload_keys = self.input.param("check-preload-keys", True)
         self.debug_logs = self.input.param("debug-logs", False)
+        self.should_fail = self.input.param("should-fail", False)
         info = self.shell.extract_remote_info()
         self.os_version = info.distribution_version.lower()
         type = info.type.lower()
@@ -85,7 +86,9 @@ class CliBaseTest(BaseTestCase):
         self.full_v = None
         self.short_v = None
         self.build_number = None
-        cmd =  'curl %s:8091/diag/eval -u Administrator:password ' % self.master.ip
+        cmd =  'curl -g {0}:8091/diag/eval -u {1}:{2} '.format(self.master.ip,
+                                                              self.master.rest_username,
+                                                              self.master.rest_password)
         cmd += '-d "path_config:component_path(bin)."'
         bin_path  = subprocess.check_output(cmd, shell=True)
         if "bin" not in bin_path:
@@ -377,6 +380,8 @@ class CliBaseTest(BaseTestCase):
 
         if name is None:
             name = ""
+        if name == "empty":
+            name = " "
 
         if "clusterName" not in settings:
             log.info("Unable to get cluster name from server")
