@@ -7,6 +7,7 @@ from membase.api.rest_client import RestConnection
 from remote.remote_util import RemoteMachineShellConnection
 from tuq import QueryTests
 
+
 log = logging.getLogger(__name__)
 
 AGGREGATE_FUNCTIONS = ["SUM", "MIN", "MAX", "COUNT", "COUNTN", "AVG"]

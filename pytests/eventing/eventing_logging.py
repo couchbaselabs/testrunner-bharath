@@ -1,11 +1,16 @@
-import logging
-
-from lib.membase.api.rest_client import RestConnection
-from lib.testconstants import STANDARD_BUCKET_PORT
-from logredaction.log_redaction_base import LogRedactionBase
 from pytests.eventing.eventing_base import EventingBaseTest
-from pytests.eventing.eventing_constants import HANDLER_CODE
+from logredaction.log_redaction_base import LogRedactionBase
 from pytests.security.auditmain import audit
+from lib.testconstants import STANDARD_BUCKET_PORT
+import logging
+import copy
+import json
+from lib.couchbase_helper.tuq_helper import N1QLHelper
+from lib.membase.api.rest_client import RestConnection
+from lib.remote.remote_util import RemoteMachineShellConnection
+from lib.testconstants import STANDARD_BUCKET_PORT
+from lib.memcached.helper.data_helper import MemcachedClientHelper
+from pytests.eventing.eventing_constants import HANDLER_CODE
 
 log = logging.getLogger()
 
@@ -55,7 +60,7 @@ class EventingLogging(EventingBaseTest, LogRedactionBase):
         # Wait for eventing to catch up with all the create mutations and verify results
         self.verify_eventing_results(self.function_name, self.docs_per_day * 2016)
         self.undeploy_and_delete_function(body)
-        expected_results_undeploy = {"real_userid:source": "builtin", "real_userid:user": "@eventing-cbauth",
+        expected_results_undeploy = {"real_userid:source": "builtin", "real_userid:user": "Administrator",
                                      "context": self.function_name, "id": 32779, "name": "Set Settings",
                                      "description": "Save settings for a given app"}
         expected_results_delete_draft = {"real_userid:source": "builtin", "real_userid:user": "Administrator",
@@ -87,7 +92,10 @@ class EventingLogging(EventingBaseTest, LogRedactionBase):
         self.set_redaction_level()
         self.start_logs_collection()
         result = self.monitor_logs_collection()
+        self.log.info("cb collect result: {}".format(result))
         node = "ns_1@"+eventing_node.ip
+        if result["perNode"][node]["path"] == "failed":
+            raise Exception("log collection failed")
         logs_path = result["perNode"][node]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')

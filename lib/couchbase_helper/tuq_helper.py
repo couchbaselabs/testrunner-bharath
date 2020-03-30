@@ -44,6 +44,76 @@ class N1QLHelper():
         actual_result = self.run_cbq_query()
         return actual_result, expected_result
 
+    def drop_all_indexes(self, bucket=None, leave_primary=True):
+        current_indexes = self.get_parsed_indexes()
+        if bucket is not None:
+            current_indexes = [index for index in current_indexes if index['bucket'] == bucket]
+        if leave_primary:
+            current_indexes = [index for index in current_indexes if index['is_primary'] is False]
+        for index in current_indexes:
+            bucket = index['bucket']
+            index_name = index['name']
+            self.run_cbq_query("drop index %s.%s" % (bucket, index_name))
+        for index in current_indexes:
+            bucket = index['bucket']
+            index_name = index['name']
+            self.wait_for_index_drop(bucket, index_name)
+
+    def wait_for_index_drop(self, bucket_name, index_name, fields_set=None, using=None):
+        self.with_retry(lambda: self.is_index_present(bucket_name, index_name, fields_set=fields_set, using=using, status="any"), eval=False, delay=1, tries=30)
+
+    def with_retry(self, func, eval=None, delay=5, tries=10, func_params=None):
+        attempts = 0
+        while attempts < tries:
+            attempts = attempts + 1
+            try:
+                res = func()
+                if eval is None:
+                    return res
+                elif res == eval:
+                    return res
+                else:
+                    time.sleep(delay)
+            except Exception as ex:
+                time.sleep (delay)
+        raise Exception('timeout, invalid results: %s' % res)
+
+    def is_index_present(self, bucket_name, index_name, fields_set=None, using=None, status="online"):
+        query_response = self.run_cbq_query("SELECT * FROM system:indexes")
+        if fields_set is None and using is None:
+            if status is "any":
+                desired_index = (index_name, bucket_name)
+                current_indexes = [(i['indexes']['name'],
+                                    i['indexes']['keyspace_id']) for i in query_response['results']]
+            else:
+                desired_index = (index_name, bucket_name, status)
+                current_indexes = [(i['indexes']['name'],
+                                i['indexes']['keyspace_id'],
+                                i['indexes']['state']) for i in query_response['results']]
+        else:
+            if status is "any":
+                desired_index = (index_name, bucket_name, frozenset([field for field in fields_set]), using)
+                current_indexes = [(i['indexes']['name'],
+                                    i['indexes']['keyspace_id'],
+                                    frozenset([(key.replace('`', '').replace('(', '').replace(')', '').replace('meta.id', 'meta().id'), j)
+                                               for j, key in enumerate(i['indexes']['index_key'], 0)]),
+                                    i['indexes']['using']) for i in query_response['results']]
+            else:
+                desired_index = (index_name, bucket_name, frozenset([field for field in fields_set]), status, using)
+                current_indexes = [(i['indexes']['name'],
+                                i['indexes']['keyspace_id'],
+                                frozenset([(key.replace('`', '').replace('(', '').replace(')', '').replace('meta.id', 'meta().id'), j)
+                                           for j, key in enumerate(i['indexes']['index_key'], 0)]),
+                                i['indexes']['state'],
+                                i['indexes']['using']) for i in query_response['results']]
+
+        if desired_index in current_indexes:
+            return True
+        else:
+            self.log.info("waiting for: \n" + str(desired_index) + "\n")
+            self.log.info("current indexes: \n" + str(current_indexes) + "\n")
+            return False
+
     def run_cbq_query(self, query=None, min_output_size=10, server=None, query_params={}, is_prepared=False,
                       scan_consistency=None, scan_vector=None, verbose=True):
         if query is None:
@@ -100,6 +170,45 @@ class N1QLHelper():
             raise CBQError(error_result, server.ip)
         self.log.info("TOTAL ELAPSED TIME: %s" % result["metrics"]["elapsedTime"])
         return result
+
+    def wait_for_all_indexes_online(self):
+        cur_indexes = self.get_parsed_indexes()
+        for index in cur_indexes:
+            self._wait_for_index_online(index['bucket'], index['name'])
+
+    def get_parsed_indexes(self):
+        query_response = self.run_cbq_query("SELECT * FROM system:indexes")
+        current_indexes = [{'name': i['indexes']['name'],
+                            'bucket': i['indexes']['keyspace_id'],
+                            'fields': frozenset([(key.replace('`', '').replace('(', '').replace(')', '').replace('meta.id', 'meta().id'), j)
+                                                 for j, key in enumerate(i['indexes']['index_key'], 0)]),
+                            'state': i['indexes']['state'],
+                            'using': i['indexes']['using'],
+                            'where': i['indexes'].get('condition', ''),
+                            'is_primary': i['indexes'].get('is_primary', False)} for i in query_response['results']]
+        return current_indexes
+
+    def _wait_for_index_online(self, bucket, index_name, timeout=12000):
+        end_time = time.time() + timeout
+        res = {}
+        while time.time() < end_time:
+            query = "SELECT * FROM system:indexes where name='%s'" % index_name
+            res = self.run_cbq_query(query)
+            for item in res['results']:
+                if 'keyspace_id' not in item['indexes']:
+                    self.log.error(item)
+                    continue
+                bucket_name = ""
+                if isinstance(bucket, str) or isinstance(bucket, unicode):
+                    bucket_name = bucket
+                else:
+                    bucket_name = bucket.name
+                if item['indexes']['keyspace_id'] == bucket_name:
+                    if item['indexes']['state'] == "online":
+                        return
+            time.sleep(timeout)
+        raise Exception('index %s is not online. last response is %s' % (index_name, res))
+
 
     def _verify_results(self, actual_result, expected_result, missing_count = 1, extra_count = 1):
         self.log.info(" Analyzing Actual Result")
@@ -430,10 +539,10 @@ class N1QLHelper():
                 self.query += " USING VIEW "
             if self.use_rest:
                 try:
-                    check = self._is_index_in_list(bucket.name, "#primary", server = server)
+                    check = self._is_index_in_list(bucket.name, "#primary", server=server)
                     if not check:
-                        self.run_cbq_query(server = server,query_params={'timeout' : '900s'})
-                        check = self.is_index_online_and_in_list(bucket.name, "#primary", server = server)
+                        self.run_cbq_query(server=server, query_params={'timeout': '900s'})
+                        check = self.is_index_online_and_in_list(bucket.name, "#primary", server=server)
                         if not check:
                             raise Exception(" Timed-out Exception while building primary index for bucket {0} !!!".format(bucket.name))
                     else:
@@ -482,6 +591,14 @@ class N1QLHelper():
         if index_name in str(actual_result):
             return True and check
         return False
+
+    def verify_explain(self, actual_result, keyword="", present=True):
+        if keyword in str(actual_result) and present:
+            return True
+        elif keyword not in str(actual_result) and not present:
+            return True
+        else:
+            return False
 
     def run_query_and_verify_result(self, server=None, query=None, timeout=120.0, max_try=1, expected_result=None,
                                     scan_consistency=None, scan_vector=None, verify_results=True):
@@ -799,45 +916,62 @@ class N1QLHelper():
         for k, v in index_distribution_map_after_rebalance.iteritems():
             print k, v
 
-    def verify_replica_indexes(self, index_names, index_map, num_replicas, expected_nodes=None):
+    def verify_replica_indexes(self, index_names, index_map, num_replicas, expected_nodes=None, dropped_replica=False, replicaId=None):
         # 1. Validate count of no_of_indexes
         # 2. Validate index names
         # 3. Validate index replica have the same id
         # 4. Validate index replicas are on different hosts
 
         nodes = []
+        skip_replica_check = False
         for index_name in index_names:
             index_host_name, index_id = self.get_index_details_using_index_name(index_name, index_map)
             nodes.append(index_host_name)
 
             for i in range(0, num_replicas):
-                index_replica_name = index_name + " (replica {0})".format(str(i+1))
-
+                if dropped_replica:
+                    if not i+1 == replicaId:
+                        index_replica_name = index_name + " (replica {0})".format(str(i+1))
+                    else:
+                        skipped_index = index_name + " (replica {0})".format(str(i+1))
+                        skip_replica_check = True
+                else:
+                    index_replica_name = index_name + " (replica {0})".format(str(i + 1))
                 try:
-                    index_replica_hostname, index_replica_id = self.get_index_details_using_index_name(
-                        index_replica_name, index_map)
+                    if not skip_replica_check:
+                        index_replica_hostname, index_replica_id = self.get_index_details_using_index_name(
+                            index_replica_name, index_map)
                 except Exception, ex:
                     self.log.info(str(ex))
                     raise Exception(str(ex))
 
-                self.log.info("Hostnames : %s , %s" % (index_host_name, index_replica_hostname))
-                self.log.info("Index IDs : %s, %s" % (index_id, index_replica_id))
+                if not skip_replica_check:
+                    self.log.info("Hostnames : %s , %s" % (index_host_name, index_replica_hostname))
+                    self.log.info("Index IDs : %s, %s" % (index_id, index_replica_id))
 
-                nodes.append(index_replica_hostname)
+                    nodes.append(index_replica_hostname)
 
-                if index_id != index_replica_id:
-                    self.log.info("Index ID for main index and replica indexes not same")
-                    raise Exception("index id different for replicas")
+                    if index_id != index_replica_id:
+                        self.log.info("Index ID for main index and replica indexes not same")
+                        raise Exception("index id different for replicas")
 
-                if index_host_name == index_replica_hostname:
-                    self.log.info("Index hostname for main index and replica indexes are same")
-                    raise Exception("index hostname same for replicas")
+                    if index_host_name == index_replica_hostname:
+                        self.log.info("Index hostname for main index and replica indexes are same")
+                        raise Exception("index hostname same for replicas")
+                else:
+                    try:
+                        index_replica_hostname, index_replica_id = self.get_index_details_using_index_name(
+                            skipped_index, index_map)
+                    except Exception, ex:
+                        self.log.info(str(ex))
+                        continue
+                    raise Exception("Replica is still present when it should have been dropped")
 
         if expected_nodes:
             expected_nodes = expected_nodes.sort()
             nodes = nodes.sort()
             if not expected_nodes == nodes:
-                self.fail("Replicas not created on expected hosts")
+                raise Exception("Replicas not created on expected hosts")
 
     def verify_replica_indexes_build_status(self, index_map, num_replicas, defer_build=False):
 

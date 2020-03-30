@@ -38,12 +38,10 @@ class AutoReprovisionBaseTest(unittest.TestCase):
         # Add built-in user
         testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
         RbacBase().create_user_source(testuser, 'builtin', servers[0])
-        time.sleep(10)
 
         # Assign user to role
         role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
         RbacBase().add_user_role(role_list, RestConnection(servers[0]), 'builtin')
-        time.sleep(10)
 
         log.info("==============  common_setup was finished for test #{0} {1} ==============" \
                  .format(testcase.case_number, testcase._testMethodName))
@@ -170,6 +168,9 @@ class AutoReprovisionTests(unittest.TestCase):
             self.master = self.servers[1]
         else:
             self.server_fail = self.servers[1]
+        for server in self.servers:
+            remote = RemoteMachineShellConnection(server)
+            output, error = remote.enable_diag_eval_on_non_local_hosts()
 
     def tearDown(self):
         AutoReprovisionBaseTest.common_tearDown(self.servers, self)
@@ -300,10 +301,7 @@ class AutoReprovisionTests(unittest.TestCase):
         elif shell.extract_remote_info().type.lower() == 'linux':
             o, r = shell.execute_command("reboot")
         shell.log_command_output(o, r)
-        if shell.extract_remote_info().type.lower() == 'windows':
-            time.sleep(wait_timeout * 5)
-        else:
-            time.sleep(wait_timeout)
+        time.sleep(wait_timeout * 5)
         # disable firewall on the node
         shell = RemoteMachineShellConnection(self.server_fail)
         shell.disable_firewall()
@@ -695,12 +693,15 @@ class AutoReprovisionTests(unittest.TestCase):
         log.info(msg.format(inserted_count, rejected_count))
         msg = "deleted keys count : {0} , expired keys count : {1}"
         log.info(msg.format(deleted_count, expired_count))
-        return inserted_keys, rejected_keys
+        return inserted_count, rejected_count
 
-    def verify_loaded_data(self, master, bucket, inserted_keys):
-        keys_exist = BucketOperationHelper.keys_exist_or_assert_in_parallel(inserted_keys, master, bucket, self,
-                                                                            concurrency=4)
-        self.assertTrue(keys_exist, msg="unable to verify keys after restore")
+    def verify_loaded_data(self, master, bucket, inserted_count):
+        rest = RestConnection(master)
+        bucket_count_map = rest.get_buckets_itemCount()
+        msg = "Before count : {0} , After count : {1}"
+        log.info(msg.format(inserted_count, bucket_count_map[bucket]))
+        self.assertEquals(bucket_count_map[bucket], inserted_count,
+                          msg="unable to verify keys after restore")
 
     def _cluster_setup(self):
         keys_count = self.input.param("keys-count", 0)
@@ -721,7 +722,7 @@ class AutoReprovisionTests(unittest.TestCase):
 
         if num_buckets == 1:
             bucket_name = "default"
-            bucket_ram = info.memoryQuota * 2 / 3
+            bucket_ram = 200
             rest.create_bucket(bucket=bucket_name,
                                ramQuotaMB=bucket_ram,
                                replicaNumber=self.replicas,
@@ -741,7 +742,7 @@ class AutoReprovisionTests(unittest.TestCase):
 
         for bucket in buckets:
             distribution = {10: 0.2, 20: 0.5, 30: 0.25, 40: 0.05}
-            inserted_keys, rejected_keys = self.load_bucket_and_return_the_keys(servers=[self.master],
+            inserted_count, rejected_count = self.load_bucket_and_return_the_keys(servers=[self.master],
                                                                                 name=bucket.name,
                                                                                 # ram_load_ratio=0.02,
                                                                                 value_size_distribution=distribution,
@@ -749,7 +750,7 @@ class AutoReprovisionTests(unittest.TestCase):
                                                                                 moxi=True,
                                                                                 number_of_threads=2,
                                                                                 number_of_items=keys_count)
-            self.loaded_items[bucket.name] = inserted_keys
+            self.loaded_items[bucket.name] = inserted_count
 
     def _add_and_rebalance(self, servers, wait_for_rebalance=True):
         log = logger.Logger.get_logger()
@@ -761,11 +762,8 @@ class AutoReprovisionTests(unittest.TestCase):
             for serverInfo in servers[1:]:
                 log.info('adding {0} node : {1}:{2} to the cluster'.format(
                     serverInfo.services, serverInfo.ip, serverInfo.port))
-                services = serverInfo.services.split()
-                if self.skip_services:
-                    services = None
                 otpNode = rest.add_node(master.rest_username, master.rest_password, serverInfo.ip, port=serverInfo.port,
-                                        services=services)
+                                        services=["kv"])
                 if otpNode:
                     log.info('added node : {0} to the cluster'.format(otpNode.id))
                 else:

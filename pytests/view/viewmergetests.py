@@ -26,7 +26,8 @@ class ViewMergingTests(BaseTestCase):
                 TestInputSingleton.input.test_params['skip_buckets_handle'] = True
             self.default_bucket_name = 'default'
             super(ViewMergingTests, self).setUp()
-            if 'first_case' in TestInputSingleton.input.test_params:
+            if 'first_case' in TestInputSingleton.input.test_params \
+                    and self.num_servers > 1:
                 self.cluster.rebalance(self.servers[:], self.servers[1:], [])
             # We use only one bucket in this test suite
             self.rest = RestConnection(self.master)
@@ -381,7 +382,13 @@ class ViewMergingTests(BaseTestCase):
             if vbucket.master not in clients:
                 ip, port = vbucket.master.split(':')
                 sport = str((int(port[-2:]))/2 + int(self.master.port))
-                clients[vbucket.master] = MemcachedClientHelper.direct_client(self._get_server(sport), self.default_bucket_name)
+                if sport:
+                    clients[vbucket.master] = \
+                        MemcachedClientHelper.direct_client(self._get_server(sport),\
+                                                            self.default_bucket_name)
+                else:
+                    clients[vbucket.master] = MemcachedClientHelper.direct_client(self.master,\
+                                                                     self.default_bucket_name)
         return clients
 
     def populate_alternated(self, num_vbuckets, docs):

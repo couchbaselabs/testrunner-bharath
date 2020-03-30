@@ -1,12 +1,12 @@
 import json
-import random
-from threading import Thread
 
 from base_2i import BaseSecondaryIndexingTests
+from membase.api.rest_client import RestConnection, RestHelper
+import random
 from lib import testconstants
 from lib.memcached.helper.data_helper import MemcachedClientHelper
 from lib.remote.remote_util import RemoteMachineShellConnection
-from membase.api.rest_client import RestConnection, RestHelper
+from threading import Thread
 from pytests.query_tests_helper import QueryHelperTests
 
 
@@ -49,6 +49,7 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
         self.expected_nodes = self.input.param("expected_nodes", None)
         self.failure_in_node = self.input.param("failure_in_node", None)
         self.alter_index = self.input.param("alter_index",None)
+        self.server_group_map = {}
 
     def tearDown(self):
         super(GSIReplicaIndexesTests, self).tearDown()
@@ -123,6 +124,8 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                 self.servers[:self.nodes_init], [node_out], self.graceful))]
         for thread in threads:
             thread.start()
+            self.sleep(1)
+        for thread in threads:
             thread.join()
         self.sleep(30)
         index_map = self.get_index_map()
@@ -515,7 +518,11 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                 self.servers[:self.nodes_init], [node_out], self.graceful)))
         for thread in threads:
             thread.start()
+            self.sleep(1)
+
+        for thread in threads:
             thread.join()
+
         self.sleep(30)
 
         index_map = self.get_index_map()
@@ -3177,6 +3184,7 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
 
     def _create_server_groups(self):
 
+
         if self.server_grouping:
             server_groups = self.server_grouping.split(":")
             self.log.info("server groups : %s", server_groups)
@@ -3204,6 +3212,7 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
             # Add nodes to Server groups
             i = 1
             for server_grp in server_groups:
+                server_list = []
                 server_grp_name = "ServerGroup_" + str(i)
                 i += 1
                 nodes_in_server_group = server_grp.split("-")
@@ -3211,6 +3220,8 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                     self.rest.shuffle_nodes_in_zones(
                         [self.servers[int(node)].ip], source_zone,
                         server_grp_name)
+                    server_list.append(self.servers[int(node)].ip + ":" + self.servers[int(node)].port)
+                self.server_group_map[server_grp_name] = server_list
 
     def run_operation(self, phase="before"):
         if phase == "before":
@@ -3403,7 +3414,7 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
     def _create_restore(self, server, username="Administrator",
                         password="password"):
         remote_client = RemoteMachineShellConnection(server)
-        cmd = "cbbackupmgr restore --archive {0} --repo example{1} --cluster couchbase://127.0.0.1 --username {2} --password {3}".format(
+        cmd = "cbbackupmgr restore --archive {0} --repo example{1} --cluster couchbase://127.0.0.1 --username {2} --password {3} --force-updates".format(
             self.backup_path, self.rand, username, password)
         command = "{0}{1}".format(self.cli_command_location, cmd)
         output, error = remote_client.execute_command(command)

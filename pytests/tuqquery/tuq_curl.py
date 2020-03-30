@@ -87,10 +87,10 @@ class QueryCurlTests(QueryTests):
             curl_noinsert_permissions = 'query_select[*]:query_manage_index[*]' \
                                         ':query_system_catalog:query_external_access'
             # Assign user to role
-            role_list = [{'id': 'no_curl', 'name': 'no_curl','roles': '%s' % noncurl_permissions},
-                         {'id': 'curl', 'name': 'curl', 'roles': '%s' % curl_permissions},
+            role_list = [{'id': 'no_curl', 'name': 'no_curl','roles': '%s' % noncurl_permissions, 'password': 'password'},
+                         {'id': 'curl', 'name': 'curl', 'roles': '%s' % curl_permissions, 'password': 'password'},
                           {'id': 'curl_no_insert', 'name': 'curl_no_insert',
-                           'roles': '%s' % curl_noinsert_permissions}]
+                           'roles': '%s' % curl_noinsert_permissions, 'password': 'password'}]
             temp = RbacBase().add_user_role(role_list, self.rest, 'builtin')
             self.log.info("==============  QueryCurlTests suite_setup has completed ==============")
             self.log_config_info()
@@ -368,41 +368,28 @@ class QueryCurlTests(QueryTests):
     def test_from_external(self):
         url = "'https://jsonplaceholder.typicode.com/users'"
         select_query = "select *"
-        from_query=" from curl("+ url +") result "
-        curl = self.shell.execute_commands_inside(self.cbqpath,select_query + from_query,'', '', '', '', '')
+        from_query=" from curl(" + url + ") result "
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query + from_query, '', '', '', '', '')
         # Convert the output of the above command to json
         json_curl = self.convert_to_json(curl)
         self.assertEqual(json_curl['metrics']['resultCount'], 10)
 
         # Test the use of curl in the from as a bucket, see if you can specify only usernames
         select_query = "select result.username"
-        curl = self.shell.execute_commands_inside(self.cbqpath,select_query + from_query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query + from_query, '', '', '', '', '')
         json_curl = self.convert_to_json(curl)
-        # Need to make sure that only the usernames were stored, that correlates to a resultsize of 478
-        self.assertEqual(json_curl['metrics']['resultSize'], 478)
+        self.assertEqual(len(json_curl['results']), 10)
+        for item in json_curl['results']:
+            self.assertTrue(len(item['username']) > 0)
+            self.assertEqual(len(item.keys()), 1)
 
         # Test of the use of curl in the from as a bucket, see if you can filter results
         select_query = "select *"
         where_query ="where result.username == 'Bret'"
-        curl = self.shell.execute_commands_inside(self.cbqpath,select_query + from_query+ where_query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(self.cbqpath, select_query + from_query + where_query, '', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         self.assertTrue(json_curl['metrics']['resultCount'] == 1 and
                         json_curl['results'][0]['result']['username'] == 'Bret')
-
-    '''Test request to the google maps api with an api key'''
-    def test_external_json_google_api_key(self):
-        # Test the google maps json endpoint with a valid api key and make sure it works
-        curl_output = self.shell.execute_command("%s --get https://maps.googleapis.com/maps/api/geocode/json "
-                                                 "-d 'address=santa+cruz&components=country:ES&key=AIzaSyCT6niGCMsgegJkQSYSqpoLZ4_rSO59XQQ'"
-                                                 % self.curl_path)
-        self.log.info(curl_output)
-        expected_curl = self.convert_list_to_json(curl_output[0])
-        url = "'https://maps.googleapis.com/maps/api/geocode/json'"
-        options= "{'get':True,'data': 'address=santa+cruz&components=country:ES&key=AIzaSyCT6niGCMsgegJkQSYSqpoLZ4_rSO59XQQ'}"
-        query="select curl("+ url +", %s" % options + ")"
-        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
-        actual_curl = self.convert_to_json(curl)
-        self.assertEqual(actual_curl['results'][0]['$1'], expected_curl)
 
     '''Test request to a JIRA json endpoint'''
     def test_external_json_jira(self):
@@ -501,11 +488,12 @@ class QueryCurlTests(QueryTests):
         n1ql_query = 'prepare prepared_with_curl FROM select * from default limit 5'
         # This is the query that the cbq-engine will execute
         query = "select curl("+ self.query_service_url +", {'data' : 'statement=%s','user':'%s:%s'})" % (n1ql_query,self.username,self.password)
-        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(self.cbqpath, query, '', '', '', '', '')
         json_curl = self.convert_to_json(curl)
         result = self.run_cbq_query('select * from system:prepareds')
-        self.assertTrue(result['results'][0]['prepareds']['name'] == 'prepared_with_curl' and result['metrics']['resultCount'] == 3
-                        and result['results'][0]['prepareds']['statement'] == n1ql_query)
+        self.assertEqual(result['results'][0]['prepareds']['name'], 'prepared_with_curl')
+        self.assertEqual(result['metrics']['resultCount'], len(self.servers))
+        self.assertEqual(result['results'][0]['prepareds']['statement'], n1ql_query)
 
     '''Check if the cipher_list returned by pinging the website is consistent with the expected list
        of ciphers'''
@@ -864,8 +852,7 @@ class QueryCurlTests(QueryTests):
             error_msg = "Errorevaluatingprojection.-cause:curl:SSLconnecterror"
             wrong_host_msg = str(error_msg)
         else:
-            error_msg = "Errorevaluatingprojection.-cause:curl:Peercertificatecannotbeauthenticated" \
-                        "withgivenCAcertificates"
+            error_msg = "Errorevaluatingprojection.-cause:curl:SSLpeercertificateorSSHremotekeywasnotOK"
             wrong_host_msg = "Errorevaluatingprojection.-cause:curl:SSLpeercertificateorSSHremotekey" \
                              "wasnotOK"
         url = "'https://expired.badssl.com/'"

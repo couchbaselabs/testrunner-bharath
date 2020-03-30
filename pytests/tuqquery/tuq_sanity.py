@@ -1,15 +1,14 @@
-import datetime
 import json
 import math
-import random
 import re
+import datetime
 import time
 from datetime import date
-
-from membase.api.exception import CBQError
-from membase.api.rest_client import RestConnection
 from remote.remote_util import RemoteMachineShellConnection
+from membase.api.exception import CBQError, ReadDocumentException
+from membase.api.rest_client import RestConnection
 from tuq import QueryTests
+import random
 
 
 class QuerySanityTests(QueryTests):
@@ -17,12 +16,24 @@ class QuerySanityTests(QueryTests):
     def setUp(self):
         super(QuerySanityTests, self).setUp()
         self.log.info("==============  QuerySanityTests setup has started ==============")
+        self.index_to_be_created = self.input.param("index_to_be_created", '')
+        self.query_to_be_run = self.input.param("query_to_be_run", '')
+        if self.load_sample:
+            self.rest.load_sample("travel-sample")
+            self.wait_for_all_indexes_online()
         self.log.info("==============  QuerySanityTests setup has completed ==============")
         self.log_config_info()
 
     def suite_setUp(self):
         super(QuerySanityTests, self).suite_setUp()
         self.log.info("==============  QuerySanityTests suite_setup has started ==============")
+        if self.input.param("fast_count", False):
+            random_number = 23917
+            shell = RemoteMachineShellConnection(self.master)
+            shell.execute_cbworkloadgen(self.rest.username, self.rest.password, random_number, 100, "default", 1024,
+                                        '-j')
+            self.run_cbq_query(query="INSERT INTO default ( key, value) VALUES ('pymc100205',{'name':'Sara','age':'30'})")
+
         self.log.info("==============  QuerySanityTests suite_setup has completed ==============")
 
     def tearDown(self):
@@ -52,31 +63,36 @@ class QuerySanityTests(QueryTests):
             expected_list_sorted = sorted(expected_list, key=lambda doc: (doc['name']))
             self._verify_results(actual_result['results'], expected_list_sorted)
 
-    '''MB-22273'''
     def test_prepared_encoded_rest(self):
         result_count = 1412
         self.rest.load_sample("beer-sample")
+        self.wait_for_buckets_status({"beer-sample": "healthy"}, 5, 120)
+        self.wait_for_bucket_docs({"beer-sample": 7303}, 5, 120)
+        self._wait_for_index_online('beer-sample', 'beer_primary')
         try:
             query = 'create index myidx on `beer-sample`(name,country,code) where (type="brewery")'
             self.run_cbq_query(query)
-            time.sleep(10)
-            result = self.run_cbq_query('prepare s1 from SELECT name, IFMISSINGORNULL(country,999), '
-                                        'IFMISSINGORNULL(code,999) FROM `beer-sample` WHERE type = "brewery" AND name IS NOT MISSING')
+            self._wait_for_index_online('beer-sample', 'myidx')
+            query = 'prepare s1 from SELECT name, IFMISSINGORNULL(country,999), IFMISSINGORNULL(code,999) FROM `beer-sample` ' \
+                    'WHERE type = "brewery" AND name IS NOT MISSING'
+            result = self.run_cbq_query(query)
             encoded_plan = '"' + result['results'][0]['encoded_plan'] + '"'
             for server in self.servers:
                 remote = RemoteMachineShellConnection(server)
                 remote.stop_server()
+
             time.sleep(20)
             for server in self.servers:
                 remote = RemoteMachineShellConnection(server)
                 remote.start_server()
-            time.sleep(30)
+            self.wait_for_buckets_status({"beer-sample": "healthy"}, 5, 120)
+            self.wait_for_bucket_docs({"beer-sample": 7303}, 5, 120)
+            self._wait_for_index_online('beer-sample', 'beer_primary')
+            cmd = "%s http://%s:%s/query/service -u %s:%s -H 'Content-Type: application/json' " \
+                  "-d '{ \"prepared\": \"s1\", \"encoded_plan\": %s }'" % (self.curl_path, server.ip, self.n1ql_port, self.username, self.password, encoded_plan)
             for server in self.servers:
                 remote = RemoteMachineShellConnection(server)
-                result = remote.execute_command(
-                    "%s http://%s:%s/query/service -u %s:%s -H 'Content-Type: application/json' "
-                    "-d '{ \"prepared\": \"s1\", \"encoded_plan\": %s }'"
-                    % (self.curl_path,server.ip, self.n1ql_port, self.username, self.password, encoded_plan))
+                result = remote.execute_command(cmd)
                 new_list = [string.strip() for string in result[0]]
                 concat_string = ''.join(new_list)
                 json_output = json.loads(concat_string)
@@ -84,6 +100,7 @@ class QuerySanityTests(QueryTests):
                 self.assertEqual(json_output['metrics']['resultCount'], result_count)
         finally:
             self.rest.delete_bucket("beer-sample")
+            self.wait_for_bucket_delete("beer-sample", 5, 120)
 
     #These bugs are not planned to be fixed therefore this test isnt in any confs
     '''MB-19887 and MB-24303: These queries were returning incorrect results with views.'''
@@ -414,6 +431,43 @@ class QuerySanityTests(QueryTests):
          new_curl = json.dumps(o)
          string_curl = json.loads(new_curl)
          self.assertTrue(len(string_curl)==2)
+
+##############################################################################################
+#
+#   COUNT
+##############################################################################################
+
+    def test_fast_count(self):
+        if self.index_to_be_created:
+            if "EQUALS" in self.index_to_be_created:
+                self.index_to_be_created = self.index_to_be_created.replace("EQUALS","=")
+            self.run_cbq_query(query=self.index_to_be_created)
+        self.wait_for_all_indexes_online()
+        try:
+            if "STAR" in self.query_to_be_run:
+                self.query_to_be_run = self.query_to_be_run.replace("STAR", "*")
+                if "EQUALS" in self.query_to_be_run:
+                    self.query_to_be_run = self.query_to_be_run.replace("EQUALS","=")
+            #add use primary index hint to the query to compare the GSI query to the primary index query
+            actual_results = self.run_cbq_query(query=self.query_to_be_run)
+            split_query = self.query_to_be_run.split("where")
+            primary_index_query = split_query[0] + "USE INDEX(`#primary`) where" + split_query[1]
+            expected_results = self.run_cbq_query(query=primary_index_query)
+            self.assertEqual(actual_results['results'][0]['$1'],expected_results['results'][0]['$1'])
+        finally:
+            if self.load_sample:
+                self.run_cbq_query(query="DROP INDEX `travel-sample`.idx_flight_stops")
+            else:
+                self.run_cbq_query(query="DROP INDEX default.idx1")
+
+    def test_primary_count(self):
+        #number of documents inserted at the beginning of suite_setup
+        random_number = 23918
+        shell = RemoteMachineShellConnection(self.master)
+        if "STAR" in self.query_to_be_run:
+            self.query_to_be_run = self.query_to_be_run.replace("STAR", "*")
+        actual_results = self.run_cbq_query(query=self.query_to_be_run)
+        self.assertEqual(actual_results['results'][0]['$1'], random_number+self.docs_per_day*2016)
 
 ##############################################################################################
 #
@@ -2649,24 +2703,24 @@ class QuerySanityTests(QueryTests):
             self._verify_results(actual_result, expected_result)
 
         # https://issues.couchbase.com/browse/MB-29401
-        def test_sum_large_negative_numbers(self):
-            self.fail_if_no_buckets()
+    def test_sum_large_negative_numbers(self):
+        self.fail_if_no_buckets()
 
-            self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc1',{ 'f1' : -822337203685477580 })")
-            self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc2',{ 'f1' : -822337203685477580 })")
-            self.query = "select SUM(f1) from default"
-            result = self.run_cbq_query()
-            found_result = result['results'][0]['$1']
-            expected_result = -1644674407370955160
-            self.assertEqual(found_result, expected_result)
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc1',{ 'f1' : -822337203685477580 })")
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc2',{ 'f1' : -822337203685477580 })")
+        self.query = "select SUM(f1) from default"
+        result = self.run_cbq_query()
+        found_result = result['results'][0]['$1']
+        expected_result = -1644674407370955160
+        self.assertEqual(found_result, expected_result)
 
-            self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc3',{ 'f2' : -822337203685477580 })")
-            self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc4',{ 'f2' : 10 })")
-            self.query = "select SUM(f2) from default"
-            result = self.run_cbq_query()
-            found_result = result['results'][0]['$1']
-            expected_result = -822337203685477570
-            self.assertEqual(found_result, expected_result)
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc3',{ 'f2' : -822337203685477580 })")
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc4',{ 'f2' : 10 })")
+        self.query = "select SUM(f2) from default"
+        result = self.run_cbq_query()
+        found_result = result['results'][0]['$1']
+        expected_result = -822337203685477570
+        self.assertEqual(found_result, expected_result)
 
 ##############################################################################################
 #
@@ -3175,15 +3229,15 @@ class QuerySanityTests(QueryTests):
     def test_union_where_covering(self):
         created_indexes = []
         ind_list = ["one", "two"]
-        index_name="one"
+        index_name = "one"
         self.fail_if_no_buckets()
         for bucket in self.buckets:
             for ind in ind_list:
                 index_name = "coveringindex%s" % ind
-                if ind =="one":
-                    self.query = "CREATE INDEX %s ON %s(name, email, join_mo)  USING %s" % (index_name, bucket.name,self.index_type)
-                elif ind =="two":
-                    self.query = "CREATE INDEX %s ON %s(email,join_mo) USING %s" % (index_name, bucket.name,self.index_type)
+                if ind == "one":
+                    self.query = "CREATE INDEX %s ON %s(name, email, join_mo)  USING %s" % (index_name, bucket.name, self.index_type)
+                elif ind == "two":
+                    self.query = "CREATE INDEX %s ON %s(email, join_mo) USING %s" % (index_name, bucket.name, self.index_type)
                 self.run_cbq_query()
                 self._wait_for_index_online(bucket, index_name)
                 created_indexes.append(index_name)
@@ -3194,10 +3248,8 @@ class QuerySanityTests(QueryTests):
             self.query = "select name from %s where name is not null union select email from %s where email is not null and join_mo >2" % (bucket.name, bucket.name)
             actual_list = self.run_cbq_query()
             actual_result = sorted(actual_list['results'])
-            expected_result = [{"name" : doc["name"]}
-                                for doc in self.full_list]
-            expected_result.extend([{"email" : doc["email"]}
-                                    for doc in self.full_list if doc["join_mo"] > 2])
+            expected_result = [{"name": doc["name"]} for doc in self.full_list]
+            expected_result.extend([{"email": doc["email"]} for doc in self.full_list if doc["join_mo"] > 2])
             expected_result = sorted([dict(y) for y in set(tuple(x.items()) for x in expected_result)])
             self._verify_results(actual_result, expected_result)
             for index_name in created_indexes:
@@ -3254,7 +3306,7 @@ class QuerySanityTests(QueryTests):
                 self.run_cbq_query()
             self.query = "CREATE PRIMARY INDEX ON %s" % bucket.name
             self.run_cbq_query()
-            self.sleep(15,'wait for index')
+            self.sleep(15, 'wait for index')
             self.query = "select count(name) as names from %s where join_day is not null union select count(email) as emails from %s where email is not null" % (bucket.name, bucket.name)
             result = self.run_cbq_query()
             self.assertEqual(actual_result,sorted(result['results']))
@@ -4101,10 +4153,10 @@ class QuerySanityTests(QueryTests):
             expected_result = sorted(expected_result)
             self._verify_results(actual_result, expected_result)
 
-            self.query = "select name, join_date as date from %s let join_date = reverse(tostr(join_yr)) || '-' || reverse(tostr(join_mo)) order by meta().id limit 10" % (bucket.name)
+            self.query = "select name, join_date as date from %s let join_date = reverse(tostr(join_yr)) || '-' || reverse(tostr(join_mo)) order by name, meta().id limit 10" % (bucket.name)
             actual_list2 = self.run_cbq_query()
             actual_result2 = actual_list2['results']
-            expected_result2 = [{u'date': u'1102-01', u'name': u'employee-9'}, {u'date': u'1102-01', u'name': u'employee-9'}, {u'date': u'1102-01', u'name': u'employee-9'}, {u'date': u'1102-01', u'name': u'employee-9'}, {u'date': u'1102-01', u'name': u'employee-9'}, {u'date': u'1102-01', u'name': u'employee-9'}, {u'date': u'0102-11', u'name': u'employee-4'}, {u'date': u'0102-11', u'name': u'employee-4'}, {u'date': u'0102-11', u'name': u'employee-4'}, {u'date': u'0102-11', u'name': u'employee-4'}]
+            expected_result2 = [{u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}, {u'date': u'1102-9', u'name': u'employee-1'}]
             self._verify_results(actual_result2, expected_result2)
 
     def test_letting(self):

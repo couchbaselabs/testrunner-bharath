@@ -9,6 +9,7 @@ import base64
 from remote.remote_util import RemoteMachineShellConnection
 import commands
 import urllib
+import time
 
 class rbacmain:
     AUDIT_ROLE_ASSIGN=8232
@@ -63,7 +64,7 @@ class rbacmain:
     def _set_user_roles(self,user_name,payload):
         rest = RestConnection(self.master_ip)
         if self.auth_type == "ldap" or self.auth_type == "pam":
-            url = "settings/rbac/users/" + user_name
+            url = "settings/rbac/users/external/" + user_name
         elif self.auth_type == 'builtin':
             url = "settings/rbac/users/local/" + user_name
         api = rest.baseUrl + url
@@ -74,7 +75,7 @@ class rbacmain:
     def _delete_user(self,user_name):
         rest = RestConnection(self.master_ip)
         if self.auth_type == 'ldap' or self.auth_type == "pam":
-            url = "/settings/rbac/users/" + user_name
+            url = "/settings/rbac/users/external/" + user_name
         else:
             url = "settings/rbac/users/local/" + user_name
         api = rest.baseUrl + url
@@ -91,6 +92,7 @@ class rbacmain:
         header =  {'Content-Type': 'application/x-www-form-urlencoded',
                 'Authorization': 'Basic %s' % authorization,
                 'Accept': '*/*'}
+        time.sleep(10)
         status, content, header = rest._http_request(api, 'POST', params=param,headers=header)
         return status, content, header
 
@@ -123,7 +125,7 @@ class rbacmain:
         payload = "name=" + user_details[0] + "&roles=" + final_roles
         rbacmain(self.master_ip,self.auth_type)._set_user_roles(user_name=user_details[0],payload=payload)
 
-        master, expected, expected_neg = rbacRoles()._return_permission_set(final_user_role)
+        master, expected, expected_neg = rbacRoles()._return_permission_set(final_user_role)        
 
         if no_bucket_access:
             temp_dict =  expected_neg['permissionSet']
@@ -142,7 +144,7 @@ class rbacmain:
                 permission_set[idx] = permission
         permission_str = ','.join(permission_set)
         status, content, header = rbacmain(self.master_ip)._check_user_permission(user_details[0],user_details[1],permission_str)
-        content = json.loads(content)
+        content = json.loads(content)   
         log.info ("Value of content is {0}".format(content))
         for item in temp_dict.iterkeys():
             if temp_dict[item] != content[item]:

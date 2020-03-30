@@ -144,6 +144,10 @@ class AutoFailoverException(MembaseHttpException):
         self._message = message
 
 
+class InjectFailureException(MembaseHttpException):
+    def __init__(self, message):
+        self.message = message
+
 class DesignDocCreationException(MembaseHttpException):
     def __init__(self, design_doc_name, reason=''):
         self._message = 'Error occured design document %s: %s' % (design_doc_name, reason)
@@ -219,3 +223,6 @@ class XDCRCheckpointException(MembaseHttpException):
 class BucketCompactionException(MembaseHttpException):
     def __init__(self, bucket_name=''):
         self._message = 'Bucket compaction failed: {0}'.format(bucket_name)
+
+class InstallException(Exception):
+    pass

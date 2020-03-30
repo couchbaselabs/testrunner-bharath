@@ -1,13 +1,13 @@
 import copy
 
-from couchbase_helper.documentgenerator import BlobGenerator
-from lib.memcached.helper.data_helper import MemcachedClientHelper
-from membase.api.rest_client import RestConnection
 from membase.helper.cluster_helper import ClusterOperationHelper
-from remote.remote_util import RemoteMachineShellConnection
+from couchbase_helper.documentgenerator import BlobGenerator
+from xdcrnewbasetests import XDCRNewBaseTest
 from xdcrnewbasetests import NodeHelper
 from xdcrnewbasetests import Utility, BUCKET_NAME, OPS
-from xdcrnewbasetests import XDCRNewBaseTest
+from remote.remote_util import RemoteMachineShellConnection
+from lib.memcached.helper.data_helper import MemcachedClientHelper
+from membase.api.rest_client import RestConnection
 
 
 # Assumption that at least 2 nodes on every cluster
@@ -508,7 +508,7 @@ class bidirectional(XDCRNewBaseTest):
         self.sleep(60, "wait before checking logs")
         for node in [self.src_cluster.get_master_node()]+[self.dest_cluster.get_master_node()]:
             count = NodeHelper.check_goxdcr_log(node,
-                        "HttpAuthMech=ScramSha for remote cluster reference remote_cluster")
+                        "HttpAuthMech=ScramSha for remote cluster reference remote_cluster", timeout=60)
             if count <= 0:
                 self.fail("Node {0} does not use SCRAM-SHA authentication".format(node.ip))
             else:
@@ -521,14 +521,14 @@ class bidirectional(XDCRNewBaseTest):
         Search for success log stmtsS
         """
         old_count = NodeHelper.check_goxdcr_log(self.src_cluster.get_master_node(),
-                                                "HttpAuthMech=ScramSha for remote cluster reference remote_cluster")
+                                                "HttpAuthMech=ScramSha for remote cluster reference remote_cluster", timeout=60)
         self.setup_xdcr()
         # modify remote cluster ref to use scramsha
         for remote_cluster in self.src_cluster.get_remote_clusters()+self.dest_cluster.get_remote_clusters():
             remote_cluster.use_scram_sha_auth()
         self.sleep(60, "wait before checking the logs for using scram-sha")
         for node in [self.src_cluster.get_master_node()]+[self.dest_cluster.get_master_node()]:
-            count = NodeHelper.check_goxdcr_log(node, "HttpAuthMech=ScramSha for remote cluster reference remote_cluster")
+            count = NodeHelper.check_goxdcr_log(node, "HttpAuthMech=ScramSha for remote cluster reference remote_cluster", timeout=60)
             if count <= old_count:
                 self.fail("Node {0} does not use SCRAM-SHA authentication".format(node.ip))
             else:

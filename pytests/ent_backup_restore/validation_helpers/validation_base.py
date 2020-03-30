@@ -72,8 +72,12 @@ class BackupRestoreValidationBase:
                 if key not in extra:
                     extra[key] = []
                 extra[key].append(actual[key])
+        """ from 7.0, there are 2 keys with value None """
+        keys_with_value_none = ["exclude_buckets", "include_buckets"]
         for expected_key in expected.keys():
             if expected_key in actual:
+                if expected_key in keys_with_value_none:
+                    continue
                 if not isinstance(expected[expected_key], dict) and not isinstance(expected[expected_key], list):
                     if unicode(expected[expected_key]) != unicode(actual[expected_key]):
                         is_equal = False
@@ -82,14 +86,18 @@ class BackupRestoreValidationBase:
                         not_equal[expected_key]["expected"].append(expected[expected_key])
                         not_equal[expected_key]["actual"].append(actual[expected_key])
                 elif isinstance(expected[expected_key], list):
-                    expected_list = expected[expected_key]
-                    actual_list = actual[expected_key]
-                    if set(expected_list) != set(actual_list):
+                    if actual[expected_key] and isinstance(actual[expected_key][0], dict):
+                        expected_data = expected[expected_key]
+                        actual_data = actual[expected_key]
+                    else:
+                        expected_data = set(expected[expected_key])
+                        actual_data = set(actual[expected_key])
+                    if expected_data != actual_data:
                         is_equal = False
                         if expected_key not in not_equal:
                             not_equal[expected_key] = {"expected": [], "actual": []}
-                        not_equal[expected_key]["expected"].extend(expected_list)
-                        not_equal[expected_key]["actual"].extend(actual_list)
+                        not_equal[expected_key]["expected"].extend(expected[expected_key])
+                        not_equal[expected_key]["actual"].extend(actual[expected_key])
                 elif isinstance(expected[expected_key], dict):
                     return BackupRestoreValidationBase.compare_dictionary(expected[expected_key], actual[expected_key],
                                                                           is_equal, not_equal, extra, not_present)
@@ -143,7 +151,15 @@ class BackupRestoreValidationBase:
             data = complete_map[bucket]
             for key in data:
                 value = data[key]
-                value = ",".join(value.split(',')[4:5])
+                if '"b\'' in value:
+                    value = ",".join(value.split(',')[4:8])
+                else:
+                    value = ",".join(value.split(',')[4:5])
+                value = value.replace('""', '"')
+                if value.startswith('"b\''):
+                    value = value[3:-2]
+                elif value.startswith("b"):
+                    value = value.split(',')[0]
                 data[key] = value
             with open(file_path, 'w') as f:
                 json.dump(data, f)

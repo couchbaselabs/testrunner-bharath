@@ -817,6 +817,7 @@ class StoreMemcachedBinary(Store):
         self.target = target
         self.host_port = (target + ":11211").rsplit(':', 1)[0:2]
         self.host_port[1] = int(self.host_port[1])
+        self.host_port = self.host_port[0].rsplit(':')[0:3]
         self.connect_host_port(self.host_port[0], self.host_port[1], user, pswd, bucket=bucket)
         self.inflight_reinit()
         self.queue = []
@@ -1474,7 +1475,7 @@ def final_report(cur, store, total_time):
 
 
 def run(cfg, cur, protocol, host_port, user, pswd, stats_collector=None,
-        stores=None, ctl=None, heartbeat=0, why="", bucket="default", backups=None):
+        stores=None, ctl=None, heartbeat=0, why="", bucket="default", backups=None, collection=None):
     if isinstance(cfg['min-value-size'], str):
         cfg['min-value-size'] = string.split(cfg['min-value-size'], ",")
     if not isinstance(cfg['min-value-size'], list):

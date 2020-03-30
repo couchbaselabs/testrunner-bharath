@@ -1,22 +1,24 @@
-import json
 import random
-import subprocess
 import time
+import json, subprocess
 
 import logger
 from basetestcase import BaseTestCase
-from couchbase_helper.cluster import Cluster
 from membase.api.rest_client import RestConnection
-from membase.helper.bucket_helper import BucketOperationHelper
-from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
-from security.rbacmain import rbacmain
 from testconstants import LINUX_COUCHBASE_SAMPLE_PATH, \
     WIN_COUCHBASE_SAMPLE_PATH_C, \
     WIN_BACKUP_C_PATH, LINUX_BACKUP_PATH, LINUX_COUCHBASE_LOGS_PATH, \
     WIN_COUCHBASE_LOGS_PATH, WIN_TMP_PATH, WIN_TMP_PATH_RAW, \
-    WIN_BACKUP_PATH, LINUX_ROOT_PATH, LINUX_CB_PATH, \
-    WIN_ROOT_PATH
+    WIN_BACKUP_PATH, LINUX_COUCHBASE_BIN_PATH, LINUX_ROOT_PATH, LINUX_CB_PATH,\
+    MAC_COUCHBASE_BIN_PATH, WIN_COUCHBASE_BIN_PATH, WIN_ROOT_PATH, WIN_CB_PATH
+
+from couchbase_helper.cluster import Cluster
+from security.rbac_base import RbacBase
+from security.rbacmain import rbacmain
+from membase.helper.bucket_helper import BucketOperationHelper
+from membase.helper.cluster_helper import ClusterOperationHelper
+
 
 log = logger.Logger.get_logger()
 
@@ -80,6 +82,7 @@ class CliBaseTest(BaseTestCase):
         self.should_fail = self.input.param("should-fail", False)
         info = self.shell.extract_remote_info()
         self.os_version = info.distribution_version.lower()
+        self.deliverable_type = info.deliverable_type.lower()
         type = info.type.lower()
         self.excluded_commands = self.input.param("excluded_commands", None)
         self.os = 'linux'
@@ -92,9 +95,16 @@ class CliBaseTest(BaseTestCase):
         cmd += '-d "path_config:component_path(bin)."'
         bin_path  = subprocess.check_output(cmd, shell=True)
         if "bin" not in bin_path:
-            self.fail("Check if cb server install on %s" % self.master.ip)
-        else:
-            self.cli_command_path = bin_path.replace('"','') + "/"
+            if "localhost only" in bin_path:
+                self.enable_diag_eval_on_non_local_hosts()
+                bin_path  = subprocess.check_output(cmd, shell=True)
+                if "bin" not in bin_path:
+                    self.fail("Check if cb server install on {0}"
+                                         .format(self.master.ip))
+            else:
+                self.fail("Check if cb server install on {0}"
+                                     .format(self.master.ip))
+        self.cli_command_path = bin_path.replace('"','') + "/"
         self.root_path = LINUX_ROOT_PATH
         self.tmp_path = "/tmp/"
         self.tmp_path_raw = "/tmp/"
@@ -130,6 +140,7 @@ class CliBaseTest(BaseTestCase):
             if win_format in self.cli_command_path:
                 self.cli_command_path = self.cli_command_path.replace(win_format,
                                                                       cygwin_format)
+            self.base_cb_path = WIN_CB_PATH
         if info.distribution_type.lower() == 'mac':
             self.os = 'mac'
         self.full_v, self.short_v, self.build_number = self.shell.get_cbversion(type)
@@ -147,8 +158,9 @@ class CliBaseTest(BaseTestCase):
         self.command_options = self.input.param("command_options", None)
         if self.command_options is not None:
             self.command_options = self.command_options.split(";")
+        self.start_with_cluster = self.input.param("start_with_cluster", True)
         if str(self.__class__).find('couchbase_clitest.CouchbaseCliTest') == -1:
-            if len(self.servers) > 1 and int(self.nodes_init) == 1:
+            if len(self.servers) > 1 and int(self.nodes_init) == 1 and self.start_with_cluster:
                 servers_in = [self.servers[i + 1] for i in range(self.num_servers - 1)]
                 self.cluster.rebalance(self.servers[:1], servers_in, [])
         for bucket in self.buckets:

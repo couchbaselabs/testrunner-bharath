@@ -1,13 +1,12 @@
-import json
-import logging
-
+from logredaction.log_redaction_base import LogRedactionBase
 from couchbase_helper.documentgenerator import BlobGenerator
 from couchbase_helper.query_definitions import SQLDefinitionGenerator
 from couchbase_helper.tuq_generators import JsonGenerator
 from couchbase_helper.tuq_helper import N1QLHelper
 from lib.membase.api.rest_client import RestConnection, RestHelper
-from logredaction.log_redaction_base import LogRedactionBase
 from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+import json
+import logging
 
 log = logging.getLogger()
 
@@ -31,7 +30,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/')+1]
@@ -46,7 +45,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         nonredactFileName = logs_path.split('/')[-1]
         remotepath = logs_path[0:logs_path.rfind('/')+1]
         self.verify_log_files_exist(remotepath=remotepath,
@@ -71,7 +70,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/') + 1]
@@ -117,7 +116,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/') + 1]
@@ -211,7 +210,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/') + 1]
@@ -273,7 +272,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/') + 1]
@@ -335,7 +334,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/') + 1]
@@ -397,7 +396,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/') + 1]
@@ -419,7 +418,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/')+1]
@@ -469,7 +468,7 @@ class LogRedactionTests(LogRedactionBase):
             try:
                 logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
             except KeyError:
-                logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+                logs_path = result["perNode"]["ns_1@cb.local"]["path"]
             redactFileName = logs_path.split('/')[-1]
             nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
             remotepath = logs_path[0:logs_path.rfind('/')+1]
@@ -483,13 +482,13 @@ class LogRedactionTests(LogRedactionBase):
                                   logFileName="ns_server.goxdcr.log")
         finally:
             """ clean up xdcr """
-            rest_dest.delete_bucket()
-            rest_src.remove_all_replications()
-            rest_src.remove_all_remote_clusters()
             if self.interrupt_replication:
                 shell = RemoteMachineShellConnection(self.master)
                 shell.disable_firewall()
                 shell.disconnect()
+            rest_dest.delete_bucket()
+            rest_src.remove_all_replications()
+            rest_src.remove_all_remote_clusters()
 
 ##############################################################################################
 #
@@ -539,7 +538,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/')+1]
@@ -586,7 +585,7 @@ class LogRedactionTests(LogRedactionBase):
         try:
             logs_path = result["perNode"]["ns_1@" + str(self.master.ip)]["path"]
         except KeyError:
-            logs_path = result["perNode"]["ns_1@127.0.0.1"]["path"]
+            logs_path = result["perNode"]["ns_1@cb.local"]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
         remotepath = logs_path[0:logs_path.rfind('/') + 1]

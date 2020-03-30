@@ -1,15 +1,15 @@
-import copy
 from threading import Thread
+import copy
 
 from couchbase_helper.documentgenerator import BlobGenerator
-from lib.memcached.helper.data_helper import MemcachedClientHelper
+from remote.remote_util import RemoteMachineShellConnection
 from membase.api.rest_client import RestConnection
 from memcached.helper.data_helper import LoadWithMcsoda
-from remote.remote_util import RemoteMachineShellConnection
-from scripts.install import InstallerJob
+from xdcrnewbasetests import XDCRNewBaseTest
 from xdcrnewbasetests import NodeHelper
 from xdcrnewbasetests import Utility, BUCKET_NAME, OPS
-from xdcrnewbasetests import XDCRNewBaseTest
+from scripts.install import InstallerJob
+from lib.memcached.helper.data_helper import MemcachedClientHelper
 
 
 # Assumption that at least 2 nodes on every cluster
@@ -440,7 +440,10 @@ class unidirectional(XDCRNewBaseTest):
     # Nodes Crashing Scenarios
     def __kill_processes(self, crashed_nodes=[]):
         for node in crashed_nodes:
-            NodeHelper.kill_erlang(node)
+            try:
+                NodeHelper.kill_erlang(node)
+            except:
+                self.log.info('Could not kill erlang process on node, continuing..')
 
     def __start_cb_server(self, node):
         shell = RemoteMachineShellConnection(node)
@@ -877,7 +880,7 @@ class unidirectional(XDCRNewBaseTest):
         count = NodeHelper.check_goxdcr_log(
                         nodes[0],
                         "Received rollback from DCP stream",
-                        goxdcr_log)
+                        goxdcr_log, timeout=60)
         self.assertGreater(count, 0, "rollback did not happen as expected")
         self.log.info("rollback happened as expected")
 
@@ -916,14 +919,13 @@ class unidirectional(XDCRNewBaseTest):
             self.src_cluster.pause_all_replications()
             self.sleep(30)
             self.src_cluster.resume_all_replications()
-
             self.sleep(self._wait_timeout)
-
             output, error = conn.execute_command("netstat -an | grep " + self.src_cluster.get_master_node().ip
                                                  + ":11210 | wc -l")
             conn.log_command_output(output, error)
             self.log.info("No. of memcached connections in iteration {0}:  {1}".format(i+1, output[0]))
-            self.assertLessEqual(abs(int(output[0]) - int(before)), 5, "Number of memcached connections changed beyond allowed limit")
+            if int(output[0]) - int(before) > 5:
+                self.fail("Number of memcached connections changed beyond allowed limit")
 
         for task in load_tasks:
             task.result()

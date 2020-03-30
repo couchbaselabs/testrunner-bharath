@@ -38,6 +38,9 @@ class QueryTests(BaseTestCase):
         if not self._testMethodName == 'suite_setUp' \
                 and str(self.__class__).find('upgrade_n1qlrbac') == -1 \
                 and str(self.__class__).find('n1ql_upgrade') == -1 \
+                and str(self.__class__).find('N1qlFTSIntegrationTest') == -1 \
+                and str(self.__class__).find('N1qlFTSIntegrationPhase2Test') == -1 \
+                and str(self.__class__).find('N1qlFTSIntegrationPhase2ClusteropsTest') == -1 \
                 and str(self.__class__).find('AggregatePushdownRecoveryClass') == -1:
             self.skip_buckets_handle = True
         else:
@@ -117,16 +120,23 @@ class QueryTests(BaseTestCase):
             self.full_list = self.generate_full_docs_list(self.gens_load)
         if self.input.param("gomaxprocs", None):
             self.configure_gomaxprocs()
-        self.gen_results = TuqGenerators(self.log, self.generate_full_docs_list(self.gens_load))
-        if str(self.__class__).find('QueriesUpgradeTests') == -1 and self.primary_index_created == False:
-            if self.analytics == False:
+        if self.docs_per_day > 0:
+            self.gen_results = TuqGenerators(self.log, self.generate_full_docs_list(self.gens_load))
+        if str(self.__class__).find('QueriesUpgradeTests') == -1:
+            if not self.analytics:
                 self.create_primary_index_for_3_0_and_greater()
         self.log.info('-'*100)
         self.log.info('Temp fix for MB-16888')
         if self.cluster_ops == False:
-           self.shell.execute_command("killall -9 cbq-engine")
-           self.shell.execute_command("killall -9 indexer")
-           self.sleep(30, 'wait for indexer')
+            output, error = self.shell.execute_command("killall -9 cbq-engine")
+            output1, error1 = self.shell.execute_command("killall -9 indexer")
+            if (len(error) == 0 or len(error1) == 0):
+                self.sleep(30, 'wait for indexer')
+            else:
+                if (len(error) > 0):
+                    self.log.info("Error executing shell command: killall -9 cbq-engine! Error - " + str(error[0]))
+                if (len(error1) > 0):
+                    self.log.info("Error executing shell command: killall -9 indexer! Error - " + str(error1[0]))
         self.log.info('-'*100)
         if self.analytics:
             self.setup_analytics()
@@ -375,6 +385,22 @@ class QueryTests(BaseTestCase):
             self.log.info("SUCCESS: Role(s) %s assigned to %s"
                           %(user_role['roles'], user_role['id']))
 
+    def does_test_meet_server_version(self, required_major_version = -1, required_minor_version1 = -1, required_minor_version2 = -1):
+        rest = RestConnection(self.master)
+        versions = rest.get_nodes_versions()
+        server_version = versions[0].split('-')[0]
+        server_version_major = int(server_version.split(".")[0])
+        server_version_minor1 = int(server_version.split(".")[1])
+        server_version_minor2 = int(server_version.split(".")[2])
+
+        if server_version_major >= required_major_version:
+            if server_version_minor1 >= required_minor_version1:
+                if server_version_minor2 >= required_minor_version2:
+                    return True
+
+        return False
+
+
 ##############################################################################################
 #
 #   Query Runner
@@ -386,23 +412,35 @@ class QueryTests(BaseTestCase):
         res_dict['errors'] = []
         for test_name in sorted(test_dict.keys()):
             try:
-                index_list = test_dict[test_name]['indexes']
-                pre_queries = test_dict[test_name]['pre_queries']
-                queries = test_dict[test_name]['queries']
-                post_queries = test_dict[test_name]['post_queries']
-                asserts = test_dict[test_name]['asserts']
-                cleanups = test_dict[test_name]['cleanups']
+                res_dict = dict()
+                res_dict['errors'] = []
+                index_list = test_dict[test_name].get('indexes', [
+                    {'name': '#primary',
+                     'bucket': 'default',
+                     'fields': [],
+                     'state': 'online',
+                     'using': self.index_type.lower(),
+                     'is_primary': True}])
+                pre_queries = test_dict[test_name].get('pre_queries', [])
+                queries = test_dict[test_name].get('queries',[])
+                post_queries = test_dict[test_name].get('post_queries',[])
+                asserts = test_dict[test_name].get('asserts',[])
+                cleanups = test_dict[test_name].get('cleanups',[])
+                server = test_dict[test_name].get('server', None)
 
                 # INDEX STAGE
+                
                 current_indexes = self.get_parsed_indexes()
                 desired_indexes = self.parse_desired_indexes(index_list)
                 desired_index_set = self.make_hashable_index_set(desired_indexes)
                 current_index_set = self.make_hashable_index_set(current_indexes)
 
                 # drop all undesired indexes
+
                 self.drop_undesired_indexes(desired_index_set, current_index_set, current_indexes)
 
                 # create desired indexes
+
                 current_indexes = self.get_parsed_indexes()
                 current_index_set = self.make_hashable_index_set(current_indexes)
                 self.create_desired_indexes(desired_index_set, current_index_set, desired_indexes)
@@ -414,26 +452,35 @@ class QueryTests(BaseTestCase):
                 res_dict['cleanup_res'] = []
 
                 # PRE_QUERIES STAGE
+
                 self.log.info('Running Pre-query Stage')
                 for func in pre_queries:
                     res = func(res_dict)
                     res_dict['pre_q_res'].append(res)
+
                 # QUERIES STAGE
+
                 self.log.info('Running Query Stage')
                 for query in queries:
-                    res = self.run_cbq_query(query)
+                    res = self.run_cbq_query(query, server=server)
                     res_dict['q_res'].append(res)
+
                 # POST_QUERIES STAGE
+
                 self.log.info('Running Post-query Stage')
                 for func in post_queries:
                     res = func(res_dict)
                     res_dict['post_q_res'].append(res)
+
                 # ASSERT STAGE
+
                 self.log.info('Running Assert Stage')
                 for func in asserts:
                     res = func(res_dict)
                     self.log.info('Pass: ' + test_name)
+
                 # CLEANUP STAGE
+
                 self.log.info('Running Cleanup Stage')
                 for func in cleanups:
                     res = func(res_dict)
@@ -444,7 +491,8 @@ class QueryTests(BaseTestCase):
 
             test_results[test_name] = res_dict
 
-        ## reset indexes
+        # reset indexes
+
         self.log.info('Queries completed, restoring previous indexes')
         current_indexes = self.get_parsed_indexes()
         restore_index_set = self.make_hashable_index_set(restore_indexes)
@@ -454,7 +502,8 @@ class QueryTests(BaseTestCase):
         current_index_set = self.make_hashable_index_set(current_indexes)
         self.create_desired_indexes(restore_index_set, current_index_set, restore_indexes)
 
-        ## print errors
+        # print errors
+
         errors = [error for key in test_results.keys() for error in test_results[key]['errors']]
         has_errors = False
         if errors != []:
@@ -467,22 +516,65 @@ class QueryTests(BaseTestCase):
             self.log.error(error_string)
 
         # trigger failure
+
         self.assertEqual(has_errors, False)
 
-    def is_index_present(self, bucket_name, index_name, fields_set, using):
-        desired_index = (index_name, bucket_name,
-                         frozenset([field.split()[0].replace('`', '').replace('(', '').replace(')', '') for field in fields_set]),
-                         "online", using)
+    def wait_for_all_indexers_ready(self, indexer_port=9102, retries=60, delay=1):
+        self.log.info("waiting for all indexers to be in active state...")
+        indexer_nodes = self.get_nodes_from_services_map(service_type="index", get_all_nodes=True)
+        i=0
+        for node in indexer_nodes:
+            self.log.info("waiting for indexer on node: " + str(node.ip))
+            node_rest = RestConnection(node)
+            indexer_url = "http://" + str(node.ip) + ":" + str(indexer_port) + "/"
+            node_ready = False
+
+            while not node_ready:
+                if i >= retries:
+                    raise Exception('indexer was not found in Active state within ' + str(retries) + ' retries for node: ' + str(node.ip))
+                indexer_stats = node_rest.get_indexer_stats(baseUrl=indexer_url)
+                self.log.info("iteration " + str(i) + " of " + str(retries))
+                self.log.info("indexer state: " + str(indexer_stats['indexer_state']))
+                if indexer_stats['indexer_state'] == "Active":
+                    node_ready = True
+                i+=1
+                self.sleep(delay)
+        self.log.info("indexers ready")
+
+    def is_index_present(self, bucket_name, index_name, fields_set=None, using=None, status="online"):
         query_response = self.run_cbq_query("SELECT * FROM system:indexes")
-        current_indexes = [(i['indexes']['name'],
-                            i['indexes']['keyspace_id'],
-                            frozenset([key.replace('`', '').replace('(', '').replace(')', '')
-                                       for key in i['indexes']['index_key']]),
-                            i['indexes']['state'],
-                            i['indexes']['using']) for i in query_response['results']]
+        if fields_set is None and using is None:
+            if status is "any":
+                desired_index = (index_name, bucket_name)
+                current_indexes = [(i['indexes']['name'],
+                                    i['indexes']['keyspace_id']) for i in query_response['results']]
+            else:
+                desired_index = (index_name, bucket_name, status)
+                current_indexes = [(i['indexes']['name'],
+                                i['indexes']['keyspace_id'],
+                                i['indexes']['state']) for i in query_response['results']]
+        else:
+            if status is "any":
+                desired_index = (index_name, bucket_name, frozenset([field for field in fields_set]), using)
+                current_indexes = [(i['indexes']['name'],
+                                    i['indexes']['keyspace_id'],
+                                    frozenset([(key.replace('`', '').replace('(', '').replace(')', '').replace('meta.id', 'meta().id'), j)
+                                               for j, key in enumerate(i['indexes']['index_key'], 0)]),
+                                    i['indexes']['using']) for i in query_response['results']]
+            else:
+                desired_index = (index_name, bucket_name, frozenset([field for field in fields_set]), status, using)
+                current_indexes = [(i['indexes']['name'],
+                                i['indexes']['keyspace_id'],
+                                frozenset([(key.replace('`', '').replace('(', '').replace(')', '').replace('meta.id', 'meta().id'), j)
+                                           for j, key in enumerate(i['indexes']['index_key'], 0)]),
+                                i['indexes']['state'],
+                                i['indexes']['using']) for i in query_response['results']]
+
         if desired_index in current_indexes:
             return True
         else:
+            self.log.info("waiting for: \n" + str(desired_index) + "\n")
+            self.log.info("current indexes: \n" + str(current_indexes) + "\n")
             return False
 
     def wait_for_all_indexes_online(self):
@@ -490,18 +582,64 @@ class QueryTests(BaseTestCase):
         for index in cur_indexes:
             self._wait_for_index_online(index['bucket'], index['name'])
 
+    def wait_for_index_status_bulk(self, bucket_index_status_list):
+        for item in bucket_index_status_list:
+            bucket = item[0]
+            index_name = item[1]
+            index_status = item[2]
+            self.wait_for_index_status(bucket, index_name, index_status)
+
+    def drop_index(self, bucket, index):
+        self.run_cbq_query("drop index `%s`.`%s`" % (bucket, index))
+        self.wait_for_index_drop(bucket, index)
+
+    def drop_primary_index(self, bucket, index):
+        self.run_cbq_query("drop primary index on `%s`" % (bucket))
+        self.wait_for_index_drop(bucket, index)
+
+    def drop_index_safe(self, bucket_name, index_name, is_primary=False):
+        if self.is_index_present(bucket_name=bucket_name, index_name=index_name):
+            if is_primary:
+                self.drop_primary_index(bucket_name, index_name)
+            else:
+                self.drop_index(bucket_name, index_name)
+            self.wait_for_index_drop(bucket_name, index_name)
+
+    def drop_all_indexes(self, bucket=None, leave_primary=True):
+        current_indexes = self.get_parsed_indexes()
+        if bucket is not None:
+            current_indexes = [index for index in current_indexes if index['bucket'] == bucket]
+        if leave_primary:
+            current_indexes = [index for index in current_indexes if index['is_primary'] is False]
+        for index in current_indexes:
+            bucket = index['bucket']
+            index_name = index['name']
+            self.run_cbq_query("drop index %s.%s" % (bucket, index_name))
+        for index in current_indexes:
+            bucket = index['bucket']
+            index_name = index['name']
+            self.wait_for_index_drop(bucket, index_name)
+
+    def wait_for_index_status(self, bucket_name, index_name, status):
+        self.with_retry(lambda: self.is_index_present(bucket_name, index_name, status=status), eval=True, delay=1, tries=30)
+
     def wait_for_index_present(self, bucket_name, index_name, fields_set, using):
         self.with_retry(lambda: self.is_index_present(bucket_name, index_name, fields_set, using), eval=True, delay=1, tries=30)
 
-    def wait_for_index_drop(self, bucket_name, index_name, fields_set, using):
-        self.with_retry(lambda: self.is_index_present(bucket_name, index_name, fields_set, using), eval=False, delay=1, tries=30)
+    def wait_for_index_drop(self, bucket_name, index_name, fields_set=None, using=None):
+        self.with_retry(lambda: self.is_index_present(bucket_name, index_name, fields_set=fields_set, using=using, status="any"), eval=False, delay=1, tries=30)
+
+    def get_index_count(self, bucket, state):
+        results = self.run_cbq_query("SELECT  count(*) as num_indexes FROM system:indexes WHERE keyspace_id = '%s' and state = '%s'" % (bucket, state))
+        num_indexes = results['results'][0]['num_indexes']
+        return num_indexes
 
     def get_parsed_indexes(self):
         query_response = self.run_cbq_query("SELECT * FROM system:indexes")
         current_indexes = [{'name': i['indexes']['name'],
                             'bucket': i['indexes']['keyspace_id'],
-                            'fields': frozenset([key.replace('`', '').replace('(', '').replace(')', '')
-                                                 for key in i['indexes']['index_key']]),
+                            'fields': frozenset([(key.replace('`', '').replace('(', '').replace(')', '').replace('meta.id', 'meta().id'), j)
+                                                 for j, key in enumerate(i['indexes']['index_key'], 0)]),
                             'state': i['indexes']['state'],
                             'using': i['indexes']['using'],
                             'where': i['indexes'].get('condition', ''),
@@ -511,7 +649,7 @@ class QueryTests(BaseTestCase):
     def parse_desired_indexes(self, index_list):
         desired_indexes = [{'name': index['name'],
                             'bucket': index['bucket'],
-                            'fields': frozenset([field.split()[0] for field in index['fields']]),
+                            'fields': frozenset([field for field in index['fields']]),
                             'state': index['state'],
                             'using': index['using'],
                             'where': index.get('where', ''),
@@ -525,7 +663,8 @@ class QueryTests(BaseTestCase):
         name = index['name']
         keyspace = index['bucket']
         fields = index['fields']
-        joined_fields = ', '.join(fields)
+        sorted_fields = [item[0] for item in tuple(sorted(fields, key=lambda item: item[1]))]
+        joined_fields = ', '.join(sorted_fields)
         using = index['using']
         is_primary = index['is_primary']
         where = index['where']
@@ -563,11 +702,13 @@ class QueryTests(BaseTestCase):
 #
 #   COMMON FUNCTIONS
 ##############################################################################################
-    def ExplainPlanHelper(self, res):
+    def ExplainPlanHelper(self, res, debug=False):
         try:
             rv = res["results"][0]["plan"]
         except:
             rv = res["results"][0]
+        if debug:
+            print(rv)
         return rv
 
     def PreparePlanHelper(self, res):
@@ -703,21 +844,38 @@ class QueryTests(BaseTestCase):
                 ready = False
         return ready
 
+    def bucket_deleted(self, bucket_name):
+        query_response = self.run_cbq_query("select COUNT(*) from system:keyspaces where name == " + bucket_name)
+        count = query_response['results'][0]['$1']
+        if count != 0:
+            self.log.info("Buckets still exists: " + bucket_name)
+            return False
+        if count == 0:
+            return True
+
     def wait_for_buckets_status(self, bucket_status_map, delay, retries):
         self.with_retry(lambda: self.buckets_status_ready(bucket_status_map), delay=delay, tries=retries)
 
     def wait_for_bucket_docs(self, bucket_doc_map, delay, retries):
         self.with_retry(lambda: self.buckets_docs_ready(bucket_doc_map), delay=delay, tries=retries)
 
-    def with_retry(self, func, eval=True, delay=5, tries=10, func_params=None):
+    def wait_for_bucket_delete(self, bucket_name, delay, retries):
+        self.with_retry(lambda: self.bucket_deleted(bucket_name), delay=delay, tries=retries)
+
+    def with_retry(self, func, eval=None, delay=5, tries=10, func_params=None):
         attempts = 0
         while attempts < tries:
             attempts = attempts + 1
-            res = func()
-            if res == eval:
-                return res
-            else:
-                self.sleep(delay, 'incorrect results, sleeping for %s' % delay)
+            try:
+                res = func()
+                if eval is None:
+                    return res
+                elif res == eval:
+                    return res
+                else:
+                    self.sleep(delay, 'incorrect results, sleeping for %s' % delay)
+            except Exception as ex:
+                self.sleep(delay, 'exception returned: %s \n sleeping for %s' % (ex, delay))
         raise Exception('timeout, invalid results: %s' % res)
 
     def negative_common_body(self, queries_errors={}):
@@ -747,6 +905,25 @@ class QueryTests(BaseTestCase):
                 else:
                     self.fail("There were no errors. Error expected: %s" % error)
 
+    def get_bucket_from_name(self, bucket_name):
+        for bucket in self.buckets:
+            if bucket.name == bucket_name:
+                return bucket
+        return None
+
+    def delete_bucket(self, bucket):
+        self.cluster.bucket_delete(self.master, bucket=bucket, timeout=180000)
+
+    def ensure_bucket_does_not_exist(self, bucket_name, using_rest=False):
+        bucket = self.get_bucket_from_name(bucket_name)
+        if bucket:
+            if using_rest:
+                rest = RestConnection(self.master)
+                rest.delete_bucket(bucket_name)
+            else:
+                self.delete_bucket(bucket)
+        self.wait_for_bucket_delete(bucket_name, 5, 10)
+
     def prepared_common_body(self, server=None):
         self.isprepared = True
         result_no_prepare = self.run_cbq_query(server=server)['results']
@@ -771,7 +948,23 @@ class QueryTests(BaseTestCase):
               % (result_no_prepare[:100], result_no_prepare[-100:], result_with_prepare[:100], result_with_prepare[-100:])
         self.assertTrue(sorted(result_no_prepare) == sorted(result_with_prepare), msg)
 
-    def run_cbq_query(self, query=None, min_output_size=10, server=None, query_params={}, is_prepared=False, encoded_plan=None):
+    def run_cbq_query_curl(self, query=None, server=None):
+        if query is None:
+            query = self.query
+        if server is None:
+            server = self.master
+
+        shell = RemoteMachineShellConnection(server)
+        cmd = (self.curl_path+" -u "+self.master.rest_username+":"+self.master.rest_password+" http://"+server.ip+":"+server.n1ql_port+"/query/service -d " \
+                  "statement="+query)
+
+        output, error = shell.execute_command(cmd)
+        json_output_str = ''
+        for s in output:
+            json_output_str += s
+        return json.loads(json_output_str)
+
+    def run_cbq_query(self, query=None, min_output_size=10, server=None, query_params={}, is_prepared=False, encoded_plan=None, username=None, password=None):
         if query is None:
             query = self.query
         if server is None:
@@ -780,8 +973,9 @@ class QueryTests(BaseTestCase):
                 server = self.tuq_client
         cred_params = {'creds': []}
         rest = RestConnection(server)
-        username = rest.username
-        password = rest.password
+        if username is None and password is None:
+            username = rest.username
+            password = rest.password
         cred_params['creds'].append({'user': username, 'pass': password})
         for bucket in self.buckets:
             if bucket.saslPassword:
@@ -843,9 +1037,13 @@ class QueryTests(BaseTestCase):
                 query = query + ";"
                 for bucket in self.buckets:
                     query = query.replace(bucket.name, bucket.name + "_shadow")
-                result = RestConnection(self.cbas_node).execute_statement_on_cbas(query,
+                result1 = RestConnection(self.cbas_node).execute_statement_on_cbas(query,
                                                                                   "immediate")
-                result = json.loads(result)
+                try:
+                    result = json.loads(result1)
+                except Exception, ex:
+                    self.log.error("CANNOT LOAD QUERY RESULT IN JSON: %s" % ex.message)
+                    self.log.error("INCORRECT DOCUMENT IS: " + str(result1))
             else:
                 result = rest.query_tool(query, self.n1ql_port, query_params=query_params,
                                          is_prepared=is_prepared, named_prepare=self.named_prepare,
@@ -871,7 +1069,11 @@ class QueryTests(BaseTestCase):
                         output1 = '{%s' % output
                     else:
                         output1 = output
-                    result = json.loads(output1)
+                    try:
+                        result = json.loads(output1)
+                    except Exception, ex:
+                        self.log.error("CANNOT LOAD QUERY RESULT IN JSON: %s" % ex.message)
+                        self.log.error("INCORRECT DOCUMENT IS: "+str(output1))
         if isinstance(result, str) or 'errors' in result:
             raise CBQError(result, server.ip)
         if 'metrics' in result:
@@ -1032,7 +1234,6 @@ class QueryTests(BaseTestCase):
             return False
         return True
 
-
     def check_missing_and_extra(self, actual, expected):
         missing, extra = [], []
         for item in actual:
@@ -1103,27 +1304,13 @@ class QueryTests(BaseTestCase):
             return
         if self.flat_json:
             return
-        self.sleep(30, 'Sleep for some time prior to index creation')
-        rest = RestConnection(self.master)
-        versions = rest.get_nodes_versions()
-        if int(versions[0].split('.')[0]) > 2:
-            for bucket in self.buckets:
-                if self.primary_indx_drop:
-                    self.log.info("Dropping primary index for %s ..." % bucket.name)
-                    self.query = "DROP PRIMARY INDEX ON %s using %s" % (bucket.name, self.primary_indx_type)
-                    self.sleep(6, 'Sleep for some time after index drop')
-                self.query = "select * from system:indexes where name='#primary' and keyspace_id = %s" % bucket.name
-                res = self.run_cbq_query(self.query)
-                if res['metrics']['resultCount'] == 0:
-                    self.query = "CREATE PRIMARY INDEX ON %s USING %s" % (bucket.name, self.primary_indx_type)
-                    self.log.info("Creating primary index for %s ..." % bucket.name)
-                    try:
-                        self.run_cbq_query()
-                        self.primary_index_created = True
-                        if self.primary_indx_type.lower() == 'gsi':
-                            self._wait_for_index_online(bucket.name, '#primary')
-                    except Exception, ex:
-                        self.log.info(str(ex))
+        for bucket in self.buckets:
+            try:
+                self.with_retry(lambda: self.ensure_primary_indexes_exist(), eval=None, delay=1, tries=30)
+                self.primary_index_created = True
+                self._wait_for_index_online(bucket.name, '#primary')
+            except Exception, ex:
+                self.log.info(str(ex))
 
     def ensure_primary_indexes_exist(self):
         query_response = self.run_cbq_query("SELECT * FROM system:keyspaces")
@@ -1157,9 +1344,22 @@ class QueryTests(BaseTestCase):
                 if item['indexes']['keyspace_id'] == bucket_name:
                     if item['indexes']['state'] == "online":
                         return
-            self.sleep(5, 'index is pending or not in the list. sleeping... (%s)' % [item['indexes'] for item in res['results']])
+            self.sleep(1, 'index is pending or not in the list. sleeping... (%s)' % [item['indexes'] for item in res['results']])
         raise Exception('index %s is not online. last response is %s' % (index_name, res))
 
+    def _debug_fts_request(self, request=""):
+        cmd = "curl -XPOST -H \"Content-Type: application/json\" -u "+self.username+":"+self.password+" " \
+                            "http://"+self.master.ip+":8094/api/index/idx_beer_sample_fts/query -d " + request
+
+
+        shell = RemoteMachineShellConnection(self.master)
+
+        output, error = shell.execute_command(cmd)
+        json_output_str = ''
+        for s in output:
+            json_output_str += s
+        result =  json.loads(json_output_str)
+        return result
 
 ##############################################################################################
 #
@@ -1244,6 +1444,20 @@ class QueryTests(BaseTestCase):
                     'select * from system:completed_requests where requestId  =  "%s"' % requestId)
                 self.assertTrue(result['metrics']['resultCount'] == 0)
 
+    def debug_query(self, query, expected_result, result, function_name):
+        print("### "+function_name+" #### QUERY ::" + str(query) + "::")
+        print("### "+function_name+" #### EXPECTED RESULT ::" + str(expected_result) + "::")
+        print("### "+function_name+" #### FULL RESULT ::"+str(result)+"::")
+
+    def normalize_result(self, result):
+        if len(result['results'][0]) == 0:
+            return 'missing'
+        return result['results'][0]['$1']
+
+    def null_to_none(self, s):
+        if s.lower() == 'null':
+            return None
+        return s
 
 ##############################################################################################
 #
@@ -1948,7 +2162,7 @@ class QueryTests(BaseTestCase):
         elif role in ["select(default)", "query_select(default)", "select(standard_bucket0)", "query_select(standard_bucket0)"]:
             self.assertTrue(str(res).find("'code': 13014") != -1)
         elif role in ["insert(default)", "query_insert(default)", "query_update(default)", "query_delete(default)"]:
-            self.assertTrue(res['status'] == 'stopped')
+            self.assertTrue(res['status'] == 'fatal')
         else:
             self.assertTrue(res['status'] == 'success')
 
@@ -2142,9 +2356,12 @@ class QueryTests(BaseTestCase):
         res = self.curl_with_roles(self.query)
         role_list = ["query_delete(default)", "query_delete(standard_bucket0)", "delete(default)", "bucket_full_access(default)"]
         self.assertNotEquals(res['status'], 'success') if role in role_list else self.assertTrue(res['status'] == 'success')
-        self.query = 'delete from system:active_requests'
-        res = self.curl_with_roles(self.query)
-        self.assertTrue(res['status'] == 'stopped')
+        try:
+            self.query = 'delete from system:active_requests'
+            res = self.curl_with_roles(self.query)
+            self.assertTrue(res['status'] == 'stopped')
+        except:
+            self.assertTrue(res['status'] == 'fatal')
         if role not in role_list:
             self.query = 'delete from system:prepareds'
             res = self.curl_with_roles(self.query)
@@ -2195,7 +2412,9 @@ class QueryTests(BaseTestCase):
                 actual_result_list.append(actual_result['results'][i]['default']['_id'])
             elif test in ["test_desc_isReverse_ascOrder"]:
                 actual_result_list.append(actual_result['results'][i]['id'])
-        self.assertEqual(actual_result_list, expected_result_list)
+        if test != "do_not_test_against_hardcode":
+            self.assertEqual(actual_result_list, expected_result_list)
+
         query = query.replace("from default", "from default use index(`#primary`)")
         expected_result = self.run_cbq_query(query)
         self.assertEqual(actual_result['results'], expected_result['results'])
@@ -2827,7 +3046,7 @@ class QueryTests(BaseTestCase):
         msg = "Results are incorrect. Actual num %s. Expected num: %s.\n" % (len(actual_result), len(expected_result))
         self.assertEquals(len(actual_result), len(expected_result), msg)
         msg = "Results are incorrect.\n Actual first and last 100:  %s.\n ... \n %s Expected first and last 100: %s." \
-              "\n  ... \n %s" % (actual_result[:100],actual_result[-100:],expected_result[:100],expected_result[-100:])
+              "\n  ... \n %s" % (actual_result[:100], actual_result[-100:], expected_result[:100], expected_result[-100:])
         self.assertTrue(sorted(actual_result) == sorted(expected_result), msg)
 
 ##############################################################################################
@@ -2903,9 +3122,35 @@ class QueryTests(BaseTestCase):
 
 ##############################################################################################
 #
-#   tuq_xattrs.py helpers
+#   tuq_cluster_ops helpers
 #
 ##############################################################################################
+
+    def run_queries_until_timeout(self,timeout=300):
+        self.log.info("Running queries for %s seconds to ensure no issues" % timeout)
+        init_time = time.time()
+        check = False
+        next_time = init_time
+        while not check:
+            try:
+                result = self.run_cbq_query("select * from default limit 10000")
+                time.sleep(2)
+                self.log.info("Query Succeeded")
+                check = next_time - init_time > timeout
+                next_time = time.time()
+                self.fail = False
+            except Exception as e:
+                self.log.error("Query Failed")
+                self.log.error(str(e))
+                time.sleep(2)
+                check = next_time - init_time > timeout
+                if next_time - init_time > timeout:
+                    self.log.error("Queries are failing after the interval, queries should have recovered by now!")
+                    self.fail = True
+                next_time = time.time()
+
+        return
+
 
 ##############################################################################################
 #

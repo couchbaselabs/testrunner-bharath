@@ -345,12 +345,12 @@ class BucketOperationHelper():
         msg = "waiting for memcached bucket : {0} in {1} to accept set ops"
         log.info(msg.format(bucket, node.ip))
         all_vbuckets_ready = BucketOperationHelper.wait_for_vbuckets_ready_state(node,
-                                                                                 bucket, timeout_in_seconds, log_msg)
+                                                bucket, timeout_in_seconds, log_msg)
         # return (counter == vbucket_count) and all_vbuckets_ready
         return all_vbuckets_ready
 
     @staticmethod
-    def verify_data(server, keys, value_equal_to_key, verify_flags, test, debug=False, bucket="default"):
+    def verify_data(server, keys, value_equal_to_key, verify_flags, test, debug=False, bucket="default", collection=None):
         log = logger.Logger.get_logger()
         log_error_count = 0
         # verify all the keys
@@ -365,7 +365,7 @@ class BucketOperationHelper():
                 index += 1
                 vbucketId = crc32.crc32_hash(key) & (vbucket_count - 1)
                 client.vbucketId = vbucketId
-                flag, keyx, value = client.get(key=key)
+                flag, keyx, value = client.get(key=key, collection=collection)
                 if value_equal_to_key:
                     test.assertEquals(value, key, msg='values dont match')
                 if verify_flags:
@@ -389,7 +389,7 @@ class BucketOperationHelper():
         return all_verified
 
     @staticmethod
-    def keys_dont_exist(server, keys, bucket):
+    def keys_dont_exist(server, keys, bucket, collection=None):
         log = logger.Logger.get_logger()
         #verify all the keys
         client = MemcachedClientHelper.direct_client(server, bucket)
@@ -399,7 +399,7 @@ class BucketOperationHelper():
             try:
                 vbucketId = crc32.crc32_hash(key) & (vbucket_count - 1)
                 client.vbucketId = vbucketId
-                client.get(key=key)
+                client.get(key=key, collection=collection)
                 client.close()
                 log.error('key {0} should not exist in the bucket'.format(key))
                 return False
@@ -419,7 +419,7 @@ class BucketOperationHelper():
         return keys_chunks
 
     @staticmethod
-    def keys_exist_or_assert_in_parallel(keys, server, bucket_name, test, concurrency=2):
+    def keys_exist_or_assert_in_parallel(keys, server, bucket_name, test, concurrency=2, collection=None):
         log = logger.Logger.get_logger()
         verification_threads = []
         queue = Queue.Queue()
@@ -427,7 +427,7 @@ class BucketOperationHelper():
             keys_chunk = BucketOperationHelper.chunks(keys, len(keys) / concurrency)
             t = Thread(target=BucketOperationHelper.keys_exist_or_assert,
                        name="verification-thread-{0}".format(i),
-                       args=(keys_chunk.get(i), server, bucket_name, test, queue))
+                       args=(keys_chunk.get(i), server, bucket_name, test, queue, collection))
             verification_threads.append(t)
         for t in verification_threads:
             t.start()
@@ -441,7 +441,7 @@ class BucketOperationHelper():
         return True
 
     @staticmethod
-    def keys_exist_or_assert(keys, server, bucket_name, test, queue=None):
+    def keys_exist_or_assert(keys, server, bucket_name, test, queue=None, collection=None):
         # we should try out at least three times
         log = logger.Logger.get_logger()
         # verify all the keys
@@ -458,7 +458,7 @@ class BucketOperationHelper():
             keys_not_verified = []
             for key in keys_left_to_verify:
                 try:
-                    client.get(key=key)
+                    client.get(key=key, collection=collection)
                 except mc_bin_client.MemcachedError as error:
                     keys_not_verified.append(key)
                     if log_count < 100:
@@ -491,7 +491,7 @@ class BucketOperationHelper():
     @staticmethod
     def load_some_data(serverInfo,
                    fill_ram_percentage=10.0,
-                   bucket_name='default'):
+                   bucket_name='default',collection=None):
         log = logger.Logger.get_logger()
         if fill_ram_percentage <= 0.0:
             fill_ram_percentage = 5.0
@@ -518,7 +518,7 @@ class BucketOperationHelper():
             vbucketId = crc32.crc32_hash(key) & (vbucket_count - 1)
             client.vbucketId = vbucketId
             try:
-                client.set(key, 0, 0, key)
+                client.set(key, 0, 0, key,collection=collection)
                 inserted_keys.append(key)
             except mc_bin_client.MemcachedError as error:
                 log.error(error)

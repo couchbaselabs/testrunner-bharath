@@ -3,8 +3,7 @@ import os
 import subprocess
 
 from ent_backup_restore.enterprise_backup_restore_base import EnterpriseBackupRestoreBase, Backupset
-from ent_backup_restore.validation_helpers.backup_restore_validations \
-    import BackupRestoreValidations
+from ent_backup_restore.validation_helpers.backup_restore_validations import BackupRestoreValidations
 from lib import testconstants
 from lib.couchbase_helper.tuq_helper import N1QLHelper
 from lib.membase.api.rest_client import RestConnection
@@ -12,10 +11,8 @@ from pytests.eventing.eventing_base import EventingBaseTest
 from pytests.eventing.eventing_constants import EXPORTED_FUNCTION
 from pytests.eventing.eventing_constants import HANDLER_CODE
 from remote.remote_util import RemoteMachineShellConnection
-from testconstants import COUCHBASE_DATA_PATH, WIN_COUCHBASE_DATA_PATH_RAW, \
-    WIN_TMP_PATH_RAW, \
-    LINUX_ROOT_PATH, WIN_ROOT_PATH, \
-    WIN_TMP_PATH, STANDARD_BUCKET_PORT
+from testconstants import COUCHBASE_DATA_PATH, WIN_COUCHBASE_DATA_PATH_RAW, WIN_TMP_PATH_RAW, LINUX_ROOT_PATH, \
+    WIN_ROOT_PATH, WIN_TMP_PATH, STANDARD_BUCKET_PORT
 from upgrade.newupgradebasetest import NewUpgradeBaseTest
 
 log = logging.getLogger()
@@ -74,6 +71,8 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
         self.backupset.restore_cluster_host = self.servers[1]
         self.backupset.restore_cluster_host_username = self.servers[1].rest_username
         self.backupset.restore_cluster_host_password = self.servers[1].rest_password
+        self.num_shards = self.input.param("num_shards", None)
+        self.debug_logs = self.input.param("debug-logs", False)
         cmd = 'curl -g %s:8091/diag/eval -u Administrator:password ' % self.master.ip
         cmd += '-d "path_config:component_path(bin)."'
         bin_path = subprocess.check_output(cmd, shell=True)
@@ -193,6 +192,9 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
         self.should_fail = self.input.param("should-fail", False)
         self.restore_compression_mode = self.input.param("restore-compression-mode", None)
         self.enable_firewall = False
+        self.vbuckets_filter_no_data = False
+        self.test_fts = self.input.param("test_fts", False)
+        self.restore_should_fail = self.input.param("restore_should_fail", False)
 
     def tearDown(self):
         super(EventingTools, self).tearDown()
@@ -215,11 +217,13 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
         self.backup_create_validate()
         self.backup_cluster()
         self.backup_list()
+        self.cluster.rebalance([self.servers[0]], [self.servers[1]], [], services=["eventing"])
         try:
             self.backup_restore_validate()
         except Exception as ex:
             if "Extra elements found in the actual metadata Data" not in str(ex):
                 self.fail("restore failed : {0}".format(str(ex)))
+        self.cluster.rebalance([self.servers[0]], [], [self.servers[1]])
 
     def test_eventing_lifecycle_with_couchbase_cli(self):
         # load some data in the source bucket
@@ -250,9 +254,26 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
                                      "SUCCESS: Events imported",
                                      file_name="Function_396275055_test_export_function.json")
         # deploy the function
-        self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "deploy",
-                                     "SUCCESS: Function deployed")
+        self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "deploy --boundary from-everything",
+                                     "SUCCESS: Request to deploy the function was accepted")
+        self.wait_for_handler_state("Function_396275055_test_export_function","deployed")
+        # verify result
         self.verify_eventing_results("Function_396275055_test_export_function", self.docs_per_day * 2016,
+                                     skip_stats_validation=True)
+        # pause function
+        self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function",
+                                     "pause",
+                                     "SUCCESS: Function was paused")
+        self.wait_for_handler_state("Function_396275055_test_export_function", "paused")
+        # delete all documents
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size, op_type='delete')
+        # resume function
+        self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function",
+                                     "resume", "SUCCESS: Function was resumed")
+        self.wait_for_handler_state("Function_396275055_test_export_function", "deployed")
+        # verify result
+        self.verify_eventing_results("Function_396275055_test_export_function", 0,
                                      skip_stats_validation=True)
         # list the function
         self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "list",
@@ -266,17 +287,29 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
         # check if the exported file exists
         if not exists:
             self.fail("file does not exist after export")
+        # export-all functions
+        self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "export-all",
+                                     "SUCCESS: All functions exported to: export_all.json",
+                                    file_name="export_all.json", name=False)
+        # check if the exported function actually exists
+        exists = remote_client.file_exists("/root", "export_all.json")
+        # check if the exported file exists
+        if not exists:
+            self.fail("file does not exist after export-all")
         # undeploy the function
         self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "undeploy",
-                                     "SUCCESS: Function undeployed")
+                                     "SUCCESS: Request to undeploy the function was accepted")
+        self.wait_for_handler_state("Function_396275055_test_export_function","undeployed")
         # delete the function
         self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "delete",
-                                     "SUCCESS: Function deleted")
+                                     "SUCCESS: Request to delete the function was accepted")
 
-    def _couchbase_cli_eventing(self, host, function_name, operation, result, file_name=None):
+    def _couchbase_cli_eventing(self, host, function_name, operation, result, file_name=None, name=True):
         remote_client = RemoteMachineShellConnection(host)
-        cmd = "couchbase-cli eventing-function-setup -c {0} -u {1} -p {2} --{3} --name {4}".format(
-            host.ip, host.rest_username, host.rest_password, operation, function_name)
+        cmd = "couchbase-cli eventing-function-setup -c {0} -u {1} -p {2} --{3} ".format(
+            host.ip, host.rest_username, host.rest_password, operation)
+        if name:
+            cmd += " --name {0}".format(function_name)
         if file_name:
             cmd += " --file {0}".format(file_name)
         command = "{0}/{1}".format(self.cli_command_location, cmd)

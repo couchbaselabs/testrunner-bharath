@@ -1,12 +1,18 @@
-import json
-import time
-import traceback
+import sys
+import urllib2
 import urllib
-from optparse import OptionParser
-
 import httplib2
+import json
+import string
+import time
+from optparse import OptionParser
+import traceback
+
+from couchbase import Couchbase
 from couchbase.bucket import Bucket
+from couchbase.exceptions import CouchbaseError
 from couchbase.n1ql import N1QLQuery
+
 
 # takes an ini template as input, standard out is populated with the server pool
 # need a descriptor as a parameter
@@ -16,7 +22,7 @@ from couchbase.n1ql import N1QLQuery
 POLL_INTERVAL = 60
 SERVER_MANAGER = '172.23.105.177:8081'
 TEST_SUITE_DB = '172.23.105.177'
-
+TIMEOUT = 60
 
 def getNumberOfServers( iniFile):
     f = open(iniFile)
@@ -54,13 +60,24 @@ def main():
     parser.add_option('-u','--url', dest='url', default=None)
     parser.add_option('-j','--jenkins', dest='jenkins', default=None)
     parser.add_option('-b','--branch', dest='branch', default='master')
+    parser.add_option('-g','--cherrypick', dest='cherrypick', default=None)
+    # whether to use production version of a test_suite_executor or test version
+    parser.add_option('-l','--launch_job', dest='launch_job', default='test_suite_executor')
+    parser.add_option('-f','--jenkins_server_url', dest='jenkins_server_url', default='http://qa.sc.couchbase.com')
+    parser.add_option('-m','--retry_params', dest='retry_params', default='')
+    parser.add_option('-i','--retries', dest='retries', default='1')
+    parser.add_option('-k','--include_tests', dest='include_tests', default=None)
+    parser.add_option('-x','--server_manager', dest='SERVER_MANAGER',
+                      default='172.23.105.177:8081')
+    parser.add_option('-z', '--timeout', dest='TIMEOUT', default = '60')
+
+    # set of parameters for testing purposes.
+    #TODO: delete them after successful testing
 
     # dashboardReportedParameters is of the form param1=abc,param2=def
     parser.add_option('-d','--dashboardReportedParameters', dest='dashboardReportedParameters', default=None)
 
     options, args = parser.parse_args()
-
-
 
     print 'the run is', options.run
     print 'the  version is', options.version
@@ -71,11 +88,19 @@ def main():
     print 'os', options.os
     #print 'url', options.url
 
-
     print 'url is', options.url
+    print 'cherrypick command is', options.cherrypick
 
     print 'the reportedParameters are', options.dashboardReportedParameters
 
+    print 'retry params are', options.retry_params
+    print 'Server Manager is ', options.SERVER_MANAGER
+    print 'Timeout is ', options.TIMEOUT
+
+    if options.SERVER_MANAGER:
+        SERVER_MANAGER=options.SERVER_MANAGER
+    if options.TIMEOUT:
+        TIMEOUT=int(options.TIMEOUT)
 
     # What do we do with any reported parameters?
     # 1. Append them to the extra (testrunner) parameters
@@ -108,8 +133,13 @@ def main():
 
     cb = Bucket('couchbase://' + TEST_SUITE_DB + '/QE-Test-Suites')
 
+    if options.run == "12hr_weekly" :
+        suiteString = "('12hour' in partOf or 'weekly' in partOf)"
+    else:
+        suiteString = "'" + options.run + "' in partOf"
+
     if options.component is None or options.component == 'None':
-        queryString = "select * from `QE-Test-Suites` where '" + options.run + "' in partOf order by component"
+        queryString = "select * from `QE-Test-Suites` where " + suiteString + " order by component"
     else:
         if options.subcomponent is None or options.subcomponent == 'None':
             splitComponents = options.component.split(',')
@@ -119,8 +149,7 @@ def main():
                 if i < len(splitComponents) - 1:
                     componentString = componentString + ','
 
-
-            queryString = "select * from `QE-Test-Suites` where \"{0}\" in partOf and component in [{1}] order by component;".format(options.run, componentString)
+            queryString = "select * from `QE-Test-Suites` where {0} and component in [{1}] order by component;".format(suiteString, componentString)
 
         else:
             # have a subcomponent, assume only 1 component
@@ -132,8 +161,8 @@ def main():
                 subcomponentString = subcomponentString + "'" + splitSubcomponents[i] + "'"
                 if i < len(splitSubcomponents) - 1:
                     subcomponentString = subcomponentString + ','
-            queryString = "select * from `QE-Test-Suites` where \"{0}\" in partOf and component in ['{1}'] and subcomponent in [{2}];".\
-                format(options.run, options.component, subcomponentString)
+            queryString = "select * from `QE-Test-Suites` where {0} and component in ['{1}'] and subcomponent in [{2}];".\
+                format(suiteString, options.component, subcomponentString)
 
 
     print 'the query is', queryString #.format(options.run, componentString)
@@ -222,10 +251,8 @@ def main():
     for i in testsToLaunch: print i['component'], i['subcomponent']
     print '\n\n'
 
+    launchStringBase = str(options.jenkins_server_url)+'/job/'+str(options.launch_job)
 
-
-
-    launchStringBase = 'http://qa.sc.couchbase.com/job/test_suite_executor'
 
     # optional add [-docker] [-Jenkins extension]
     if options.serverType.lower() == 'docker':
@@ -235,6 +262,8 @@ def main():
 #     if options.framework.lower() == "jython":
     if framework == "jython":
         launchStringBase = launchStringBase + '-jython'
+    if framework == "TAF":
+        launchStringBase = launchStringBase + '-TAF'
     elif options.jenkins is not None:
         launchStringBase = launchStringBase + '-' + options.jenkins
 
@@ -246,8 +275,17 @@ def main():
                          'iniFile={5}&parameters={6}&os={7}&initNodes={' \
                          '8}&installParameters={9}&branch={10}&slave={' \
                          '11}&owners={12}&mailing_list={13}&mode={14}&timeout={15}'
+
+    launchString = launchString + '&retry_params=' + urllib.quote(options.retry_params)
+    launchString = launchString + '&retries=' + options.retries
+    if options.include_tests:
+        launchString = launchString + '&include_tests=' + urllib.quote(options.include_tests)
+
     if options.url is not None:
         launchString = launchString + '&url=' + options.url
+    if options.cherrypick is not None:
+        launchString = launchString + '&cherrypick=' + urllib.quote(options.cherrypick)
+
 
     summary = []
 
@@ -260,8 +298,8 @@ def main():
                 getAvailUrl = getAvailUrl +  'docker?os={0}&poolId={1}'.format(options.os,options.poolId)
             else:
                 getAvailUrl = getAvailUrl + '{0}?poolId={1}'.format(options.os,options.poolId)
-
-            response, content = httplib2.Http(timeout=60).request(getAvailUrl , 'GET')
+            print("URL:" + getAvailUrl)
+            response, content = httplib2.Http(timeout=TIMEOUT).request(getAvailUrl , 'GET')
             if response.status != 200:
                print time.asctime( time.localtime(time.time()) ), 'invalid server response', content
                time.sleep(POLL_INTERVAL)
@@ -288,7 +326,7 @@ def main():
                                     options.os, options.addPoolId)
 
                             response, content = httplib2.Http(
-                                timeout=60).request(getAddPoolUrl, 'GET')
+                                timeout=TIMEOUT).request(getAddPoolUrl, 'GET')
                             if response.status != 200:
                                 print time.asctime(time.localtime(
                                     time.time())), 'invalid server response', content
@@ -335,7 +373,7 @@ def main():
                                   options.os, options.poolId)
                     print 'getServerURL', getServerURL
 
-                    response, content = httplib2.Http(timeout=60).request(getServerURL, 'GET')
+                    response, content = httplib2.Http(timeout=TIMEOUT).request(getServerURL, 'GET')
                     print 'response.status', response, content
 
                     if options.serverType.lower() != 'docker':
@@ -365,7 +403,8 @@ def main():
                                       options.addPoolId)
                         print 'getServerURL', getServerURL
 
-                        response2, content2 = httplib2.Http(timeout=60).request(getServerURL, 'GET')
+                        response2, content2 = httplib2.Http(timeout=TIMEOUT).request(getServerURL,
+                                                                                 'GET')
                         print 'response2.status', response2, content2
 
 
@@ -433,11 +472,11 @@ def main():
                             if options.serverType.lower() == 'docker':
                                 pass # figure docker out later
                             else:
-                                response, content = httplib2.Http(timeout=60).\
+                                response, content = httplib2.Http(timeout=TIMEOUT).\
                                     request('http://' + SERVER_MANAGER + '/releaseservers/' + descriptor + '/available', 'GET')
                                 print 'the release response', response, content
                         else:
-                            response, content = httplib2.Http(timeout=60).request(url, 'GET')
+                            response, content = httplib2.Http(timeout=TIMEOUT).request(url, 'GET')
 
                         testsToLaunch.pop(i)
                         summary.append( {'test':descriptor, 'time':time.asctime( time.localtime(time.time()) ) } )

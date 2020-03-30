@@ -2,6 +2,9 @@ import httplib2
 import json
 from tasks.taskmanager import TaskManager
 from tasks.task import *
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+import time
+import ast
 
 class BLEVE:
     STOPWORDS = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves',
@@ -186,7 +189,7 @@ class ElasticSearchBase(object):
         self.http = httplib2.Http
 
     def _http_request(self, api, method='GET', params='', headers=None,
-                      timeout=30):
+                      timeout=120):
         if not headers:
             headers = {'Content-Type': 'application/json',
                        'Accept': '*/*'}
@@ -199,7 +202,7 @@ class ElasticSearchBase(object):
                 return True, content, response
             else:
                 try:
-                    json_parsed = json.loads(content)
+                    json_parsed = ast.literal_eval(content)
                 except ValueError as e:
                     json_parsed = {}
                     json_parsed["error"] = "status: {0}, content: {1}".\
@@ -217,6 +220,24 @@ class ElasticSearchBase(object):
             self.__log.error("socket error while connecting to {0} error {1} ".
                              format(api, e))
             raise ServerUnavailableException(ip=self.__host.ip)
+
+    def restart_es(self):
+        shell = RemoteMachineShellConnection(self.__host)
+        es_restart_cmd = "/etc/init.d/elasticsearch restart"
+        o, e = shell.execute_non_sudo_command(es_restart_cmd)
+        shell.log_command_output(o, e)
+
+        es_start = False
+        for i in range(2):
+            self.sleep(10)
+            if self.is_running():
+                es_start = True
+                break
+        if not es_start:
+            self.fail("Could not reach Elastic Search server on %s"
+                      % self.ip)
+        else:
+            self.__log.info("Restarted ES server %s successfully" % self.__host.ip)
 
     def is_running(self):
         """
@@ -462,6 +483,7 @@ class ElasticSearchBase(object):
         """
         try:
             doc_ids = []
+            self.__log.info("ES query '{0}' ".format(query))
             url = self.__connection_url + index_name + '/_search?size='+ \
                   str(result_size)
             status, content, _ = self._http_request(
@@ -497,3 +519,7 @@ class ElasticSearchBase(object):
         :return: List of all indices
         """
         return self.__indices
+
+    def sleep(self, timeout=1, message=""):
+        self.__log.info("sleep for {0} secs. {1} ...".format(timeout, message))
+        time.sleep(timeout)

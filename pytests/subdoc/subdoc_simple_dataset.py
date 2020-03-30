@@ -1,7 +1,14 @@
-import json
-import random
-
+from lib.mc_bin_client import MemcachedClient, MemcachedError
+from lib.memcacheConstants import *
 from subdoc_base import SubdocBaseTest
+from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import VBucketAwareMemcached
+import copy, json
+import random
+import time
+import mc_bin_client
+import couchbase.subdocument as SD
+from sdk_client import SDKClient
 
 
 class SubdocSimpleDataset(SubdocBaseTest):
@@ -11,6 +18,40 @@ class SubdocSimpleDataset(SubdocBaseTest):
 
     def tearDown(self):
         super(SubdocSimpleDataset, self).tearDown()
+
+    def test_system_xattr_with_compression(self):
+        # MB-34346
+        #subdoc.subdoc_simple_dataset.SubdocSimpleDataset.test_system_xattr_with_compression,compression_mode=active,use_sdk_client=True,value_size=262114
+        KEY = "key"
+        self.value_size = self.input.param("value_size", 102400)
+        self.log.info("Insert a key and set xattr for the key")
+
+        val = self.generate_random_json_doc(self.value_size)
+        if random.choice([True, False]):
+            self.client.insert(KEY, val, 60)
+        else:
+            self.client.insert(KEY, {}, 60)
+        rv = self.client.cb.mutate_in(KEY, SD.upsert('_system1', val, xattr=True, create_parents=True))
+        self.assertTrue(rv.success)
+        rv = self.client.cb.mutate_in(KEY, SD.upsert('_system2', {'field1': val, 'field2': val}, xattr=True, create_parents=True))
+        self.assertTrue(rv.success)
+        rv = self.client.cb.mutate_in(KEY, SD.upsert('a', {'field1': {'sub_field1a': 0, 'sub_field1b': 00}, 'field2': {'sub_field2a': 20, 'sub_field2b': 200}}, xattr=True, create_parents=True))
+        self.assertTrue(rv.success)
+
+        self.client.upsert(KEY, value={}, ttl=20)
+        self.sleep(30)
+        try:
+            self.client.get(KEY)
+        except MemcachedError as exp:
+            self.assertEqual(exp.status, 1)
+
+
+    def generate_random_json_doc(self, value_size = 10240):
+        age = range(1, 100)
+        name = ['a' * value_size,]
+        template =  { "age": age, "name": name }
+        json_string = json.dumps(template)
+        return json_string
 
     # Test the fix for MB-30278
     def test_verify_backtick(self):
@@ -37,6 +78,26 @@ class SubdocSimpleDataset(SubdocBaseTest):
                 result = False
 
         self.assertTrue(result, dict)
+
+    # Test the fix for MB-31070
+    def test_expiry_after_append(self):
+        # create a doc and set expiry for the doc
+        # append to the doc and check if the expiry is not changed
+
+        self.key = "expiry_after_append"
+        array = {
+            "name": "Douglas Reynholm",
+            "place": "India",
+        }
+        jsonDump = json.dumps(array)
+        self.client.set(self.key, 60, 0, jsonDump)
+        client1 = VBucketAwareMemcached(RestConnection(self.master), 'default')
+        get_meta_resp_before = client1.generic_request(client1.memcached(self.key).getMeta, self.key)
+        self.log.info("Sleeping for 5 sec")
+        time.sleep(5)
+        client1.generic_request(client1.memcached(self.key).append, self.key, 'appended data')
+        get_meta_resp_after = client1.generic_request(client1.memcached(self.key).getMeta, self.key)
+        self.assertEquals(get_meta_resp_before[2], get_meta_resp_after[2]) # 3rd value is expiry value
 
 #SD_COUNTER
     def test_counter(self):
@@ -325,6 +386,12 @@ class SubdocSimpleDataset(SubdocBaseTest):
         self.json =  self.generate_simple_data_array_of_numbers()
         self.dict_upsert_replace_verify(self.json, "test_upsert_replace_numbers")
 
+    def test_upsert_replace_numbers_expiry(self):
+        # MB-32364
+        # subdoc.subdoc_simple_dataset.SubdocSimpleDataset.test_upsert_replace_numbers_expiry
+        self.json =  self.generate_simple_data_array_of_numbers()
+        self.dict_upsert_replace_verify(self.json, "test_upsert_replace_numbers", create=True, expiry=30)
+
     def test_upsert_replace_array_numbers(self):
         self.json =  self.generate_simple_data_array_of_numbers()
         self.dict_upsert_replace_verify(self.json, "test_upsert_replace_array_of_numbers")
@@ -352,6 +419,56 @@ class SubdocSimpleDataset(SubdocBaseTest):
     def test_upsert_replace_array_mix(self):
         self.json =  self.generate_simple_data_mix_arrays()
         self.dict_upsert_replace_verify(self.json, "test_upsert_replace_array_mix")
+
+    def test_xattr_compression(self):
+        # MB-32669
+        # subdoc.subdoc_simple_dataset.SubdocSimpleDataset.test_xattr_compression,compression=active
+        mc = MemcachedClient(self.master.ip, 11210)
+        mc.sasl_auth_plain(self.master.rest_username, self.master.rest_password)
+        mc.bucket_select('default')
+
+        self.key="test_xattr_compression"
+        self.nesting_level = 5
+        array = {
+            'i_add': 0,
+            'i_sub': 1,
+            'a_i_a': [0, 1],
+            'ai_sub': [0, 1]
+        }
+        base_json = self.generate_json_for_nesting()
+        nested_json = self.generate_nested(base_json, array, self.nesting_level)
+        jsonDump = json.dumps(nested_json)
+        stats = mc.stats()
+        self.assertEquals(stats['ep_compression_mode'], 'active')
+
+        scheme = "http"
+        host="{0}:{1}".format(self.master.ip,self.master.port)
+        self.sdk_client=SDKClient(scheme=scheme,hosts = [host], bucket = "default")
+
+        self.sdk_client.set(self.key, value=jsonDump, ttl=60)
+        rv = self.sdk_client.cb.mutate_in(self.key, SD.upsert('my.attr', "value",
+                                                 xattr=True,
+                                                 create_parents=True), ttl=60)
+        self.assertTrue(rv.success)
+
+
+
+        # wait for it to persist and then evict the key
+        persisted = 0
+        while persisted == 0:
+            opaque, rep_time, persist_time, persisted, cas = mc.observe(self.key)
+
+        mc.evict_key(self.key)
+        time.sleep(65)
+        try:
+            self.client.get(self.key)
+            self.fail("the key should get expired")
+        except mc_bin_client.MemcachedError as error:
+            self.assertEquals(error.status, 1)
+
+        stats = mc.stats()
+        self.assertEquals(int(stats['curr_items']), 0)
+        self.assertEquals(int(stats['curr_temp_items']), 0)
 
 # SD_REPLACE - Replace Operations
 
@@ -481,7 +598,7 @@ class SubdocSimpleDataset(SubdocBaseTest):
             result = result and logic
         self.assertTrue(result, result_dict)
 
-    def dict_upsert_replace_verify(self, dataset, data_key = "default"):
+    def dict_upsert_replace_verify(self, dataset, data_key = "default", create = False, expiry = 0):
         dict = {}
         result_dict = {}
         result = True
@@ -493,7 +610,7 @@ class SubdocSimpleDataset(SubdocBaseTest):
         for key in self.json.keys():
             value = new_json[key]
             value = json.dumps(value)
-            self.dict_upsert(self.client, self.key, key, value)
+            self.dict_upsert(self.client, self.key, key, value, create=create, expiry=expiry)
         self.json =  new_json
         for key in new_json.keys():
             value = new_json[key]
@@ -502,6 +619,15 @@ class SubdocSimpleDataset(SubdocBaseTest):
                 result_dict[key] = {"expected":self.new_json[key], "actual":data_return}
             result = result and logic
         self.assertTrue(result, result_dict)
+
+        if expiry != 0 :
+            time.sleep(expiry+5)
+            try:
+                self.client.get(self.key)
+                self.fail("Document is not expired")
+            except mc_bin_client.MemcachedError as error:
+                    self.assertEquals(error.status, 1)
+
 
     def dict_replace_verify(self, dataset, data_key = "default"):
         dict = {}
@@ -565,9 +691,9 @@ class SubdocSimpleDataset(SubdocBaseTest):
             self.log.info(e)
             self.fail("Unable to replace key {0} for path {1} after {2} tries".format(key, path, 1))
 
-    def dict_upsert(self, client, key = '', path = '', value = None):
+    def dict_upsert(self, client, key = '', path = '', value = None, create=False, expiry=0):
         try:
-            self.client.dict_upsert_sd(key, path, value)
+            self.client.dict_upsert_sd(key, path, value, create=create, expiry=expiry)
         except Exception as e:
             self.log.info(e)
             self.fail("Unable to add key {0} for path {1} after {2} tries".format(key, path, 1))

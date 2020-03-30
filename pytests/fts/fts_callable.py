@@ -1,15 +1,14 @@
+import logger
+import time
 import copy
 import json
-import time
-
-import logger
-from TestInput import TestInputSingleton
-from es_base import ElasticSearchBase
 from fts_base import FTSIndex, CouchbaseCluster
+from lib.membase.api.exception import FTSException
+from es_base import ElasticSearchBase
+from TestInput import TestInputSingleton
 from lib.couchbase_helper.documentgenerator import JsonDocGenerator
 from lib.membase.api.rest_client import RestConnection
 from random_query_generator.rand_query_gen import FTSESQueryGenerator
-
 
 class FTSCallable:
 

@@ -206,12 +206,19 @@ class OptionsRestTests(QueryTests):
             #in clause with missing first argument
             statement = 'EXPLAIN SELECT * FROM %s where job_title=$job_title and name IN $name&$job_title is missing&$name= ["id@mail.com", "employee-4"]'% (bucket.name)
             output = self.curl_helper(statement)
-            self.assertTrue(output['errors'][0]['msg'] == 'No named argument $job_title is missing value')
+            self.assertEqual(output['status'], 'success')
+
+            statement = 'SELECT * FROM %s where job_title=$job_title and name IN $name&$job_title is missing&$name= ["id@mail.com", "employee-4"]'% (bucket.name)
+            output = self.curl_helper(statement)
+            self.assertEqual(output['errors'][0]['msg'], "Error evaluating filter. - cause: No value for named parameter $job_title.")
 
             #in clause with null first argument
             statement = 'EXPLAIN SELECT * FROM %s where job_title=$job_title and name IN $name&$job_title=null&$name= ["id@mail.com", "employee-4"]'% (bucket.name)
             output = self.curl_helper(statement)
-            self.assertTrue(output['results'][0]['plan']['~children'][0]['index'] == '#primary')
+
+            self.assertTrue("index" not in str(output['results'][0]['plan']))
+            self.assertTrue(output['results'][0]['plan']['~children'][0]['#operator'] == 'ValueScan')
+
             statement = 'SELECT * FROM %s where job_title=$job_title and name IN $name&$job_title=null&$name= ["id@mail.com", "employee-4"]'% (bucket.name)
             actual_result = self.curl_helper(statement)
             statement = 'SELECT * FROM %s use index(`#primary`) where job_title=$job_title and name IN $name&$job_title=null&$name= ["id@mail.com", "employee-4"]'% (bucket.name)
@@ -235,8 +242,9 @@ class OptionsRestTests(QueryTests):
             # args is null
             statement = 'explain SELECT * FROM %s where job_title=$1 and name IN $2&args=[null, ["id@mail.com", "employee-4"]]'% (bucket.name)
             output = self.curl_helper(statement)
-            self.assertTrue(output['results'][0]['plan']['~children'][0]['index'] == '#primary')
 
+            self.assertTrue("index" not in str(output['results'][0]['plan']))
+            self.assertTrue(output['results'][0]['plan']['~children'][0]['#operator'] == 'ValueScan')
             # prepare statement
             statement_id = "p1%s" % (bucket.name)
             statement = "PREPARE %s FROM SELECT * FROM %s where job_title=$type and name=$name" % (statement_id, bucket.name)

@@ -1,17 +1,18 @@
-from couchbase.bucket import Bucket
-from couchbase.exceptions import NotFoundError
+import zlib
 
-from couchbase_helper.cluster import Cluster
 from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator
-from membase.api.exception import XDCRCheckpointException
-from membase.api.rest_client import RestConnection
-from membase.helper.cluster_helper import ClusterOperationHelper
-from memcached.helper.data_helper import VBucketAwareMemcached
-from remote.remote_util import RemoteMachineShellConnection
-from security.rbac_base import RbacBase
-from testconstants import STANDARD_BUCKET_PORT
-from xdcrnewbasetests import NodeHelper
 from xdcrnewbasetests import XDCRNewBaseTest, FloatingServers
+from xdcrnewbasetests import NodeHelper
+from membase.api.rest_client import RestConnection
+from testconstants import STANDARD_BUCKET_PORT
+from remote.remote_util import RemoteMachineShellConnection
+from couchbase.exceptions import NotFoundError
+from couchbase.bucket import Bucket
+from couchbase_helper.cluster import Cluster
+from membase.helper.cluster_helper import ClusterOperationHelper
+from membase.api.exception import XDCRCheckpointException
+from memcached.helper.data_helper import VBucketAwareMemcached
+from security.rbac_base import RbacBase
 
 
 class Lww(XDCRNewBaseTest):
@@ -24,6 +25,8 @@ class Lww(XDCRNewBaseTest):
 
         self.skip_ntp = self._input.param("skip_ntp", False)
         self.clean_backup = self._input.param("clean_backup", False)
+        self.bucketType = self._input.param("bucket_type", "membase")
+        self.evictionPolicy = self._input.param("eviction_policy", "valueOnly")
 
         if not self.skip_ntp:
             self._enable_ntp_and_sync()
@@ -92,7 +95,6 @@ class Lww(XDCRNewBaseTest):
                        saslPassword='',
                        replicaNumber=1,
                        proxyPort=11211,
-                       bucketType='membase',
                        replica_index=1,
                        threadsNumber=3,
                        flushEnabled=1,
@@ -100,35 +102,34 @@ class Lww(XDCRNewBaseTest):
                        dst_lww=True,
                        skip_src=False,
                        skip_dst=False):
-        evictionPolicy= self._input.param("eviction_policy", 'valueOnly')
         if not skip_src:
             src_rest = RestConnection(self.c1_cluster.get_master_node())
             if src_lww:
                 src_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy,
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy,
                                        lww=True)
             else:
                 src_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy)
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy)
             self.c1_cluster.add_bucket(ramQuotaMB=ramQuotaMB, bucket=bucket, authType=authType,
                                        saslPassword=saslPassword, replicaNumber=replicaNumber,
-                                       proxyPort=proxyPort, bucketType=bucketType, evictionPolicy=evictionPolicy)
+                                       proxyPort=proxyPort, bucketType=self.bucketType, evictionPolicy=self.evictionPolicy)
         if not skip_dst:
             dst_rest = RestConnection(self.c2_cluster.get_master_node())
             if dst_lww:
                 dst_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy,
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy,
                                        lww=True)
             else:
                 dst_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy)
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy)
             self.c2_cluster.add_bucket(ramQuotaMB=ramQuotaMB, bucket=bucket, authType=authType,
                                        saslPassword=saslPassword, replicaNumber=replicaNumber,
-                                       proxyPort=proxyPort, bucketType=bucketType, evictionPolicy=evictionPolicy)
+                                       proxyPort=proxyPort, bucketType=self.bucketType, evictionPolicy=self.evictionPolicy)
 
     def _get_python_sdk_client(self, ip, bucket, cluster):
         try:
@@ -164,8 +165,11 @@ class Lww(XDCRNewBaseTest):
         conn.upsert(key=doc_id, value=value)
 
     def _kill_processes(self, crashed_nodes=[]):
-        for node in crashed_nodes:
-            NodeHelper.kill_erlang(node)
+        try:
+            for node in crashed_nodes:
+                NodeHelper.kill_erlang(node)
+        except:
+            self.log.info('Could not kill erlang process on node, continuing..')
 
     def _start_cb_server(self, node):
         shell = RemoteMachineShellConnection(node)
@@ -184,12 +188,9 @@ class Lww(XDCRNewBaseTest):
                 break
         return long(max_cas)
 
-    def _get_vbucket_id(self, node, bucket, key):
-        conn = RemoteMachineShellConnection(node)
-        command = "curl -u cbadminbucket:password -s http://" + node.ip + ":8091/pools/default/buckets/" + bucket + " | /opt/couchbase/bin/tools/vbuckettool - " + key
-        output, error = conn.execute_command(command)
-        conn.log_command_output(output, error)
-        return output[0].split()[5]
+    def _get_vbucket_id(self, key, num_vbuckets=1024):
+        vbucket_id = ((zlib.crc32(key) >> 16) & 0x7FFF) % num_vbuckets
+        return vbucket_id
 
     def test_lww_enable(self):
         src_conn = RestConnection(self.c1_cluster.get_master_node())
@@ -678,6 +679,8 @@ class Lww(XDCRNewBaseTest):
         self.log.info("LWW enabled on source bucket as expected")
         self.assertFalse(dest_conn.is_lww_enabled(), "LWW enabled on dest bucket")
         self.log.info("LWW not enabled on dest bucket as expected")
+
+        self.sleep(10)
 
         try:
             self.setup_xdcr()
@@ -1179,8 +1182,8 @@ class Lww(XDCRNewBaseTest):
 
         self.sleep(self._wait_timeout / 2)
 
+        self._kill_processes([self.c1_cluster.get_master_node()])
         conn = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
-        conn.kill_erlang()
         conn.start_couchbase()
         self.wait_service_started(self.c1_cluster.get_master_node())
         self.sleep(600, "Slepping so that vBuckets are ready and to avoid \
@@ -1981,11 +1984,11 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
+                                proxyPort=11211, replica_index=1, threadsNumber=3,
                                 flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211,
+                                   )
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on source bucket")
         self.log.info("LWW enabled on source bucket as expected")
         self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on dest bucket")
@@ -2266,11 +2269,10 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
-                                flushEnabled=1, lww=True)
+                              proxyPort=11211, replica_index=1, threadsNumber=3,
+                              flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211)
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on C1 bucket")
         self.log.info("LWW enabled on C1 bucket as expected")
         self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on C2 bucket")
@@ -2335,6 +2337,7 @@ class Lww(XDCRNewBaseTest):
         conn1.start_couchbase()
         conn2.start_couchbase()
         conn3.start_couchbase()
+        self._wait_for_replication_to_catchup()
 
     def test_lww_mixed_with_diff_topology_and_clocks_out_of_sync(self):
         self.c3_cluster = self.get_cb_cluster_by_name('C3')
@@ -2345,11 +2348,10 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100, src_lww=True, dst_lww=False)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
-                                flushEnabled=1, lww=True)
+                              proxyPort=11211, replica_index=1, threadsNumber=3,
+                              flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211)
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on C1 bucket")
         self.log.info("LWW enabled on C1 bucket as expected")
         self.assertFalse(dest_conn.is_lww_enabled(), "LWW enabled on C2 bucket")
@@ -2375,11 +2377,10 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100, src_lww=True, dst_lww=True)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
-                                flushEnabled=1, lww=True)
+                              proxyPort=11211, replica_index=1, threadsNumber=3,
+                              flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211)
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on C1 bucket")
         self.log.info("LWW enabled on C1 bucket as expected")
         self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on C2 bucket")
@@ -2453,10 +2454,10 @@ class Lww(XDCRNewBaseTest):
         gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c1_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_active = self._get_max_cas(node=self.c1_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
-        vbucket_id = self._get_vbucket_id(self._input.servers[1], 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_replica = self._get_max_cas(node=self._input.servers[1], bucket='default', vbucket_id=vbucket_id)
 
         self.log.info("max_cas_active: " + str(max_cas_active))
@@ -2516,7 +2517,7 @@ class Lww(XDCRNewBaseTest):
         gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
@@ -2570,7 +2571,7 @@ class Lww(XDCRNewBaseTest):
         gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
@@ -2622,7 +2623,7 @@ class Lww(XDCRNewBaseTest):
         gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
@@ -2682,7 +2683,7 @@ class Lww(XDCRNewBaseTest):
         gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
@@ -2740,7 +2741,7 @@ class Lww(XDCRNewBaseTest):
         gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c1_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         hlc_c1 = self._get_max_cas(node=self.c1_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         self.sleep(timeout=1200)
@@ -2748,7 +2749,7 @@ class Lww(XDCRNewBaseTest):
         gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         hlc_c2_1 = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         self.c1_cluster.resume_all_replications_by_id()

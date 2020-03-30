@@ -270,11 +270,12 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 self.cluster.failover(self.src_nodes, self.failed_nodes)
                 for node in self.failed_nodes:
                     self.src_nodes.remove(node)
+                self.sleep(10)
                 add_nodes = self._floating_servers_set[0:self._add_count]
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.src_nodes.extend(add_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 # CALL THE CBRECOVERY ROUTINE WITHOUT WAIT FOR COMPLETED
                 self.cbr_routine(self.dest_master, self.src_master, False)
 
@@ -343,11 +344,12 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 self.cluster.failover(self.dest_nodes, self.failed_nodes)
                 for node in self.failed_nodes:
                     self.dest_nodes.remove(node)
+                self.sleep(10)
                 add_nodes = self._floating_servers_set[0:self._add_count]
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.dest_nodes.extend(add_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 # CALL THE CBRECOVERY ROUTINE
                 self.cbr_routine(self.src_master, self.dest_master, False)
 
@@ -417,11 +419,12 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 self.cluster.failover(self.src_nodes, self.failed_nodes)
                 for node in self.failed_nodes:
                     self.src_nodes.remove(node)
+                self.sleep(10)
                 add_nodes = self._floating_servers_set[0:self._add_count]
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.src_nodes.extend(add_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 # CALL THE CBRECOVERY ROUTINE
                 self.cbr_routine(self.dest_master, self.src_master)
 
@@ -444,11 +447,12 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 self.cluster.failover(self.dest_nodes, self.failed_nodes)
                 for node in self.failed_nodes:
                     self.dest_nodes.remove(node)
+                self.sleep(10)
                 add_nodes = self._floating_servers_set[0:self._add_count]
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.dest_nodes.extend(add_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 # CALL THE CBRECOVERY ROUTINE
                 self.cbr_routine(self.src_master, self.dest_master)
 
@@ -480,11 +484,12 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 self.auto_fail_over(self.src_master)
                 for node in self.failed_nodes:
                     self.src_nodes.remove(node)
+                self.sleep(10)
                 add_nodes = self._floating_servers_set[0:self._add_count]
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.src_nodes.extend(add_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 # CALL THE CBRECOVERY ROUTINE
                 self.cbr_routine(self.dest_master, self.src_master)
 
@@ -512,10 +517,11 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 for node in self.failed_nodes:
                     self.dest_nodes.remove(node)
                 add_nodes = self._floating_servers_set[0:self._add_count]
+                self.sleep(10)
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.dest_nodes.extend(add_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 # CALL THE CBRECOVERY ROUTINE
                 self.cbr_routine(self.src_master, self.dest_master)
 
@@ -543,12 +549,12 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 self.log.info("Failing over {0} nodes on source ..".format(self._failover_count))
                 self.failed_nodes = self.src_nodes[(len(self.src_nodes) - self._failover_count):len(self.src_nodes)]
                 self.cluster.failover(self.src_nodes, self.failed_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 self.log.info("Adding back the {0} nodes that were failed over ..".format(self._failover_count))
                 for node in self.failed_nodes:
                     self.adding_back_a_node(self.src_master, node)
                 add_nodes = self._floating_servers_set[0:self._add_count]
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.src_nodes.extend(add_nodes)
@@ -573,12 +579,12 @@ class cbrecovery(CBRbaseclass, XDCRReplicationBaseTest):
                 self.log.info("Failing over {0} nodes on destination ..".format(self._failover_count))
                 self.failed_nodes = self.dest_nodes[(len(self.dest_nodes) - self._failover_count):len(self.dest_nodes)]
                 self.cluster.failover(self.dest_nodes, self.failed_nodes)
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 self.log.info("Adding back the {0} nodes that were failed over ..".format(self._failover_count))
                 for node in self.failed_nodes:
                     self.adding_back_a_node(self.dest_master, node)
                 add_nodes = self._floating_servers_set[0:self._add_count]
-                self.sleep(self.wait_timeout / 4)
+                self.sleep(10)
                 for node in add_nodes:
                     rest.add_node(user=node.rest_username, password=node.rest_password, remoteIp=node.ip, port=node.port)
                 self.dest_nodes.extend(add_nodes)

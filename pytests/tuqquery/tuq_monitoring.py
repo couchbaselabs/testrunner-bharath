@@ -1,11 +1,12 @@
-import json
 import logging
 import threading
+import json
+import uuid
 import time
-
-from remote.remote_util import RemoteMachineShellConnection
 from tuq import QueryTests
-
+from membase.api.rest_client import RestConnection
+from membase.api.exception import CBQError, ReadDocumentException
+from remote.remote_util import RemoteMachineShellConnection
 
 class QueryMonitoringTests(QueryTests):
     def setUp(self):
@@ -88,7 +89,7 @@ class QueryMonitoringTests(QueryTests):
 
     def run_parallel_query(self, server):
         logging.info('parallel query is active')
-        query = "(select * from default) union (select d from default d JOIN default def ON KEYS d.name)"
+        query = "(select * from default) union (select d from default d JOIN default def ON KEYS d.name) union (select * from default)"
         self.run_cbq_query(query, server=server)
 
     '''Run basic cluster monitoring checks (outlined in the helper function) by executing 2 queries in parallel, must be
@@ -124,7 +125,7 @@ class QueryMonitoringTests(QueryTests):
                 t52.start()
                 t53.start()
             e.set()
-            query = 'select * from %s' % bucket.name
+            query = '(select * from %s ) union (select * from %s )' % (bucket.name, bucket.name)
             self.run_cbq_query(query, server=self.servers[1])
             logging.debug('event is set')
             t50.join(100)
@@ -143,6 +144,7 @@ class QueryMonitoringTests(QueryTests):
             event_is_set = e.wait(t)
             logging.debug('event set: %s', event_is_set)
             if event_is_set:
+                time.sleep(5)
                 # check if the running queries are in system:active_requests
                 logging.info('CHECKING SYSTEM:ACTIVE_REQUESTS FOR THE RUNNING QUERIES')
                 result = self.run_cbq_query('select * from system:active_requests')
@@ -206,7 +208,7 @@ class QueryMonitoringTests(QueryTests):
                     self.log.error(json.dumps(result, sort_keys=True, indent=3))
                     return
 
-                time.sleep(30)
+                time.sleep(60)
                 # check if the queries appear in system:completed_requests when they complete.
                 logging.info('CHECKING IF ALL COMPLETED QUERIES ARE IN SYSTEM:COMPLETED_REQUESTS')
                 result = self.run_cbq_query('select * from system:completed_requests')
@@ -291,6 +293,7 @@ class QueryMonitoringTests(QueryTests):
             event_is_set = e.wait(t)
             logging.debug('event set: %s', event_is_set)
             if event_is_set:
+                time.sleep(3)
                 logging.info('CHECKING IF SYSTEM:ACTIVE_REQUESTS RESULTS CAN BE FILTERED BY NODE')
                 result = self.run_cbq_query('select * from system:active_requests')
                 node1 = self.run_cbq_query('select * from system:active_requests where node = "%s:%s"'
@@ -311,7 +314,7 @@ class QueryMonitoringTests(QueryTests):
                     self.log.error(node2)
                     return
 
-                time.sleep(30)
+                time.sleep(90)
 
                 logging.info('CHECKING IF SYSTEM:COMPLETED_REQUESTS RESULTS CAN BE FILTERED BY NODE')
                 result = self.run_cbq_query('select * from system:completed_requests')
@@ -345,13 +348,14 @@ class QueryMonitoringTests(QueryTests):
             -Check that prepared statements appear in system:completed_requests when ran.'''
     def test_prepared_monitoring(self):
         self.test_prepared_common_body()
+        time.sleep(10)
         # Check that both prepareds are in system:prepareds
         self.query = "select * from system:prepareds"
         result = self.run_cbq_query()
         self.assertEqual(result['metrics']['resultCount'], 6)
 
-        name = result['results'][0]['prepareds']['name']
-        uses = result['results'][0]['prepareds']['uses']
+        name = result['results'][1]['prepareds']['name']
+        uses = result['results'][1]['prepareds']['uses']
         self.assertEqual(uses, 1)
 
         secondname = result['results'][1]['prepareds']['name']
@@ -783,8 +787,8 @@ class QueryMonitoringTests(QueryTests):
         self.run_cbq_query('select * from default union select * from default union select * from default')
         self.run_cbq_query('select * from default union select * from default union select * from default')
         # Run a query that runs for a normal amount of time ~2 seconds
-        self.run_cbq_query('select * from default')
-        self.run_cbq_query('select * from default')
+        self.run_cbq_query('select * from default limit 1000')
+        self.run_cbq_query('select * from default limit 1000')
 
         # Only the queries run for longer than 8 seconds should show up
         result=self.run_cbq_query('select * from system:completed_requests')

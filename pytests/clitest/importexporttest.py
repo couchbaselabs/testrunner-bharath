@@ -1,18 +1,25 @@
-import ast
 import copy
-import itertools
-import os
-import shutil
+import json, filecmp, itertools
+import os, shutil, ast
+from threading import Thread
 
-from clitest.cli_base import CliBaseTest
-from couchbase_helper.cluster import Cluster
-from couchbase_helper.documentgenerator import BlobGenerator, JsonDocGenerator
-from couchbase_helper.stats_tools import StatsCommon
 from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
+from TestInput import TestInputSingleton
+from clitest.cli_base import CliBaseTest
+from couchbase_helper.stats_tools import StatsCommon
+from couchbase_helper.cluster import Cluster
+from remote.remote_util import RemoteMachineShellConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
-from remote.remote_util import RemoteMachineShellConnection
+from couchbase_helper.documentgenerator import BlobGenerator, JsonDocGenerator
+from couchbase_helper.data_analysis_helper import DataCollector
+from couchbase_cli import CouchbaseCLI
 from security.rbac_base import RbacBase
+from pprint import pprint
+from testconstants import CLI_COMMANDS, COUCHBASE_FROM_WATSON,\
+                          COUCHBASE_FROM_SPOCK, LINUX_COUCHBASE_BIN_PATH,\
+                          WIN_COUCHBASE_BIN_PATH, COUCHBASE_FROM_SHERLOCK
 
 
 class ImportExportTests(CliBaseTest):
@@ -173,7 +180,7 @@ class ImportExportTests(CliBaseTest):
             dgm_run=True
             active_resident_threshold=xx
         """
-        options = {"load_doc": True, "docs":"1000"}
+        options = {"load_doc": True, "docs":"{0}".format(self.num_items)}
         return self._common_imex_test("export", options)
 
     def test_export_with_secure_connection(self):
@@ -683,8 +690,8 @@ class ImportExportTests(CliBaseTest):
             password = server.rest_password
         if self.sample_file is not None:
             cmd = "cbimport"
-            imp_cmd_str = "%s%s%s %s -c %s -u %s -p %s -b %s -d %s -f sample"\
-                             % (self.cli_command_path, cmd, self.cmd_ext, self.imex_type,
+            imp_cmd_str = "{0}{1}{2} {3} -c {4} -u {5} -p {6} -b {7} -d file://{8} -f sample"\
+                             .format(self.cli_command_path, cmd, self.cmd_ext, self.imex_type,
                                          server.ip, username, password, self.sample_file,
                                                                       sample_file_path)
             output, error = self.shell.execute_command(imp_cmd_str)
@@ -887,11 +894,19 @@ class ImportExportTests(CliBaseTest):
                         while int(res_status) > self.active_resident_threshold:
                             self.sleep(5)
                             res_status = stats_all_buckets[bucket.name].get_stats([self.master],
-                                         bucket, '', 'vb_active_perc_mem_resident')[self.master]
+                                         bucket, '',
+                                         'vb_active_perc_mem_resident')[self.master]
                         if int(res_status) <= self.active_resident_threshold:
                             self.log.info("Clear terminal")
                             self.shell.execute_command('printf "\033c"')
-                    output, error = self.shell.execute_command(exe_cmd_str)
+                    output = ""
+                    try:
+                        output, error = self.shell.execute_command_raw(exe_cmd_str,
+                                                                        timeout=60)
+                    except Exception as e:
+                        if not output:
+                            self.fail("MB-31432 is fixed.  This must be other issue {0}"
+                                                                             .format(e))
                     data_exported = True
                     if self.secure_conn:
                         if self.no_ssl_verify:
@@ -931,19 +946,17 @@ class ImportExportTests(CliBaseTest):
                 self.log.info("add built-in user cbadminbucket to second cluster.")
                 testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
                 RbacBase().create_user_source(testuser, 'builtin', import_servers[2])
-                self.sleep(10)
                 """ Assign user to role """
                 role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
                 RbacBase().add_user_role(role_list, RestConnection(import_servers[2]), 'builtin')
-                self.sleep(10)
-
+                
                 bucket_params=self._create_bucket_params(server=import_servers[2],
                                         size=250,
                                         replicas=self.num_replicas,
                                         enable_replica_index=self.enable_replica_index,
                                         eviction_policy=self.eviction_policy)
                 self.cluster.create_default_bucket(bucket_params)
-                imp_cmd_str = "%s%s%s %s -c %s -u %s -p '%s' -b %s "\
+                imp_cmd_str = "%s%s%s %s -c couchbase://%s -u %s -p '%s' -b %s "\
                                         "-d file://%s -f %s -g key::%%%s%%"\
                                         % (self.cli_command_path, "cbimport",
                                            self.cmd_ext, self.imex_type,
@@ -1179,7 +1192,8 @@ class ImportExportTests(CliBaseTest):
                                  self.master.ip, "cbadminbucket", "password",
                                  "default", self.format_type, export_file_cmd)
                 output, error = self.shell.execute_command(cmd)
-                self.shell.log_command_output(output, error)
+                if self.debug_logs:
+                    self.shell.log_command_output(output, error)
             format_type = "json"
             if self.imex_type == "csv":
                 if self.field_separator == "comma":
@@ -1240,6 +1254,9 @@ class ImportExportTests(CliBaseTest):
                     print "\nsource data  \n", src_data
                     print "\nbucket data  \n", bucket_data
                 self.log.info("Compare source data and bucket data")
+                for x in range(0, len(bucket_data)):
+                    k = json.loads(bucket_data[x])
+                    bucket_data[x] = '{"name":"' + k["name"]+ '","age":' + str(k["age"]) + ',"index":"' + k["index"]+ '","body":"' + k["body"]+ '"}'
                 if sorted(src_data) == sorted(bucket_data):
                     self.log.info("Import data match bucket data")
                     if os.path.exists("/tmp/%s" % self.master.ip):
@@ -1287,6 +1304,8 @@ class ImportExportTests(CliBaseTest):
                         if output:
                             key_value = output[0]
                             key_value = ast.literal_eval(key_value)
+                            if isinstance( key_value["json"], str):
+                                key_value["json"] = ast.literal_eval(key_value["json"])
                             if not isinstance( key_value["json"]["age"], int):
                                 self.fail("Failed to put inferred type into docs %s"
                                           % src_data[x])
@@ -1324,15 +1343,6 @@ class ImportExportTests(CliBaseTest):
                                                              + export_file_name)
 
                     exports = export_file.read().splitlines()
-                    for x in range(len(exports)):
-                        tmp = exports[x].split(",")
-                        """ add leading zero to name value
-                            like pymc39 to pymc039
-                        """
-                        tmp1 = tmp[0][13:-1].zfill(3)
-                        tmp[0] = tmp[0][:13] + tmp1 + '"'
-                        exports[x] = ",".join(tmp)
-
                     if self.debug_logs:
                         s = set(exports)
                         not_in_exports = [x for x in samples if x not in s]
@@ -1340,10 +1350,20 @@ class ImportExportTests(CliBaseTest):
                         e = set(samples)
                         not_in_samples = [x for x in exports if x not in e]
                         print "\n data in exports not in samples  ", not_in_samples
-                    if sorted(samples) == sorted(exports):
-                        self.log.info("export and sample json mathch")
-                    else:
-                        self.fail("export and sample json does not match")
+                    count = 0
+                    self.log.info("Compare data with sample data")
+                    for x in range(0, len(exports)):
+                        k = json.loads(exports[x])
+                        exports[x] = '{"name":"' + k["name"]+ '","age":' + str(k["age"]) + ',"index":"' + k["index"]+ '","body":"' + k["body"]+ '"}'
+                        if exports[x] in samples:
+                            count += 1
+                    if count != len(samples):
+                        self.fail("export and sample json count does not match")
+                    elif not self.dgm_run:
+                        if sorted(samples) == sorted(exports):
+                            self.log.info("export and sample json mathch")
+                        else:
+                            self.fail("export and sample json does not match")
                     sample_file.close()
                     export_file.close()
                     self.log.info("remove file /tmp/export{0}".format(self.master.ip))
@@ -1359,6 +1379,10 @@ class ImportExportTests(CliBaseTest):
                     exports = export_file.read()
                     exports = ast.literal_eval(exports)
                     exports.sort(key=lambda k: k['name'])
+                    """ convert index value from int to str in MH """
+                    if exports and isinstance(exports[0]["index"], str):
+                        for x in samples:
+                            x["index"] = str(x["index"])
 
                     if self.debug_logs:
                         print "\nSample list data: %s" % samples

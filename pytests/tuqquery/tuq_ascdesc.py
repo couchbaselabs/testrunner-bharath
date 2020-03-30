@@ -34,7 +34,7 @@ class AscDescTests(QueryTests):
         #index_1 = ("idx", "default", ["join_yr ASC", " _id DESC"], "online", index_type)
         index_1 = {'name': 'idx',
                    'bucket': 'default',
-                   'fields': ["join_yr ASC", " _id DESC"],
+                   'fields': [("join_yr", 0), ("_id DESC", 1)],
                    'state': 'online',
                    'using': index_type,
                    'is_primary': False}
@@ -57,7 +57,7 @@ class AscDescTests(QueryTests):
 
         # assert defs
         assert_1 = lambda x: self.assertEqual(x['post_q_res'][0]['~children'][0]['~children'][0]['index'], 'idx')
-        assert_2 = lambda x: self.compare("test_asc_desc_composite_index", query_2, static_res_2)
+        assert_2 = lambda x: self.compare("do_not_test_against_hardcode", query_2, static_res_2)
         assert_4 = lambda x: self.compare("test_asc_desc_composite_index", query_4, static_res_4)
         assert_6 = lambda x: self.compare("test_asc_desc_composite_index", query_6, static_res_6)
         assert_7 = lambda x: self.assertEqual(x['post_q_res'][0]['~children'][0]['~children'][0]['scans'][0]['index'], 'idx')

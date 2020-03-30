@@ -1,7 +1,11 @@
+import copy, json, os, random
+import string, re, time, sys
+
+from ep_mc_bin_client import MemcachedClient, MemcachedError
 from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
-from ep_mc_bin_client import MemcachedClient, MemcachedError
 from membase.api.rest_client import RestConnection
+
 
 
 class CouchbaseCliTestWithMeta(CliBaseTest):

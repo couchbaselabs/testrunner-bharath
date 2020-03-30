@@ -1,10 +1,8 @@
-import json
-import re
-
 from basetestcase import BaseTestCase
-from couchbase_helper.document import View
 from membase.api.rest_client import RestConnection
 from remote.remote_util import RemoteMachineShellConnection
+from couchbase_helper.document import View
+import json, re
 
 
 class LogRedactionBase(BaseTestCase):

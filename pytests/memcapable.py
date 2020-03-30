@@ -42,13 +42,11 @@ class MemcapableTestBase(object):
         # Add built-in user
         testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
         RbacBase().create_user_source(testuser, 'builtin', self.master)
-        time.sleep(10)
-
+        
         # Assign user to role
         role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
         RbacBase().add_user_role(role_list, RestConnection(self.master), 'builtin')
-        time.sleep(10)
-
+        
         self._create_default_bucket(unittest)
 
 
@@ -62,9 +60,7 @@ class MemcapableTestBase(object):
             info = rest.get_nodes_self()
             available_ram = info.memoryQuota * node_ram_ratio
             rest.create_bucket(bucket=name, ramQuotaMB=int(available_ram))
-            ready = BucketOperationHelper.wait_for_memcached(master, name)
             BucketOperationHelper.wait_for_vbuckets_ready_state(master, name)
-            unittest.assertTrue(ready, msg="wait_for_memcached failed")
         unittest.assertTrue(helper.bucket_exists(name),
                             msg="unable to create {0} bucket".format(name))
 
@@ -139,6 +135,7 @@ class MemcapableTestBase(object):
     def tearDown(self):
         ClusterOperationHelper.cleanup_cluster([self.master])
         BucketOperationHelper.delete_all_buckets_or_assert([self.master], self)
+
 
 class SimpleSetMembaseBucketDefaultPort(unittest.TestCase):
     memcapableTestBase = None

@@ -1,28 +1,46 @@
-import socket
-import urllib
-
-import logger
-import testconstants
+import json
+import time
+from threading import Thread, Event
 from basetestcase import BaseTestCase
+from couchbase_helper.document import DesignDocument, View
+from couchbase_helper.documentgenerator import DocumentGenerator
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
+from membase.helper.rebalance_helper import RebalanceHelper
+from membase.api.exception import ReadDocumentException
+from membase.api.exception import DesignDocCreationException
+from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
+import testconstants
+from testconstants import LINUX_COUCHBASE_BIN_PATH
+from testconstants import WIN_COUCHBASE_BIN_PATH_RAW
+from testconstants import MAC_COUCHBASE_BIN_PATH
+from random import randint
+from datetime import datetime
+import commands
+import logger
+import urllib
 from security.auditmain import audit
-
+from security.ldaptest import ldaptest
+import socket
 log = logger.Logger.get_logger()
+from ep_mc_bin_client import MemcachedClient
 
 
 class auditTest(BaseTestCase):
 
     def setUp(self):
         super(auditTest, self).setUp()
-        self.ipAddress = self.getLocalIPAddress()
+        try:
+            self.ipAddress = self.getLocalIPAddress()
+        except Exception, ex:
+            self.ipAddress = '127.0.0.1'
         self.eventID = self.input.param('id', None)
-	auditTemp = audit(host=self.master)
-	currentState = auditTemp.getAuditStatus()
-	self.log.info ("Current status of audit on ip - {0} is {1}".format(self.master.ip, currentState))
-	if not currentState:
-	    self.log.info ("Enabling Audit ")
+        auditTemp = audit(host=self.master)
+        currentState = auditTemp.getAuditStatus()
+        self.log.info("Current status of audit on ip - {0} is {1}".format(self.master.ip, currentState))
+        if not currentState:
+            self.log.info("Enabling Audit ")
             auditTemp.setAuditEnable('true')
             self.sleep(30)
         rest = RestConnection(self.master)
@@ -41,6 +59,10 @@ class auditTest(BaseTestCase):
             status, ipAddress = commands.getstatusoutput("ifconfig eth0 | grep  -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | awk '{print $2}'")
         return ipAddress
         '''
+
+    def getLocalIPV6Address(self):
+        result = socket.getaddrinfo(socket.gethostname(), 0, socket.AF_INET6)
+        return result[0][4][0]
 
     def setupLDAPSettings (self,rest):
         api = rest.baseUrl + 'settings/saslauthdAuth'
@@ -62,8 +84,8 @@ class auditTest(BaseTestCase):
     #Check to make sure the audit code DOES NOT appear in the logs (for audit n1ql filtering)
     def checkFilter(self, eventID, host):
         Audit = audit(eventID=eventID, host=host)
-        exists, entry = Audit.validateEmpty()
-        self.assertTrue(exists, "There was an audit entry found. Audits for the code %s should not be logged. Here is the entry: %s" % (eventID, entry))
+        not_exists, entry = Audit.validateEmpty()
+        self.assertTrue(not_exists, "There was an audit entry found. Audits for the code %s should not be logged. Here is the entry: %s" % (eventID, entry))
 
 
     #Tests to check for bucket events
@@ -72,6 +94,9 @@ class auditTest(BaseTestCase):
         user = self.master.rest_username
         source = 'ns_server'
         rest = RestConnection(self.master)
+
+        if "ip6" in self.master.ip or self.master.ip.startswith("["):
+            self.ipAddress = self.getLocalIPV6Address()
 
         if (ops in ['create']):
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':104857600, 'num_replicas':1,
@@ -113,6 +138,22 @@ class auditTest(BaseTestCase):
             rest.flush_bucket(expectedResults['bucket_name'])
 
         self.checkConfig(self.eventID, self.master, expectedResults)
+
+    def test_bucket_select_audit(self):
+        # security.audittest.auditTest.test_bucket_select_audit,default_bucket=false,id=20492
+        rest = RestConnection(self.master)
+        rest.create_bucket(bucket='TestBucket', ramQuotaMB=100)
+        time.sleep(30)
+        mc = MemcachedClient(self.master.ip, 11210)
+        mc.sasl_auth_plain(self.master.rest_username, self.master.rest_password)
+        mc.bucket_select('TestBucket')
+
+        expectedResults = {"bucket":"TestBucket","description":"The specified bucket was selected","id":self.eventID,"name":"select bucket" \
+                           ,"peername":"127.0.0.1:46539","real_userid":{"domain":"memcached","user":"@ns_server"},"sockname":"127.0.0.1:11209"}
+        Audit = audit(eventID=self.eventID, host=self.master)
+        actualEvent = Audit.returnEvent(self.eventID)
+        Audit.validateData(actualEvent, expectedResults)
+
 
 
     def test_clusterOps(self):
@@ -184,7 +225,7 @@ class auditTest(BaseTestCase):
             type = self.input.param('type', None)
             self.cluster.failover(self.servers, servs_inout)
             self.cluster.rebalance(self.servers, [], [])
-            expectedResults = {'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457, 'type':type, 'nodes':'ns_1@' + servs_inout[0].ip}
+            expectedResults = {'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457, 'type':type, 'nodes':'[ns_1@' + servs_inout[0].ip + ']'}
 
         if (ops == 'nodeRecovery'):
             expectedResults = {'node':'ns_1@' + servs_inout[0].ip, 'type':'delta', 'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457}
@@ -213,7 +254,7 @@ class auditTest(BaseTestCase):
             #Get a REST Command for loading sample
 
         elif (ops == 'enableAutoFailover'):
-            expectedResults = {'max_nodes':1, "timeout":120, 'source':source, "user":user, 'ip':self.ipAddress, 'port':12345}
+            expectedResults = {'max_nodes':1, "timeout":120, 'source':source, "user":user, 'ip':self.ipAddress, 'port':12345,'failover_server_group':False}
             rest.update_autofailover_settings(True, expectedResults['timeout'])
 
         elif (ops == 'disableAutoFailover'):

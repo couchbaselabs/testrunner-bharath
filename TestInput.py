@@ -28,6 +28,7 @@ class TestInput(object):
         self.test_params = {}
         self.tuq_client = {}
         self.elastic = []
+        self.advisor = []
         self.cbas = []
         #servers , each server can have u,p,port,directory
 
@@ -122,7 +123,7 @@ class TestInputParser():
     def get_test_input(argv):
         #if file is given use parse_from_file
         #if its from command line
-        (opts, args) = getopt.getopt(argv[1:], 'ht:c:v:s:i:p:l:', [])
+        (opts, args) = getopt.getopt(argv[1:], 'ht:c:v:s:i:p:l:d:e:r:g:m', [])
         #first let's loop over and find out if user has asked for help
         #if it has i
         params = {}
@@ -217,7 +218,9 @@ class TestInputParser():
             elif section == 'tuq_client':
                 input.tuq_client = TestInputParser.get_tuq_config(config, section)
             elif section == 'elastic':
-                input.elastic = TestInputParser.get_elastic_config(config, section)
+                input.elastic = TestInputParser.get_elastic_config(config, section, global_properties)
+            elif section == 'advisor':
+                input.advisor = TestInputParser.get_advisor_config(config, section, global_properties)
             elif section == 'cbas':
                 input.cbas = TestInputParser.get_cbas_config(config, section)
             elif result is not None:
@@ -334,7 +337,7 @@ class TestInputParser():
         return conf
 
     @staticmethod
-    def get_elastic_config(config, section):
+    def get_elastic_config(config, section, global_properties):
         server = TestInputServer()
         options = config.options(section)
         for option in options:
@@ -346,6 +349,31 @@ class TestInputParser():
                 server.es_username = config.get(section, option)
             if option == 'es_password':
                 server.es_password = config.get(section, option)
+            if option == 'username':
+                server.ssh_username = config.get(section, option)
+            if option == 'password':
+                server.ssh_password = config.get(section, option)
+
+        if server.ssh_username == '' and 'username' in global_properties:
+            server.ssh_username = global_properties['username']
+        if server.ssh_password == '' and 'password' in global_properties:
+            server.ssh_password = global_properties['password']
+        return server
+
+    @staticmethod
+    def get_advisor_config(config, section, global_properties):
+        server = TestInputServer()
+        options = config.options(section)
+        for option in options:
+            if option == 'ip':
+                server.ip = config.get(section, option)
+            if option == 'port':
+                server.port = config.get(section, option)
+            if option == 'username':
+                server.rest_username = config.get(section, option)
+            if option == 'password':
+                server.rest_password = config.get(section, option)
+
         return server
 
     @staticmethod

@@ -1,7 +1,5 @@
 import sys
-
 from kubernetes import client, config
-
 
 def main():
     currNameSpace=sys.argv[1]

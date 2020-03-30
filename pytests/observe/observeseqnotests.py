@@ -379,3 +379,67 @@ class ObserveSeqNoTests(BaseTestCase):
         self.check_results( op_data, after_failover_results)
 
         self.log.info('Test complete')
+
+    def test_CASnotzero(self):
+        # MB-31149
+        # observe.observeseqnotests.ObserveSeqNoTests.test_CASnotzero
+        # set value, append and check CAS value
+        self.log.info('Starting test_CASnotzero')
+
+        # without hello(mutationseqencenumber)
+        client = VBucketAwareMemcached(RestConnection(self.master), 'default')
+        KEY_NAME = "test1key"
+        client.set(KEY_NAME, 0,0, json.dumps({'value':'value2'}))
+        client.generic_request(client.memcached(KEY_NAME).append, 'test1key', 'appended data')
+        get_meta_resp = client.generic_request(client.memcached(KEY_NAME).getMeta, 'test1key')
+        self.log.info('the CAS value without hello(mutationseqencenumber): {} '.format(get_meta_resp[4]))
+        self.assertNotEquals(get_meta_resp[4], 0)
+        
+        # with hello(mutationseqencenumber)
+        KEY_NAME = "test2key"
+        client.set(KEY_NAME, 0,0, json.dumps({'value':'value1'}))
+        h = client.sendHellos(memcacheConstants.PROTOCOL_BINARY_FEATURE_MUTATION_SEQNO)
+        client.generic_request(client.memcached(KEY_NAME).append, 'test2key', 'appended data456')
+
+        get_meta_resp = client.generic_request(client.memcached(KEY_NAME).getMeta, 'test2key')
+        self.log.info('the CAS value with hello(mutationseqencenumber): {} '.format(get_meta_resp[4]))
+        self.assertNotEquals(get_meta_resp[4], 0)
+
+    def test_appendprepend(self):
+        # MB-32078, Append with CAS=0 can return ENGINE_KEY_EEXISTS
+        # observe.observeseqnotests.ObserveSeqNoTests.test_appendprepend
+        self.log.info('Starting test_appendprepend')
+        TEST_SEQNO = 123
+        TEST_CAS = 456
+        KEY_NAME='test_appendprepend'
+
+        client = VBucketAwareMemcached(RestConnection(self.master), 'default')
+        # create a value with CAS
+        client.generic_request(
+            client.memcached(KEY_NAME).set_with_meta, KEY_NAME, 0, 0, TEST_SEQNO, TEST_CAS, '123456789')
+        get_resp = client.generic_request(client.memcached(KEY_NAME).get, KEY_NAME)
+        self.assertEquals(get_resp[2],'123456789')
+
+        # check if the changing the value fails
+        try:
+            client.generic_request(
+            client.memcached(KEY_NAME).set_with_meta, KEY_NAME, 0, 0, 0, 0, 'value')
+            self.fail('Expected to fail but passed')
+        except MemcachedError as exp:
+            self.assertEquals(int(exp.status), 2)
+
+        # check if append works fine
+        client.generic_request(client.memcached(KEY_NAME).append, KEY_NAME, 'appended data')
+        get_resp = client.generic_request(client.memcached(KEY_NAME).get, KEY_NAME)
+        self.assertEquals(get_resp[2],'123456789appended data')
+
+        # check if prepend works fine and verify the data
+        client.generic_request(client.memcached(KEY_NAME).prepend, KEY_NAME, 'prepended data')
+        get_resp = client.generic_request(client.memcached(KEY_NAME).get, KEY_NAME)
+        self.assertEquals(get_resp[2],'prepended data123456789appended data')
+
+
+
+
+
+

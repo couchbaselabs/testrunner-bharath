@@ -773,6 +773,27 @@ class BaseSecondaryIndexingTests(QueryTests):
             self.ops_map[phase]["query_explain_ops"] = False
         self.log.info(self.ops_map)
 
+    def fail_if_no_buckets(self):
+        buckets = False
+        for a_bucket in self.buckets:
+            buckets = True
+        if not buckets:
+            self.fail('FAIL: This test requires buckets')
+
+    def block_incoming_network_from_node(self, node1, node2):
+        shell = RemoteMachineShellConnection(node1)
+        self.log.info("Adding {0} into iptables rules on {1}".format(
+            node1.ip, node2.ip))
+        command = "iptables -A INPUT -s {0} -j REJECT".format(node2.ip)
+        shell.execute_command(command)
+
+    def resume_blocked_incoming_network_from_node(self, node1, node2):
+        shell = RemoteMachineShellConnection(node1)
+        self.log.info("Adding {0} into iptables rules on {1}".format(
+            node1.ip, node2.ip))
+        command = "iptables -D INPUT -s {0} -j REJECT".format(node2.ip)
+        shell.execute_command(command)
+
     def set_indexer_logLevel(self, loglevel="info"):
         """
         :param loglevel:
@@ -814,7 +835,33 @@ class BaseSecondaryIndexingTests(QueryTests):
                     is_cluster_healthy = True
         return is_cluster_healthy
 
-    def wait_until_indexes_online(self, timeout=600):
+    def wait_until_indexes_online(self, timeout=600,defer_build=False):
+        rest = RestConnection(self.master)
+        init_time = time.time()
+        check = False
+        while not check:
+            index_status = rest.get_index_status()
+            next_time = time.time()
+            for index_info in index_status.values():
+                for index_state in index_info.values():
+                    if defer_build:
+                        if index_state["status"] == "Created":
+                            check = True
+                        else:
+                            check = False
+                            time.sleep(1)
+                            break
+                    else:
+                        if index_state["status"] == "Ready":
+                            check = True
+                        else:
+                            check = False
+                            time.sleep(1)
+                            break
+            check = check or (next_time - init_time > timeout)
+        return check
+
+    def wait_until_specific_index_online(self, index_name = '', timeout=600, defer_build=False):
         rest = RestConnection(self.master)
         init_time = time.time()
         check = False
@@ -823,14 +870,25 @@ class BaseSecondaryIndexingTests(QueryTests):
             index_status = rest.get_index_status()
             log.info(index_status)
             for index_info in index_status.values():
-                for index_state in index_info.values():
-                    if index_state["status"] == "Ready":
-                        check = True
-                    else:
-                        check = False
-                        time.sleep(1)
-                        next_time = time.time()
-                        break
+                for idx_name in index_info.keys():
+                    if idx_name == index_name:
+                        index_state = index_info[idx_name]
+                        if defer_build:
+                            if index_state["status"] == "Created":
+                                check = True
+                            else:
+                                check = False
+                                time.sleep(1)
+                                next_time = time.time()
+                                break
+                        else:
+                            if index_state["status"] == "Ready":
+                                check = True
+                            else:
+                                check = False
+                                time.sleep(1)
+                                next_time = time.time()
+                                break
             check = check or (next_time - init_time > timeout)
         return check
 

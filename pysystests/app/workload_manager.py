@@ -10,6 +10,7 @@ import uuid
 from celery import current_task
 from celery.signals import task_postrun
 from celery.utils.log import get_task_logger
+from membase.helper.cluster_helper import ClusterOperationHelper
 
 import app.postcondition_handlers as phandler
 import app.sdk_client_tasks as client

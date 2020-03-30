@@ -1,12 +1,20 @@
-import socket
+import json
 import time
-import urllib
-
+from threading import Thread, Event
 from basetestcase import BaseTestCase
-from clitest.cli_base import CliBaseTest
+from couchbase_helper.document import DesignDocument, View
+from couchbase_helper.documentgenerator import DocumentGenerator
 from membase.api.rest_client import RestConnection
+from membase.helper.rebalance_helper import RebalanceHelper
+from membase.api.exception import ReadDocumentException
+from membase.api.exception import DesignDocCreationException
+from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
+import commands
 from security.auditmain import audit
+from clitest.cli_base import CliBaseTest
+import socket
+import urllib
 
 
 class auditcheckconfig(BaseTestCase):
@@ -137,7 +145,7 @@ class auditcheckconfig(BaseTestCase):
                                "descriptors_path":self.changePathWindows(auditIns.getAuditConfigElement('descriptors_path')),
                                "log_path":self.changePathWindows((auditIns.getAuditLogPath())[:-1]), "source":"internal",
                                "user":"couchbase", "rotate_interval":86400, "version":2, 'hostname':self.getHostName(self.master),
-                               "uuid":"64333612"}
+                               "uuid":"111731321"}
             self.checkConfig(self.AUDITCONFIGRELOAD, self.master, expectedResults)
 
     #Test error on setting of Invalid Log file path
@@ -556,7 +564,7 @@ class auditCLITest(CliBaseTest):
         tempEnable = auditIns.getAuditStatus()
         try:
             cli_command = 'setting-audit'
-            options = "--audit-enable=0"
+            options = "--set --audit-enabled=0"
             output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
                         options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
             tempEnable = auditIns.getAuditStatus()
@@ -565,7 +573,7 @@ class auditCLITest(CliBaseTest):
                 log_path = audit.WINLOGFILEPATH
             else:
                 log_path = audit.LINLOGFILEPATH
-            options = "--audit-enable=1 --audit-log-path=" + log_path
+            options = "--set --audit-enabled=1 --audit-log-path=" + log_path
             output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
                         options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
             tempEnable = auditIns.getAuditStatus()

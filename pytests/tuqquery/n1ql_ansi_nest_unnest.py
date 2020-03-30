@@ -1,8 +1,8 @@
 import logging
 import random
 
+from couchbase_helper.tuq_generators import TuqGenerators, JsonGenerator
 from couchbase_helper.query_definitions import QueryDefinition, SQLDefinitionGenerator
-from couchbase_helper.tuq_generators import JsonGenerator
 from membase.api.rest_client import RestConnection
 from tuq import QueryTests
 

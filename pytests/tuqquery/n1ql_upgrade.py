@@ -12,7 +12,6 @@ from security.auditmain import audit
 import socket
 import urllib
 
-
 class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
 
     def setUp(self):
@@ -49,9 +48,9 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
             self.user_xattr_data = []
             self.meta_ids = []
         if self.feature == "curl-whitelist":
-            self.google_error_msg = "Errorevaluatingprojection.-cause:URLendpointisn'twhitelisted" \
+            self.google_error_msg = "Errorevaluatingprojection.-cause:URLendpointisntwhitelisted" \
                                     "https://maps.googleapis.com/maps/api/geocode/json."
-            self.jira_error_msg ="Errorevaluatingprojection.-cause:URLendpointisn'twhitelistedhttps://jira.atlassian." \
+            self.jira_error_msg ="Errorevaluatingprojection.-cause:URLendpointisntwhitelistedhttps://jira.atlassian." \
                                  "com/rest/api/latest/issue/JRA-9.PleasemakesuretowhitelisttheURLontheUI."
             self.cbqpath = '%scbq' % self.path + " -e %s:%s -q -u %s -p %s" \
                                                  % (self.master.ip, self.n1ql_port, self.rest.username, self.rest.password)
@@ -63,7 +62,9 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
             self.filter = self.input.param("filter", False)
         self.log.info("==============  QueriesUpgradeTests setup has completed ==============")
 
+
     def suite_setUp(self):
+
         super(QueriesUpgradeTests, self).suite_setUp()
         self.log.info("==============  QueriesUpgradeTests suite_setup has started ==============")
         self.log.info("==============  QueriesUpgradeTests suite_setup has completed ==============")
@@ -71,6 +72,22 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
     def tearDown(self):
         self.log.info("==============  QueriesUpgradeTests tearDown has started ==============")
         self.upgrade_servers = self.servers
+        if hasattr(self, 'upgrade_versions'):
+            self.log.info("checking upgrade version")
+            upgrade_major = self.upgrade_versions[0][0]
+            self.log.info("upgrade major version: " + str(upgrade_major))
+            if int(upgrade_major) == 5:
+                self.log.info("setting intial_version to: 4.6.5-4742")
+                self.initial_version = "4.6.5-4742"
+            elif int(upgrade_major) == 6:
+                self.log.info("setting intial_version to: 5.5.6-4733")
+                self.initial_version = "5.5.6-4733"
+            elif int(upgrade_major) == 7:
+                self.log.info("setting intial_version to: 6.0.3-2895")
+                self.initial_version = "6.0.3-2895"
+            else:
+                self.log.info("upgrade version invalid: " + str(self.upgrade_versions[0]))
+                self.fail()
         self.log.info("==============  QueriesUpgradeTests tearDown has completed ==============")
         super(QueriesUpgradeTests, self).tearDown()
 
@@ -79,48 +96,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         self.log.info("==============  QueriesUpgradeTests suite_tearDown has completed ==============")
         super(QueriesUpgradeTests, self).suite_tearDown()
 
-    # old test
-    def test_mixed_cluster(self):
-        self._kill_all_processes_cbq()
-        self.assertTrue(len(self.servers) > 1, 'Test needs more than 1 server')
-        method_name = self.input.param('to_run', 'test_all_negative')
-        self._install(self.servers[:2])
-        self.bucket_size = 100
-        self._bucket_creation()
-        self.load(self.gens_load, flag=self.item_flag)
-        upgrade_threads = self._async_update(self.upgrade_versions[0], [self.servers[1]], None, True)
-        for upgrade_thread in upgrade_threads:
-            upgrade_thread.join()
-        self.cluster.rebalance(self.servers[:1], self.servers[1:2], [])
-        self.shell = RemoteMachineShellConnection(self.servers[1])
-        self._kill_all_processes_cbq()
-        self._start_command_line_query(self.servers[1])
-        self.shell.execute_command("ps -aef| grep cbq-engine")
-        self.master = self.servers[1]
-        getattr(self, method_name)()
-        for th in threading.enumerate():
-            th._Thread__stop() if th != threading.current_thread() else None
-
-    # old test
-    def test_upgrade_old(self):
-        self._kill_all_processes_cbq()
-        method_name = self.input.param('to_run', 'test_any')
-        self._install(self.servers[:2])
-        self.bucket_size = 100
-        self._bucket_creation()
-        self.load(self.gens_load, flag=self.item_flag)
-        self.cluster.rebalance(self.servers[:1], self.servers[1:2], [])
-        upgrade_threads = self._async_update(self.upgrade_versions[0], self.servers[:2])
-        for upgrade_thread in upgrade_threads:
-            upgrade_thread.join()
-        self._kill_all_processes_cbq()
-        self._start_command_line_query(self.master)
-        self.create_primary_index_for_3_0_and_greater()
-        getattr(self, method_name)()
-        for th in threading.enumerate():
-            th._Thread__stop() if th != threading.current_thread() else None
-
     def test_upgrade(self):
+
         """
         Upgrade Test.
         1) Run pre-upgrade feature test
@@ -159,7 +136,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
 
         if self.upgrade_type == "offline":
             # stop server, upgrade, rebalance
-            self.offline_upgrade(mixed_servers)
+            self.offline_upgrade(self.servers)
+
 
         if self.upgrade_type == "online":
             # rebalance out, upgrade, rebalance in
@@ -197,9 +175,9 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         # upgrade remaining servers
         self.log.info("upgrading remaining servers")
 
-        if self.upgrade_type == "offline":
-            # stop server, upgrade, rebalance in
-            self.offline_upgrade(remaining_servers)
+        #if self.upgrade_type == "offline":
+        #    # stop server, upgrade, rebalance in
+        #    self.offline_upgrade(remaining_servers)
 
         if self.upgrade_type == "online":
             # rebalance out, upgrade, rebalance in
@@ -274,6 +252,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
                 if cluster_node.ip == server.ip:
                     rest.add_back_node(cluster_node.id)
                     rest.set_recovery_type(otpNode=cluster_node.id, recoveryType="full")
+
+
             participating_servers.remove(server)
             self.log.info("participating servers: {0}".format(str(participating_servers)))
             rebalance = self.cluster.async_rebalance(participating_servers, [], [])

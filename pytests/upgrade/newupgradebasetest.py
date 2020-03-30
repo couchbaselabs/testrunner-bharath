@@ -18,6 +18,7 @@ from scripts.install import InstallerJob
 from builds.build_query import BuildQuery
 from couchbase_helper.tuq_generators import JsonGenerator
 from pytests.fts.fts_callable import FTSCallable
+from pytests.tuqquery.n1ql_callable import N1QLCallable
 from pprint import pprint
 from testconstants import CB_REPO
 from testconstants import MV_LATESTBUILD_REPO
@@ -52,6 +53,7 @@ class NewUpgradeBaseTest(BaseTestCase):
         self.call_ftsCallable = True
         self.upgrade_versions = self.upgrade_versions.split(";")
         self.skip_cleanup = self.input.param("skip_cleanup", False)
+        self.debug_logs = self.input.param("debug_logs", False)
         self.init_nodes = self.input.param('init_nodes', True)
 
         self.is_downgrade = self.input.param('downgrade', False)
@@ -77,9 +79,12 @@ class NewUpgradeBaseTest(BaseTestCase):
         self.num_index_replicas = self.input.param("num_index_replica", 0)
         self.expected_err_msg = self.input.param("expected_err_msg", None)
         self.rest_settings = self.input.membase_settings
+        self.multi_nodes_services = False
         self.rest = None
         self.rest_helper = None
         self.is_ubuntu = False
+        self.is_rpm = False
+        self.is_centos7 = False
         self.sleep_time = 15
         self.ddocs = []
         self.item_flag = self.input.param('item_flag', 0)
@@ -89,6 +94,7 @@ class NewUpgradeBaseTest(BaseTestCase):
         self.ddocs_num = self.input.param("ddocs_num", 1)
         self.view_num = self.input.param("view_per_ddoc", 2)
         self.is_dev_ddoc = self.input.param("is-dev-ddoc", False)
+        self.offline_failover_upgrade = self.input.param("offline_failover_upgrade", False)
         self.during_ops = None
         if "during-ops" in self.input.test_params:
             self.during_ops = self.input.param("during-ops", None).split(",")
@@ -122,6 +128,7 @@ class NewUpgradeBaseTest(BaseTestCase):
             self.max_verify = min(self.num_items, 100000)
         shell = RemoteMachineShellConnection(self.master)
         type = shell.extract_remote_info().distribution_type
+        os_version = shell.extract_remote_info().distribution_version
         shell.disconnect()
         if type.lower() == 'windows':
             self.is_linux = False
@@ -129,6 +136,10 @@ class NewUpgradeBaseTest(BaseTestCase):
             self.is_linux = True
         if type.lower() == "ubuntu":
             self.is_ubuntu = True
+        if type.lower() == "centos":
+            self.is_rpm = True
+            if os_version.lower() == "centos 7":
+                self.is_centos7 = True
         self.queue = Queue.Queue()
         self.upgrade_servers = []
         self.index_replicas = self.input.param("index_replicas", None)
@@ -137,7 +148,6 @@ class NewUpgradeBaseTest(BaseTestCase):
         self.index_kv_store = self.input.param("kvstore", None)
         self.fts_obj = None
         self.log.info("==============  NewUpgradeBaseTest setup has completed ==============")
-
 
     def tearDown(self):
         self.log.info("==============  NewUpgradeBaseTest tearDown has started ==============")
@@ -187,12 +197,14 @@ class NewUpgradeBaseTest(BaseTestCase):
         params['version'] = self.initial_version
         params['vbuckets'] = [self.initial_vbuckets]
         params['init_nodes'] = self.init_nodes
+        params['debug_logs'] = self.debug_logs
         if self.initial_build_type is not None:
             params['type'] = self.initial_build_type
         if 5 <= int(self.initial_version[:1]) or 5 <= int(self.upgrade_versions[0][:1]):
             params['fts_query_limit'] = 10000000
 
-        self.log.info("will install {0} on {1}".format(self.initial_version, [s.ip for s in servers]))
+        self.log.info("will install {0} on {1}"\
+                                .format(self.initial_version, [s.ip for s in servers]))
         InstallerJob().parallel_install(servers, params)
         if self.product in ["couchbase", "couchbase-server", "cb"]:
             success = True
@@ -220,13 +232,15 @@ class NewUpgradeBaseTest(BaseTestCase):
                 server.hostname = hostname
 
     def initial_services(self, services=None):
+        set_services = services
         if services is not None:
             if "-" in services:
                 set_services = services.split("-")
             elif "," in services:
-                set_services = services.split(",")
-        else:
-            set_services = services
+                if self.multi_nodes_services:
+                    set_services = services.split()
+                else:
+                    set_services = services.split(",")
         return set_services
 
     def initialize_nodes(self, servers, services=None):
@@ -243,7 +257,6 @@ class NewUpgradeBaseTest(BaseTestCase):
 
     def operations(self, servers, services=None):
         set_services = self.initial_services(services)
-
 
         if 4.5 > float(self.initial_version[:3]):
             self.gsi_type = "forestdb"
@@ -337,21 +350,27 @@ class NewUpgradeBaseTest(BaseTestCase):
             raise Exception("Build %s for machine %s is not found" % (version, server))
         return appropriate_build
 
-    def _upgrade(self, upgrade_version, server, queue=None, skip_init=False, info=None):
+    def _upgrade(self, upgrade_version, server, queue=None, skip_init=False, info=None,
+                 save_upgrade_config=False, fts_query_limit=None, debug_logs=False):
         try:
             remote = RemoteMachineShellConnection(server)
             appropriate_build = self._get_build(server, upgrade_version, remote, info=info)
-            self.assertTrue(appropriate_build.url, msg="unable to find build {0}".format(upgrade_version))
-            self.assertTrue(remote.download_build(appropriate_build), "Build wasn't downloaded!")
-            o, e = remote.couchbase_upgrade(appropriate_build, save_upgrade_config=False, forcefully=self.is_downgrade,
-                                            fts_query_limit=10000000)
-            self.log.info("upgrade {0} to version {1} is completed".format(server.ip, upgrade_version))
-            """ remove this line when bug MB-11807 fixed """
-            if self.is_ubuntu:
+            self.assertTrue(appropriate_build.url,
+                             msg="unable to find build {0}"\
+                             .format(upgrade_version))
+            self.assertTrue(remote.download_build(appropriate_build),
+                             "Build wasn't downloaded!")
+            o, e = remote.couchbase_upgrade(appropriate_build,
+                                            save_upgrade_config=False,
+                                            forcefully=self.is_downgrade,
+                                            fts_query_limit=fts_query_limit,
+                                            debug_logs=debug_logs)
+            self.log.info("upgrade {0} to version {1} is completed"
+                          .format(server.ip, upgrade_version))
+            if 5.0 > float(self.initial_version[:3]) and self.is_centos7:
+                remote.execute_command("systemctl daemon-reload")
                 remote.start_server()
-            """ remove end here """
-            remote.disconnect()
-            self.sleep(10)
+            self.rest = RestConnection(server)
             if self.is_linux:
                 self.wait_node_restarted(server, wait_time=testconstants.NS_SERVER_TIMEOUT * 4, wait_if_warmup=True)
             else:
@@ -359,6 +378,8 @@ class NewUpgradeBaseTest(BaseTestCase):
             if not skip_init:
                 self.rest.init_cluster(self.rest_settings.rest_username, self.rest_settings.rest_password)
             self.sleep(self.sleep_time)
+            remote.disconnect()
+            self.sleep(10)
             return o, e
         except Exception, e:
             print traceback.extract_stack()
@@ -686,6 +707,31 @@ class NewUpgradeBaseTest(BaseTestCase):
                 self.dcp_rebalance_in_offline_upgrade_from_version2()
             """ set install cb version to upgrade version after done upgrade """
             self.initial_version = self.upgrade_versions[0]
+        except Exception, ex:
+            self.log.info(ex)
+            raise
+
+    def _offline_failover_upgrade(self):
+        try:
+            self.log.info("offline_failover_upgrade")
+            upgrade_version = self.upgrade_versions[0]
+            upgrade_nodes = self.servers[:self.nodes_init]
+            total_nodes = len(upgrade_nodes)
+            for server in upgrade_nodes:
+                self.rest.fail_over('ns_1@' + upgrade_nodes[total_nodes - 1].ip,
+                                                                  graceful=True)
+                self.sleep(timeout=60)
+                self.rest.set_recovery_type('ns_1@' + upgrade_nodes[total_nodes - 1].ip,
+                                                                                 "full")
+                output, error = self._upgrade(upgrade_version,
+                                              upgrade_nodes[total_nodes - 1],
+                                              fts_query_limit=10000000)
+                if "You have successfully installed Couchbase Server." not in output:
+                    self.fail("Upgrade failed. See logs above!")
+                self.cluster.rebalance(self.servers[:self.nodes_init], [], [])
+                total_nodes -= 1
+            if total_nodes == 0:
+                self.rest = RestConnection(upgrade_nodes[total_nodes])
         except Exception, ex:
             self.log.info(ex)
             raise
@@ -1103,6 +1149,43 @@ class NewUpgradeBaseTest(BaseTestCase):
                               format(index.name,
                                      type,
                                      check_index_type))
+        except Exception, ex:
+            print ex
+            if queue is not None:
+                queue.put(False)
+        if queue is not None:
+            queue.put(True)
+
+    """ Use n1ql callable to create, query n1ql """
+    def create_n1ql_index_and_query(self, queue=None):
+        """
+        Call this before upgrade
+        1. creates a gsi index, one per bucket
+        2. Loads fts json data
+        3. Runs queries and compares the results against ElasticSearch
+        """
+        try:
+            n1ql_obj = N1QLCallable(self.servers)
+            for bucket in self.buckets:
+                n1ql_obj.create_gsi_index(keyspace=bucket.name, name="test_idx1",
+                                          fields="email", using="gsi", is_primary=False,
+                                          index_condition="")
+                result = n1ql_obj.run_n1ql_query("select * from system:indexes")
+                n1ql_obj.drop_gsi_index(keyspace=bucket.name, name="test_idx1",
+                                        is_primary=False)
+            #return self.n1ql_obj
+        except Exception, ex:
+            print ex
+            if queue is not None:
+                queue.put(False)
+        if queue is not None:
+            queue.put(True)
+
+    def run_n1ql_query(self, queue=None):
+        try:
+            self.log.info("Run queries again")
+            n1ql_obj = N1QLCallable(self.servers)
+            result = n1ql_obj.run_n1ql_query("select * from system:indexes")
         except Exception, ex:
             print ex
             if queue is not None:

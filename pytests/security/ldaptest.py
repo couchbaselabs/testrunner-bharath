@@ -13,6 +13,7 @@ from remote.remote_util import RemoteMachineShellConnection
 from random import randint
 from clitest.cli_base import CliBaseTest
 
+
 class ServerInfo():
     def __init__(self,
                  ip,
@@ -28,14 +29,13 @@ class ServerInfo():
         self.ssh_key = ssh_key
 
 
-
 class ldaptest(BaseTestCase):
 
     def setUp(self):
         super(ldaptest, self).setUp()
         #Capture details of LDAP Server
         #LDAP host, where LDAP Server is running
-        self.ldapHost = self.input.param('ldapHost', '172.23.108.166')
+        self.ldapHost = self.input.param('ldapHost', '172.23.120.205')
         #LDAP Port, port of LDAP Server
         self.ldapPort = self.input.param('ldapPort', '389')
         #LDAP Admin to connect to

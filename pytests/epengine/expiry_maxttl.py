@@ -1,9 +1,7 @@
 import copy
-
 from couchbase_helper.documentgenerator import JsonDocGenerator
 from lib.membase.api.rest_client import RestConnection
 from pytests.basetestcase import BaseTestCase
-
 
 class ExpiryMaxTTL(BaseTestCase):
 
