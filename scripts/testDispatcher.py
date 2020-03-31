@@ -66,7 +66,7 @@ def main():
     parser.add_option('-f','--jenkins_server_url', dest='jenkins_server_url', default='http://qa.sc.couchbase.com')
     parser.add_option('-m','--rerun_params', dest='rerun_params', default='')
     parser.add_option('-i','--retries', dest='retries', default='1')
-    parser.add_option('-h', '--fresh_run', dest='fresh_run',
+    parser.add_option('-q', '--fresh_run', dest='fresh_run',
                       default=False, action='store_true')
     parser.add_option('-k','--include_tests', dest='include_tests', default=None)
     parser.add_option('-x','--server_manager', dest='SERVER_MANAGER',
