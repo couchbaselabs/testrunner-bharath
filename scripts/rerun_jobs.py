@@ -210,6 +210,7 @@ def rerun_job(args):
     dispatcher_params['retries'] = retry_count - 1
     dispatcher_params['component'] = OS.getenv('component')
     dispatcher_params['subcomponent'] = OS.getenv('subcomponent')
+    dispatcher_params['fresh_run'] = "false"
     job_url = dispatcher_params.pop('dispatcher_url')
     job_url = "{0}buildWithParameters?token=extended_sanity".format(
         job_url)
@@ -235,7 +236,8 @@ def manual_rerun(args):
         print "Could not find a valid previous build to run with"
         return
     with open("rerun_props_file", 'w') as f:
-        to_write = "rerun_params=-d failed={}".format(rerun_param)
+        to_write = "rerun_params_manual=-d failed={}".format(
+            rerun_param)
         f.write(to_write)
         f.close()
 
