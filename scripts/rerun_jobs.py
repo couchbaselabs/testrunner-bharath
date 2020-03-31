@@ -136,7 +136,7 @@ def get_rerun_parameters(rerun_document=None):
     rerun_params = None
     if not rerun_document or rerun_document['num_runs'] == 1:
         current_job_url = OS.getenv("BUILD_URL")
-        rerun_params = "failed={}".format(current_job_url)
+        rerun_params = "-d failed={}".format(current_job_url)
     num_runs = rerun_document['num_runs']
     valid_run = False
     valid_job = None
@@ -148,7 +148,7 @@ def get_rerun_parameters(rerun_document=None):
         valid_job = job
     if valid_run and valid_job:
         job_url = valid_job['job_url']
-        rerun_params = "failed={}".format(job_url)
+        rerun_params = "-d failed={}".format(job_url)
     return rerun_params
 
 
@@ -235,7 +235,7 @@ def manual_rerun(args):
         print "Could not find a valid previous build to run with"
         return
     with open("rerun_props_file", 'w') as f:
-        to_write = "rerun_params=\"failed={}\"".format(rerun_param)
+        to_write = "rerun_params=-d failed={}".format(rerun_param)
         f.write(to_write)
         f.close()
 

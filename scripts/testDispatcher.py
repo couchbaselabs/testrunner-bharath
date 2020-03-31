@@ -64,7 +64,7 @@ def main():
     # whether to use production version of a test_suite_executor or test version
     parser.add_option('-l','--launch_job', dest='launch_job', default='test_suite_executor')
     parser.add_option('-f','--jenkins_server_url', dest='jenkins_server_url', default='http://qa.sc.couchbase.com')
-    parser.add_option('-m','--retry_params', dest='retry_params', default='')
+    parser.add_option('-m','--rerun_params', dest='rerun_params', default='')
     parser.add_option('-i','--retries', dest='retries', default='1')
     parser.add_option('-h', '--fresh_run', dest='fresh_run',
                       default=False, action='store_true')
@@ -95,7 +95,7 @@ def main():
 
     print 'the reportedParameters are', options.dashboardReportedParameters
 
-    print 'retry params are', options.retry_params
+    print 'rerun params are', options.rerun_params
     print 'Server Manager is ', options.SERVER_MANAGER
     print 'Timeout is ', options.TIMEOUT
 
@@ -278,7 +278,7 @@ def main():
                          '8}&installParameters={9}&branch={10}&slave={' \
                          '11}&owners={12}&mailing_list={13}&mode={14}&timeout={15}'
 
-    launchString = launchString + '&retry_params=' + urllib.quote(options.retry_params)
+    launchString = launchString + '&rerun_params=' + urllib.quote(options.rerun_params)
     launchString = launchString + '&retries=' + options.retries
     if options.include_tests:
         launchString = launchString + '&include_tests=' + urllib.quote(options.include_tests)
