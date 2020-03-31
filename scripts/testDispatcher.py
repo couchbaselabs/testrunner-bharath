@@ -7,12 +7,12 @@ import string
 import time
 from optparse import OptionParser
 import traceback
-
+import os as OS
 from couchbase import Couchbase
 from couchbase.bucket import Bucket
 from couchbase.exceptions import CouchbaseError
 from couchbase.n1ql import N1QLQuery
-
+import get_jenkins_params
 
 # takes an ini template as input, standard out is populated with the server pool
 # need a descriptor as a parameter
@@ -285,7 +285,13 @@ def main():
         launchString = launchString + '&url=' + options.url
     if options.cherrypick is not None:
         launchString = launchString + '&cherrypick=' + urllib.quote(options.cherrypick)
-
+    currentDispatcherJobUrl = OS.getenv("BUILD_URL")
+    currentExecutorParams = get_jenkins_params.get_params(
+        currentDispatcherJobUrl)
+    currentExecutorParams['dispatcher_url'] = OS.getenv('JOB_URL')
+    currentExecutorParams = json.dumps(currentExecutorParams)
+    launchString = launchString + '&dispatcher_params=' + \
+                   currentExecutorParams
 
     summary = []
 
