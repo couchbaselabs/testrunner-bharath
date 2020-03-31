@@ -274,9 +274,9 @@ def main():
     # this are VM/Docker dependent - or maybe not
     launchString = launchStringBase + '/buildWithParameters?token=test_dispatcher&' + \
                         'version_number={0}&confFile={1}&descriptor={2}&component={3}&subcomponent={4}&' + \
-                         'iniFile={5}&parameters={6}&os={7}&initNodes={' \
-                         '8}&installParameters={9}&branch={10}&slave={' \
-                         '11}&owners={12}&mailing_list={13}&mode={14}&timeout={15}'
+                         'iniFile={5}&parameters={6}&os={7}&initNodes={8}&' \
+                         'installParameters={9}&branch={10}&slave={11}&' \
+                         'owners={12}&mailing_list={13}&mode={14}&timeout={15}'
 
     launchString = launchString + '&rerun_params=' + urllib.quote(options.rerun_params)
     launchString = launchString + '&retries=' + options.retries
@@ -293,8 +293,6 @@ def main():
         currentDispatcherJobUrl)
     currentExecutorParams['dispatcher_url'] = OS.getenv('JOB_URL')
     currentExecutorParams = json.dumps(currentExecutorParams)
-    launchString = launchString + '&dispatcher_params=' + \
-                   currentExecutorParams
 
     summary = []
 
@@ -454,7 +452,8 @@ def main():
                                                       testsToLaunch[i]['mailing_list']),
                                                   testsToLaunch[i]['mode'],
                                                   testsToLaunch[i]['timeLimit'])
-
+                        url = url + '&dispatcher_params=' + \
+                                       currentExecutorParams
 
                         if options.serverType.lower() != 'docker':
                             r2 = json.loads(content)
