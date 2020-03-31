@@ -66,6 +66,8 @@ def main():
     parser.add_option('-f','--jenkins_server_url', dest='jenkins_server_url', default='http://qa.sc.couchbase.com')
     parser.add_option('-m','--retry_params', dest='retry_params', default='')
     parser.add_option('-i','--retries', dest='retries', default='1')
+    parser.add_option('-h', '--fresh_run', dest='fresh_run',
+                      default=False, action='store_true')
     parser.add_option('-k','--include_tests', dest='include_tests', default=None)
     parser.add_option('-x','--server_manager', dest='SERVER_MANAGER',
                       default='172.23.105.177:8081')
@@ -280,7 +282,8 @@ def main():
     launchString = launchString + '&retries=' + options.retries
     if options.include_tests:
         launchString = launchString + '&include_tests=' + urllib.quote(options.include_tests)
-
+    launchString = launchString + '&fresh_run' + urllib.quote(
+        str(options.fresh_run).lower())
     if options.url is not None:
         launchString = launchString + '&url=' + options.url
     if options.cherrypick is not None:

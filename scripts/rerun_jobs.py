@@ -39,6 +39,9 @@ def parse_args():
                                  action='store_true',
                                  help="Was there install failure in "
                                       "the run?")
+    argument_parser.add_argument("--manual_run", action="store_true",
+                                 help="Is this a manual rerun of the "
+                                      "job")
     args = vars(argument_parser.parse_args())
     return args
 
@@ -109,7 +112,7 @@ def merge_xmls(rerun_document):
 def should_rerun_tests(testsuites=None, install_failure=False,
                        retries=0):
     fresh_run = OS.getenv("fresh_run", False)
-    if fresh_run:
+    if fresh_run == "true" or fresh_run is True:
         return False
     if install_failure and retries > 0:
         return True
@@ -170,7 +173,8 @@ def rerun_job(args):
                                               install_failure=install_failure)
     is_rerun, rerun_document = find_rerun_job.find_rerun_job(is_rerun_args)
     test_suites = {}
-    if is_rerun and not install_failure and not fresh_run:
+    if is_rerun and not install_failure and (fresh_run != 'true' or
+                                             fresh_run is False):
         test_suites = merge_xmls(rerun_document)
     retry_count = OS.getenv("retries")
     if not retry_count:
