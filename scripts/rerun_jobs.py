@@ -2,8 +2,12 @@ import os as OS
 import subprocess
 import sys
 import json
-from lib.membase.api import httplib2
-
+try:
+    import httplib2
+except:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "httplib2"])
+    import httplib2
 try:
     import requests
 except ImportError:

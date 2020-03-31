@@ -5,7 +5,7 @@ import sys
 sys.path = ["lib", "pytests", "pysystests"] + sys.path
 import time
 import subprocess
-from lib.xunit import XUnitTestResult
+from xunit import XUnitTestResult
 import glob
 import xml.dom.minidom
 import logging
