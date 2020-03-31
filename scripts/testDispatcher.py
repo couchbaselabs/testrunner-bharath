@@ -453,7 +453,7 @@ def main():
                                                   testsToLaunch[i]['mode'],
                                                   testsToLaunch[i]['timeLimit'])
                         url = url + '&dispatcher_params=' + \
-                                       currentExecutorParams
+                                       urllib.urlencode({"parameters": currentExecutorParams})
 
                         if options.serverType.lower() != 'docker':
                             r2 = json.loads(content)

@@ -204,7 +204,8 @@ def rerun_job(args):
                                                           job_token)
         response, content = run_jeknins_job(job_url, current_job_params)
         return
-    dispatcher_params = OS.getenv('dispatcher_params')
+    dispatcher_params = OS.getenv('dispatcher_params').lstrip(
+        "parameters=")
     dispatcher_params = json.loads(dispatcher_params)
     dispatcher_params['rerun_params'] = rerun_params
     dispatcher_params['retries'] = retry_count - 1
