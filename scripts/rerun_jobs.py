@@ -2,6 +2,7 @@ import os as OS
 import subprocess
 import sys
 import json
+import urllib
 try:
     import httplib2
 except:
@@ -157,9 +158,9 @@ def get_rerun_parameters(rerun_document=None, is_rerun=False):
     return rerun_params
 
 
-def run_jeknins_job(url, params):
-    for param, val in params.items():
-        url = "{0}&{1}={2}".format(url, param, val)
+def run_jenkins_job(url, params):
+    url = "{0}&{1}".format(url, urllib.urlencode(params))
+    print url
     response, content = httplib2.Http(timeout=TIMEOUT).request(url,
                                                                'GET')
     return response, content
@@ -207,7 +208,7 @@ def rerun_job(args):
         job_token = args['token']
         job_url = "{0}buildWithParameters?token={1}".format(job_url,
                                                           job_token)
-        response, content = run_jeknins_job(job_url, current_job_params)
+        response, content = run_jenkins_job(job_url, current_job_params)
         return
     dispatcher_params = OS.getenv('dispatcher_params').lstrip(
         "parameters=")
@@ -220,7 +221,7 @@ def rerun_job(args):
     job_url = dispatcher_params.pop('dispatcher_url')
     job_url = "{0}buildWithParameters?token=extended_sanity".format(
         job_url)
-    response, content = run_jeknins_job(job_url, dispatcher_params)
+    response, content = run_jenkins_job(job_url, dispatcher_params)
 
 
 def manual_rerun(args):
