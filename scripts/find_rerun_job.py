@@ -175,7 +175,7 @@ def find_rerun_job(args):
                 "build": version_build,
                 "num_runs": 0,
                 "jobs": []}
-        run_document['num_runs'] += run_document['num_runs']
+        run_document['num_runs'] += 1
         run_document['jobs'].append(job_to_store)
         rerun_jobs.upsert(doc_id, run_document, ttl=(7*24*60*60))
         return rerun, run_document
