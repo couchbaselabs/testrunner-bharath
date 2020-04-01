@@ -277,8 +277,8 @@ def main():
                          'iniFile={5}&parameters={6}&os={7}&initNodes={8}&' \
                          'installParameters={9}&branch={10}&slave={11}&' \
                          'owners={12}&mailing_list={13}&mode={14}&timeout={15}'
-
-    launchString = launchString + '&rerun_params=' + urllib.quote(options.rerun_params)
+    rerun_params = options.rerun_params.strip('\'')
+    launchString = launchString + '&' + urllib.urlencode({"rerun_params" : rerun_params})
     launchString = launchString + '&retries=' + options.retries
     if options.include_tests:
         launchString = launchString + '&include_tests=' + urllib.quote(options.include_tests)
