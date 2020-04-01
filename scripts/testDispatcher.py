@@ -282,8 +282,8 @@ def main():
     launchString = launchString + '&retries=' + options.retries
     if options.include_tests:
         launchString = launchString + '&include_tests=' + urllib.quote(options.include_tests)
-    fresh_run = 1 if options.fresh_run else 0
-    launchString = launchString + '&fresh_run' + fresh_run
+    launchString = launchString + '&fresh_run=' + urllib.quote(
+        str(options.fresh_run).lower())
     if options.url is not None:
         launchString = launchString + '&url=' + options.url
     if options.cherrypick is not None:
