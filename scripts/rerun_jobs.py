@@ -136,9 +136,10 @@ def should_rerun_tests(testsuites=None, install_failure=False,
     return should_rerun
 
 
-def get_rerun_parameters(rerun_document=None):
+def get_rerun_parameters(rerun_document=None, is_rerun=False):
     rerun_params = None
-    if not rerun_document or rerun_document['num_runs'] == 1:
+    if not is_rerun and not rerun_document or (rerun_document and
+                                               rerun_document['num_runs'] == 1):
         current_job_url = OS.getenv("BUILD_URL")
         rerun_params = "-d failed={}".format(current_job_url)
     num_runs = rerun_document['num_runs']
@@ -193,7 +194,7 @@ def rerun_job(args):
     if not should_rerun:
         print "No more failed tests. Stopping reruns"
         return
-    rerun_params = get_rerun_parameters()
+    rerun_params = get_rerun_parameters(rerun_document, is_rerun)
     if not rerun_params:
         return
     if jenkins_job:
@@ -236,7 +237,7 @@ def manual_rerun(args):
     if not is_rerun:
         print "This is the first run for this build."
         return
-    rerun_param = get_rerun_parameters(rerun_document)
+    rerun_param = get_rerun_parameters(rerun_document, is_rerun)
     if not rerun_param:
         print "Could not find a valid previous build to run with"
         return
