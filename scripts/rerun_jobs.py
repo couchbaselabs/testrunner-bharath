@@ -78,7 +78,8 @@ def merge_xmls(rerun_document):
         job = rerun_document['jobs'][num_runs - 1]
         if job['install_failure']:
             num_runs -= 1
-        valid_run = True
+        else:
+            valid_run = True
     if not job:
         print "no valid jobs found with run results"
         testsuites = merge_reports.merge_reports("logs/**/*.xml")
