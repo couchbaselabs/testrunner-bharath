@@ -71,7 +71,7 @@ def build_args(build_version, executor_jenkins_job=False,
 
 def merge_xmls(rerun_document):
     print "Merging xmls"
-    num_runs = rerun_document['num_runs']
+    num_runs = rerun_document['num_runs'] - 1
     valid_run = False
     job = None
     while not valid_run and num_runs > 0:
