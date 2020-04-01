@@ -151,8 +151,9 @@ def get_rerun_parameters(rerun_document=None, is_rerun=False):
         job = rerun_document['jobs'][num_runs - 1]
         if job['install_failure']:
             num_runs -= 1
-        valid_run = True
-        valid_job = job
+        else:
+            valid_run = True
+            valid_job = job
     if valid_run and valid_job:
         job_url = valid_job['job_url']
         rerun_params = "-d failed={}".format(job_url)
