@@ -70,6 +70,9 @@ def build_args(build_version, executor_jenkins_job=False,
 
 
 def merge_xmls(rerun_document):
+    if not rerun_document:
+        testsuites = merge_reports.merge_reports("logs/**/*.xml")
+        return testsuites
     print "Merging xmls"
     num_runs = rerun_document['num_runs'] - 1
     valid_run = False
@@ -184,6 +187,8 @@ def rerun_job(args):
     if is_rerun and not install_failure and (fresh_run != 'true' or
                                              fresh_run is False):
         test_suites = merge_xmls(rerun_document)
+    else:
+        test_suites = merge_xmls({})
     retry_count = OS.getenv("retries")
     if not retry_count:
         if "retries" in args:
