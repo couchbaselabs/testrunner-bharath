@@ -120,9 +120,6 @@ def merge_xmls(rerun_document):
 
 def should_rerun_tests(testsuites=None, install_failure=False,
                        retries=0):
-    fresh_run = OS.getenv("fresh_run", False)
-    if fresh_run == "true":
-        return False
     if install_failure and retries > 0:
         return True
     if retries < 1:
