@@ -5,7 +5,7 @@ def main(hosts, operation, user, password):
     hosts = hosts.split(',')
     ssh_connections = []
     for host in hosts:
-        _host = host.trim('"')
+        _host = host.strip('"')
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(hostname=_host, username=user, password=password)
