@@ -1,16 +1,24 @@
-import random
-import urllib
-
-from TestInput import TestInputSingleton
-from basetestcase import BaseTestCase
-from clitest.cli_base import CliBaseTest
+import json
+from threading import Thread
 from membase.api.rest_client import RestConnection
+from TestInput import TestInputSingleton
+from clitest.cli_base import CliBaseTest
 from remote.remote_util import RemoteMachineShellConnection
+from pprint import pprint
+from testconstants import CLI_COMMANDS
+from basetestcase import BaseTestCase
+from remote.remote_util import RemoteMachineShellConnection
+from membase.api.rest_client import RestConnection
+from testconstants import LINUX_COUCHBASE_BIN_PATH
+from testconstants import WIN_COUCHBASE_BIN_PATH
+from testconstants import MAC_COUCHBASE_BIN_PATH
 from security.auditmain import audit
 from security.rbac_base import RbacBase
-from testconstants import LINUX_COUCHBASE_BIN_PATH
-from testconstants import MAC_COUCHBASE_BIN_PATH
-from testconstants import WIN_COUCHBASE_BIN_PATH
+import socket
+import random
+import zlib
+import subprocess
+import urllib.request, urllib.parse, urllib.error
 
 
 class rbacclitests(BaseTestCase):
@@ -44,8 +52,8 @@ class rbacclitests(BaseTestCase):
         self.ldapUser = self.input.param('ldapUser', 'Administrator')
         self.ldapPass = self.input.param('ldapPass', 'password')
         self.source = self.input.param('source', 'ns_server')
-        self.role = self.input.param('role','admin')
-        if self.role in ['bucket_admin','views_admin']:
+        self.role = self.input.param('role', 'admin')
+        if self.role in ['bucket_admin', 'views_admin']:
             self.role = self.role + "[*]"
         self.log.info (" value of self.role is {0}".format(self.role))
         if type == 'windows' and self.source == 'saslauthd':
@@ -55,7 +63,7 @@ class rbacclitests(BaseTestCase):
                 rest = RestConnection(self.master)
                 self.setupLDAPSettings(rest)
                 #rest.ldapUserRestOperation(True, [[self.ldapUser]], exclude=None)
-                self.set_user_role(rest,self.ldapUser,user_role=self.role)
+                self.set_user_role(rest, self.ldapUser, user_role=self.role)
 
 
     def tearDown(self):
@@ -63,7 +71,9 @@ class rbacclitests(BaseTestCase):
 
     def getLocalIPAddress(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('couchbase.com', 0))
+        port = 80
+        host_ip = socket.gethostbyname('www.couchbase.com')
+        s.connect((host_ip,port))
         return s.getsockname()[0]
         '''
         status, ipAddress = commands.getstatusoutput("ifconfig eth0 | grep 'inet addr:' | cut -d: -f2 |awk '{print $1}'")
@@ -72,7 +82,7 @@ class rbacclitests(BaseTestCase):
 
     def setupLDAPSettings (self,rest):
         api = rest.baseUrl + 'settings/saslauthdAuth'
-        params = urllib.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
+        params = urllib.parse.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
         status, content, header = rest._http_request(api, 'POST', params)
         return status, content, header
 
@@ -83,18 +93,16 @@ class rbacclitests(BaseTestCase):
 
     def set_user_role(self,rest,username,user_role='admin'):
         payload = "name=" + username + "&roles=" + user_role
-        content =  rest.set_user_roles(user_id=username,payload=payload)
+        content =  rest.set_user_roles(user_id=username, payload=payload)
 
-    def _validate_roles(self,output,result):
-        print output
+    def _validate_roles(self, output, result):
         final_result = True
         for outputs in output:
-            print outputs
             if result not in outputs:
                 final_result = False
             else:
                 final_result = True
-        self.assertTrue(final_result,"Incorrect Message for the role")
+        self.assertTrue(final_result, "Incorrect Message for the role")
 
     #Wrapper around auditmain
     def checkConfig(self, eventID, host, expectedResults):
@@ -119,11 +127,11 @@ class rbacclitests(BaseTestCase):
         if password is None:
             password = self.ldapPass
 
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=user, password=password)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=user, password=password)
         return output
 
     def testClusterEdit(self):
-        options = "--server-add={0}:8091 --server-add-username=Administrator --server-add-password=password".format(self.servers[num + 1].ip)
+        options = "--server-add=http://{0}:8091 --server-add-username=Administrator --server-add-password=password".format(self.servers[num + 1].ip)
         remote_client = RemoteMachineShellConnection(self.master)
         output, error = remote_client.execute_couchbase_cli(cli_command='cluster-edit', options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
 
@@ -140,49 +148,49 @@ class rbacclitests(BaseTestCase):
         cli_command = self.input.param("cli_command", None)
         source = self.source
         remote_client = RemoteMachineShellConnection(self.master)
-        for num in xrange(nodes_add):
-            options = "--server-add={0}:8091 --server-add-username=Administrator --server-add-password=password".format(self.servers[num + 1].ip)
-            output, error = remote_client.execute_couchbase_cli(cli_command='server-add', options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
-        output, error = remote_client.execute_couchbase_cli(cli_command='rebalance', cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        for num in range(nodes_add):
+            options = "--server-add=http://{0}:8091 --server-add-username=Administrator --server-add-password=password".format(self.servers[num + 1].ip)
+            output, error = remote_client.execute_couchbase_cli(cli_command='server-add', options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command='rebalance', cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self._validate_roles(output,result)
 
         if (cli_command == 'server-remove'):
-            for num in xrange(nodes_rem):
+            for num in range(nodes_rem):
                 cli_command = "rebalance"
                 options = "--server-remove={0}:8091".format(self.servers[nodes_add - num].ip)
-                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
             self._validate_roles(output,result)
 
 
         if (cli_command in ["failover"]):
             cli_command = 'failover'
-            for num in xrange(nodes_failover):
+            for num in range(nodes_failover):
                 self.log.info("failover node {0}".format(self.servers[nodes_add - nodes_rem - num].ip))
                 options = "--server-failover={0}:8091".format(self.servers[nodes_add - nodes_rem - num].ip)
                 options += " --force"
-                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
             self._validate_roles(output,result)
 
         if (cli_command == "server-readd"):
-            for num in xrange(nodes_readd):
+            for num in range(nodes_readd):
                 cli_command = 'failover'
                 self.log.info("failover node {0}".format(self.servers[nodes_add - nodes_rem - num].ip))
                 options = "--server-failover={0}:8091".format(self.servers[nodes_add - nodes_rem - num].ip)
                 options += " --force"
-                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
                 self._validate_roles(output,result)
                 self.log.info("add back node {0} to cluster".format(self.servers[nodes_add - nodes_rem - num ].ip))
                 cli_command = "server-readd"
                 options = "--server-add={0}:8091".format(self.servers[nodes_add - nodes_rem - num ].ip)
-                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
             self._validate_roles(output,result)
         remote_client.disconnect()
 
 
     def testBucketCreation(self):
-        if self.role in ['replication_admin','views_admin[*]','bucket_admin[*]']:
+        if self.role in ['replication_admin', 'views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin']:
+        elif self.role in ['admin', 'cluster_admin']:
             result = 'SUCCESS'
         bucket_name = self.input.param("bucket", "default")
         bucket_type = self.input.param("bucket_type", "couchbase")
@@ -197,14 +205,14 @@ class rbacclitests(BaseTestCase):
         remote_client = RemoteMachineShellConnection(self.master)
         output = self._create_bucket(remote_client, bucket=bucket_name, bucket_type=bucket_type, bucket_port=bucket_port, \
                         bucket_ramsize=bucket_ramsize, bucket_replica=bucket_replica, wait=wait, enable_flush=enable_flush, enable_index_replica=enable_index_replica)
-        self._validate_roles(output,result)
+        self._validate_roles(output, result)
         remote_client.disconnect()
 
 
     def testBucketModification(self):
-        if self.role in ['replication_admin','views_admin[*]']:
+        if self.role in ['replication_admin', 'views_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin','bucket_admin[*]']:
+        elif self.role in ['admin', 'cluster_admin', 'bucket_admin[*]']:
             result = 'SUCCESS'
         cli_command = "bucket-edit"
         bucket_type = self.input.param("bucket_type", "couchbase")
@@ -226,7 +234,7 @@ class rbacclitests(BaseTestCase):
 
         self._create_bucket(remote_client, bucket, bucket_type=bucket_type, bucket_ramsize=bucket_ramsize,
                             bucket_replica=bucket_replica, wait=wait, enable_flush=enable_flush,
-                            enable_index_replica=enable_index_replica,user="Administrator",password='password')
+                            enable_index_replica=enable_index_replica, user="Administrator", password='password')
 
         cli_command = "bucket-edit"
         options = "--bucket={0}".format(bucket)
@@ -235,26 +243,26 @@ class rbacclitests(BaseTestCase):
         #options += (" --bucket-port={0}".format(bucket_port_new), "")[bucket_port_new is None]
         options += (" --bucket-ramsize={0}".format(bucket_ramsize_new), "")[bucket_ramsize_new is None]
 
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self._validate_roles(output,result)
 
         cli_command = "bucket-flush --force"
         options = "--bucket={0}".format(bucket)
         if enable_flush_new is not None:
-            output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+            output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self._validate_roles(output,result)
 
         cli_command = "bucket-delete"
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         expectedResults = {"bucket_name":"BBB", "source":self.source, "user":self.ldapUser, "ip":"127.0.0.1", "port":57457}
-        self._validate_roles(output,result)
+        self._validate_roles(output, result)
 
         remote_client.disconnect()
 
     def testSettingCompacttion(self):
-        if self.role in ['replication_admin','views_admin[*]','bucket_admin[*]']:
+        if self.role in ['replication_admin', 'views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin']:
+        elif self.role in ['admin', 'cluster_admin']:
             result = 'SUCCESS'
         cli_command = "bucket-edit"
         '''setting-compacttion OPTIONS:
@@ -287,16 +295,16 @@ class rbacclitests(BaseTestCase):
         options += (" --enable-compaction-abort={0}".format(enable_compaction_abort), "")[enable_compaction_abort is None]
         options += (" --enable-compaction-parallel={0}".format(enable_compaction_parallel), "")[enable_compaction_parallel is None]
 
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self._validate_roles(output,result)
         remote_client.disconnect()
 
 
 
     def testSettingEmail(self):
-        if self.role in ['replication_admin','views_admin[*]','bucket_admin[*]']:
+        if self.role in ['replication_admin', 'views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin']:
+        elif self.role in ['admin', 'cluster_admin']:
             result = 'SUCCESS'
         setting_enable_email_alert = self.input.param("enable-email-alert", 1)
         setting_email_recipients = self.input.param("email-recipients", 'test@couchbase.com')
@@ -327,14 +335,14 @@ class rbacclitests(BaseTestCase):
         options += (" --alert-meta-oom")
         options += (" --alert-write-failed")
 
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self._validate_roles(output,result)
         remote_client.disconnect()
 
     def testSettingNotification(self):
-        if self.role in ['replication_admin','views_admin[*]','bucket_admin[*]']:
+        if self.role in ['replication_admin', 'views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin']:
+        elif self.role in ['admin', 'cluster_admin']:
             result = 'SUCCESS'
         setting_enable_notification = self.input.param("enable-notification", 1)
 
@@ -342,14 +350,14 @@ class rbacclitests(BaseTestCase):
         cli_command = "setting-notification"
         options = (" --enable-notification={0}".format(setting_enable_notification))
 
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self._validate_roles(output,result)
         remote_client.disconnect()
 
     def testSettingFailover(self):
-        if self.role in ['replication_admin','views_admin[*]','bucket_admin[*]']:
+        if self.role in ['replication_admin', 'views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin']:
+        elif self.role in ['admin', 'cluster_admin']:
             result = 'SUCCESS'
         setting_enable_auto_failover = self.input.param("enable-auto-failover", 1)
         setting_auto_failover_timeout = self.input.param("auto-failover-timeout", 50)
@@ -359,7 +367,7 @@ class rbacclitests(BaseTestCase):
         options = (" --enable-auto-failover={0}".format(setting_enable_auto_failover))
         options += (" --auto-failover-timeout={0}".format(setting_auto_failover_timeout))
 
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self._validate_roles(output,result)
         remote_client.disconnect()
 
@@ -372,7 +380,7 @@ class rbacclitests(BaseTestCase):
         cli_command = "ssl-manage"
         remote_client = RemoteMachineShellConnection(self.master)
         options = "--regenerate-cert={0}".format(xdcr_cert)
-        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+        output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
         self.assertFalse(error, "Error thrown during CLI execution %s" % error)
         self.shell.execute_command("rm {0}".format(xdcr_cert))
         expectedResults = {"real_userid:source":self.source, "real_userid:user":self.ldapUser, "remote:ip":"127.0.0.1", "port":60035}
@@ -382,9 +390,9 @@ class rbacclitests(BaseTestCase):
     """ tests for the group-manage option. group creation, renaming and deletion are tested .
         These tests require a cluster of four or more nodes. """
     def testCreateRenameDeleteGroup(self):
-        if self.role in ['replication_admin','views_admin[*]','bucket_admin[*]']:
+        if self.role in ['replication_admin', 'views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin']:
+        elif self.role in ['admin', 'cluster_admin']:
             result = 'SUCCESS'
 
         remote_client = RemoteMachineShellConnection(self.master)
@@ -397,40 +405,40 @@ class rbacclitests(BaseTestCase):
             # create group
             options = " --create --group-name=group2"
             output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
-                    options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                    options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
             self._validate_roles(output,result)
 
             if result != 'Forbidden':
                 # rename group test
                 options = " --rename=group3 --group-name=group2"
                 output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
-                        options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                        options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
                 self._validate_roles(output,result)
 
                 # delete group test
                 options = " --delete --group-name=group3"
                 output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
-                        options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                        options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
                 self._validate_roles(output,result)
 
         if self.os == "windows":
             # create group
             options = " --create --group-name=group2"
             output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
-                    options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                    options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
             self._validate_roles(output,result)
 
             if result != 'Forbidden':
                 # rename group test
                 options = " --rename=group3 --group-name=group2"
                 output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
-                        options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                        options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
                 self._validate_roles(output,result)
 
                 # delete group test
                 options = " --delete --group-name=group3"
                 output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
-                        options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
+                        options=options, cluster_host="127.0.0.1:8091", user=self.ldapUser, password=self.ldapPass)
                 self._validate_roles(output,result)
 
         remote_client.disconnect()
@@ -450,8 +458,8 @@ class XdcrCLITest(CliBaseTest):
         self.shell = RemoteMachineShellConnection(self.master)
         info = self.shell.extract_remote_info()
         type = info.type.lower()
-        self.role = self.input.param("role","admin")
-        if self.role in ['bucket_admin','views_admin']:
+        self.role = self.input.param("role", "admin")
+        if self.role in ['bucket_admin', 'views_admin']:
             self.role = self.role + "[*]"
         self.log.info (" value of self.role is {0}".format(self.role))
         if type == 'windows' and self.source == 'saslauthd':
@@ -460,7 +468,7 @@ class XdcrCLITest(CliBaseTest):
             if self.source == 'saslauthd':
                 rest = RestConnection(self.master)
                 self.setupLDAPSettings(rest)
-                self.set_user_role(rest,self.ldapUser,user_role=self.role)
+                self.set_user_role(rest, self.ldapUser, user_role=self.role)
 
 
     def tearDown(self):
@@ -478,13 +486,13 @@ class XdcrCLITest(CliBaseTest):
         self.assertTrue(fieldVerification, "One of the fields is not matching")
         self.assertTrue(valueVerification, "Values for one of the fields is not matching")
 
-    def setupLDAPSettings (self,rest):
+    def setupLDAPSettings (self, rest):
         api = rest.baseUrl + 'settings/saslauthdAuth'
-        params = urllib.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
+        params = urllib.parse.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
         status, content, header = rest._http_request(api, 'POST', params)
         return status, content, header
 
-    def __execute_cli(self, cli_command, options, cluster_host="localhost", user=None, password=None):
+    def __execute_cli(self, cli_command, options, cluster_host="127.0.0.1:8091", user=None, password=None):
         if user is None:
             user = self.__user
             password = self.__password
@@ -496,18 +504,16 @@ class XdcrCLITest(CliBaseTest):
                                                 password=password)
     def set_user_role(self,rest,username,user_role='admin'):
         payload = "name=" + username + "&roles=" + user_role
-        rest.set_user_roles(user_id=username,payload=payload)
+        rest.set_user_roles(user_id=username, payload=payload)
 
-    def _validate_roles(self,output,result):
-        print output
+    def _validate_roles(self, output, result):
         final_result = True
         for outputs in output:
-            print outputs
             if result not in outputs:
                 final_result = False
             else:
                 final_result = True
-        self.assertTrue(final_result,"Incorrect Message for the role")
+        self.assertTrue(final_result, "Incorrect Message for the role")
 
     def __xdcr_setup_create(self):
         testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
@@ -528,7 +534,7 @@ class XdcrCLITest(CliBaseTest):
         cli_command = "xdcr-setup"
         options = "--create"
         options += (" --xdcr-cluster-name=\'{0}\'".format(xdcr_cluster_name), "")[xdcr_cluster_name is None]
-        print ("Value of xdcr_home is {0}".format(xdcr_hostname))
+        print(("Value of xdcr_home is {0}".format(xdcr_hostname)))
         if xdcr_hostname is not None:
             RbacBase().create_user_source(testuser, 'builtin', self.servers[xdcr_hostname])
             RbacBase().add_user_role(rolelist, RestConnection(self.servers[xdcr_hostname]), 'builtin')
@@ -546,31 +552,31 @@ class XdcrCLITest(CliBaseTest):
         return output, error, xdcr_cluster_name, xdcr_hostname, cli_command, options
 
     def testXDCRSetup(self):
-        if self.role in ['views_admin[*]','bucket_admin[*]']:
+        if self.role in ['views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin','replication_admin']:
+        elif self.role in ['admin', 'cluster_admin', 'replication_admin']:
             result = 'SUCCESS'
         output, _, xdcr_cluster_name, xdcr_hostname, cli_command, options = self.__xdcr_setup_create()
-        self._validate_roles(output,result)
+        self._validate_roles(output, result)
 
         if xdcr_cluster_name:
             options = options.replace("--create ", "--edit ")
             output, _ = self.__execute_cli(cli_command=cli_command, options=options)
-            self._validate_roles(output,result)
+            self._validate_roles(output, result)
 
         if not xdcr_cluster_name:
             options = "--delete --xdcr-cluster-name=\'{0}\'".format("remote cluster")
         else:
             options = "--delete --xdcr-cluster-name=\'{0}\'".format(xdcr_cluster_name)
         output, _ = self.__execute_cli(cli_command=cli_command, options=options)
-        self._validate_roles(output,result)
+        self._validate_roles(output, result)
 
 
 
     def testXdcrReplication(self):
-        if self.role in ['views_admin[*]','bucket_admin[*]']:
+        if self.role in ['views_admin[*]', 'bucket_admin[*]']:
             result = "Forbidden"
-        elif self.role in ['admin','cluster_admin','replication_admin']:
+        elif self.role in ['admin', 'cluster_admin', 'replication_admin']:
             result = 'SUCCESS'
 
         '''xdcr-replicate OPTIONS:
@@ -606,7 +612,7 @@ class XdcrCLITest(CliBaseTest):
             self.cluster.create_default_bucket(bucket_params)
 
         output, _ = self.__execute_cli(cli_command, options)
-        self._validate_roles(output,result)
+        self._validate_roles(output, result)
 
         self.sleep(8)
         options = "--list"
@@ -619,16 +625,16 @@ class XdcrCLITest(CliBaseTest):
                     options = "--pause"
                     options += (" --xdcr-replicator={0}".format(replicator))
                     output, _ = self.__execute_cli(cli_command, options)
-                    self._validate_roles(output,result)
+                    self._validate_roles(output, result)
 
                     self.sleep(60)
                     # resume replication
                     options = "--resume"
                     options += (" --xdcr-replicator={0}".format(replicator))
                     output, _ = self.__execute_cli(cli_command, options)
-                    self._validate_roles(output,result)
+                    self._validate_roles(output, result)
 
                 options = "--delete"
                 options += (" --xdcr-replicator={0}".format(replicator))
                 output, _ = self.__execute_cli(cli_command, options)
-                self._validate_roles(output,result)
+                self._validate_roles(output, result)

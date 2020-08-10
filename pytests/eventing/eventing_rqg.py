@@ -1,16 +1,14 @@
+import os, re
+import zipfile
 import datetime
 import logging
-import os
-import re
-import zipfile
-from string import Template
 from threading import Thread
-
-from lib.couchbase_helper.tuq_helper import N1QLHelper
 from lib.membase.api.rest_client import RestConnection
 from lib.testconstants import STANDARD_BUCKET_PORT
+from pytests.eventing.eventing_constants import HANDLER_CODE, HANDLER_CODE_ERROR
 from pytests.eventing.eventing_base import EventingBaseTest, log
-from pytests.eventing.eventing_constants import HANDLER_CODE
+from lib.couchbase_helper.tuq_helper import N1QLHelper
+from string import Template
 
 log = logging.getLogger()
 
@@ -44,8 +42,8 @@ class EventingRQG(EventingBaseTest):
                                       use_rest=True
                                       )
         self.number_of_handler = self.input.param('number_of_handler', 5)
-        self.number_of_queries = self.input.param('number_of_queries',None)
-        self.template_file=self.input.param('template_file','b/resources/rqg/simple_table_db/query_tests_using_templates/query_10000_fields.txt.zip')
+        self.number_of_queries = self.input.param('number_of_queries', None)
+        self.template_file=self.input.param('template_file', 'b/resources/rqg/simple_table_db/query_tests_using_templates/query_10000_fields.txt.zip')
 
     having_map = {"STRING_FIELD ": "email ", "NUMERIC_FIELD ": "age ", "UPPER_BOUND_VALUE": "8",
                   "LOWER_BOUND_VALUE": "0", "NUMERIC_FIELD_LIST": "age", "STRING_FIELD_LIST": "email",
@@ -53,12 +51,12 @@ class EventingRQG(EventingBaseTest):
 
     update_map = {"STRING_FIELD ": "email ", "NUMERIC_FIELD ": "age ", "UPPER_BOUND_VALUE": "8",
                   "LOWER_BOUND_VALUE": "0", "NUMERIC_FIELD_LIST": "age", "STRING_FIELD_LIST": "email",
-                  "( LIST )": "[1,2,3]","STRING_FIELD,NUMERIC_FIELD,DATETIME_FIELD":"email=\"update@a.c\",age=4,created='2010-09-15 00:00:00'"}
+                  "( LIST )": "[1,2,3]","STRING_FIELD,NUMERIC_FIELD,DATETIME_FIELD":"email=\"update@a.c\",age=4,created=\"2010-09-15 00:00:00\""}
 
     join_map = {"PREVIOUS_TABLE.FIELD":"src_bucket.email","CURRENT_TABLE.FIELD":"_bucket.email","STRING_FIELD ": "email ", "NUMERIC_FIELD ": "age ", "UPPER_BOUND_VALUE": "8",
                   "LOWER_BOUND_VALUE": "0", "NUMERIC_FIELD_LIST": "age", "STRING_FIELD_LIST": "email",
                   "( LIST )": "[1,2,3]"}
-    field_map = {"NUMERIC_VALUE":"0","STRING_VALUES":"\"a@b.c\""}
+    field_map = {"NUMERIC_VALUE":"0","'%STRING_VALUES%'":"\"%a@b.c%\"","'%STRING_VALUES'":"\"%a@b.c\"","'STRING_VALUES%'":"\"a@b.c%\"","'STRING_VALUES'":"\"a@b.c\""}
 
     def tearDown(self):
         super(EventingRQG, self).tearDown()
@@ -116,13 +114,14 @@ class EventingRQG(EventingBaseTest):
                 for i in range(j, j + k):
                     if i >= s:
                         break
-                    threads.append(Thread(target=self.create_function_and_deploy, args=(query_list[i],False)))
+                    threads.append(Thread(target=self.create_function_and_deploy, args=(query_list[i], False)))
                 for thread in threads:
                     thread.start()
                 for thread in threads:
                     thread.join()
                 key = datetime.datetime.now().time()
-                query = "insert into src_bucket (KEY, VALUE) VALUES (\"" + str(key) + "\",\"doc created\")"
+                query = "insert into src_bucket (KEY, VALUE) VALUES (\""+str(key)+"\",{\"email\":\"a@b.c\"})"
+                self.log.info("insert doc:{}".format(query))
                 self.n1ql_helper.run_cbq_query(query=query, server=self.n1ql_node)
                 self.sleep(10)
                 self.eventing_stats()
@@ -150,24 +149,24 @@ class EventingRQG(EventingBaseTest):
     def _convert_template_n1ql(self, query):
         n1ql = str(query).replace("BUCKET_NAME", self.src_bucket_name)
         n1ql = str(n1ql).replace("TRUNCATE", "TRUNC")
-        for k, v in self.field_map.items():
+        for k, v in list(self.field_map.items()):
             n1ql = str(n1ql).replace(k, v)
         if "HAVING" in n1ql:
-            for k, v in self.having_map.items():
-                n1ql=str(n1ql).replace(k,v)
+            for k, v in list(self.having_map.items()):
+                n1ql=str(n1ql).replace(k, v)
             group_fields = re.search(r'GROUP BY(.*?)HAVING', n1ql).group(1)
             n1ql = n1ql.replace("GROUPBY_FIELDS", group_fields)
         elif "GROUP BY" in n1ql:
-            for k, v in self.having_map.items():
-                n1ql=str(n1ql).replace(k,v)
+            for k, v in list(self.having_map.items()):
+                n1ql=str(n1ql).replace(k, v)
             group_fields = re.search(r'GROUP BY(.*?);', n1ql).group(1)
             n1ql = n1ql.replace("GROUPBY_FIELDS", group_fields)
         if "UPDATE" in n1ql:
-            for k,v in self.update_map.items():
+            for k, v in list(self.update_map.items()):
                 n1ql = str(n1ql).replace(k, v)
             n1ql = n1ql.replace(self.src_bucket_name, self.dst_bucket_name)
         if "JOIN" in n1ql:
-            for k,v in self.join_map.items():
+            for k, v in list(self.join_map.items()):
                 n1ql = str(n1ql).replace(k, v)
         return n1ql
 
@@ -185,7 +184,7 @@ class EventingRQG(EventingBaseTest):
         script_dir = os.path.dirname(__file__)
         abs_file_path = os.path.join(script_dir, handler_code)
         fh = open(abs_file_path, "r")
-        code = Template(fh.read()).substitute(n1ql=query)
+        code = Template(fh.read()).substitute(n1ql=query.strip())
         fh.close()
         ts = datetime.datetime.now().strftime('%m%d%y%H%M%S%f')
         temp_file_path = HANDLER_CODE.N1QL_TEMP_PATH + "f_" + ts + ".js"
@@ -218,9 +217,9 @@ class EventingRQG(EventingBaseTest):
 
 
     def verify_n1ql_stats(self, total_query):
-        n1ql_query = "select failed_query.query from dst_bucket where failed_query is not null"
+        n1ql_query = "select failed_query from dst_bucket where failed_query is not null"
         failed = self.n1ql_helper.run_cbq_query(query=n1ql_query, server=self.n1ql_node)
-        n1ql_query = "select passed_query.query from dst_bucket where passed_query is not null"
+        n1ql_query = "select passed_query from dst_bucket where passed_query is not null"
         passed = self.n1ql_helper.run_cbq_query(query=n1ql_query, server=self.n1ql_node)
         log.info("passed: {}".format(len(passed["results"])))
         log.info("failed: {}".format(len(failed["results"])))

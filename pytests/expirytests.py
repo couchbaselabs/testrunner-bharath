@@ -1,4 +1,4 @@
-from Queue import Empty
+from queue import Empty
 from multiprocessing import Queue
 from threading import Thread
 import unittest
@@ -10,13 +10,16 @@ import uuid
 import logger
 import time
 import datetime
-from membase.api.rest_client import RestConnection
+from membase.api.rest_client import RestConnection, RestHelper
 from membase.api.tap import TapConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 import memcacheConstants
 from memcached.helper.data_helper import MemcachedClientHelper
-from sdk_client import SDKSmartClient
+try:
+    from sdk_client import SDKSmartClient
+except:
+    from sdk_client3 import SDKSmartClient
 from security.rbac_base import RbacBase
 
 class ExpiryTests(unittest.TestCase):
@@ -32,7 +35,7 @@ class ExpiryTests(unittest.TestCase):
         BucketOperationHelper.delete_all_buckets_or_assert([self.master], self)
 
         self._bucket_name = 'default'
-
+        self.bucket_storage = TestInputSingleton.input.param("bucket_storage", 'couchstore')
         serverInfo = self.master
 
         rest = RestConnection(serverInfo)
@@ -41,25 +44,26 @@ class ExpiryTests(unittest.TestCase):
         rest.init_cluster(username=serverInfo.rest_username,
                           password=serverInfo.rest_password)
         rest.init_cluster_memoryQuota(memoryQuota=info.mcdMemoryReserved)
-        bucket_ram = info.memoryQuota * 2 / 3
+        bucket_ram = info.memoryQuota * 2 // 3
 
         # Add built-in user
         testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
         RbacBase().create_user_source(testuser, 'builtin', self.master)
-        time.sleep(10)
-
+        
         # Assign user to role
         role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
         RbacBase().add_user_role(role_list, RestConnection(self.master), 'builtin')
-        time.sleep(10)
 
         rest.create_bucket(bucket=self._bucket_name,
                            ramQuotaMB=bucket_ram,
-                           proxyPort=info.memcached)
-        
+                           proxyPort=info.memcached,
+                           storageBackend=self.bucket_storage)
+        bucket_ready = RestHelper(rest).vbucket_map_ready(self._bucket_name)
+        if not bucket_ready:
+            self.fail("bucket {0} not ready after 120 seconds".format(self._bucket_name))
         msg = 'create_bucket succeeded but bucket "default" does not exist'
         
-        if (testconstants.TESTRUNNER_CLIENT in os.environ.keys()) and os.environ[testconstants.TESTRUNNER_CLIENT] == testconstants.PYTHON_SDK:
+        if (testconstants.TESTRUNNER_CLIENT in list(os.environ.keys())) and os.environ[testconstants.TESTRUNNER_CLIENT] == testconstants.PYTHON_SDK:
             self.client = SDKSmartClient(serverInfo, self._bucket_name, compression=TestInputSingleton.input.param(
                 "sdk_compression", True))
         else:
@@ -114,7 +118,7 @@ class ExpiryTests(unittest.TestCase):
                     msg = "expiry was set to {0} but key: {1} did not expire after waiting for {2}+ seconds"
                     self.fail(msg.format(expiry, key, delay))
                 except mc_bin_client.MemcachedError as error:
-                    self.assertEquals(error.status, 1,
+                    self.assertEqual(error.status, 1,
                                       msg="expected error code {0} but saw error code {1}".format(1, error.status))
             self.log.info("verified that those keys inserted with expiry set to {0} have expired".format(expiry))
 
@@ -156,7 +160,7 @@ class ExpiryTests(unittest.TestCase):
                     msg = "expiry was set to {0} but key: {1} did not expire after waiting for {2}+ seconds"
                     self.fail(msg.format(expiry, key, delay))
                 except mc_bin_client.MemcachedError as error:
-                    self.assertEquals(error.status, 1,
+                    self.assertEqual(error.status, 1,
                                       msg="expected error code {0} but saw error code {1}".format(1, error.status))
             self.log.info("verified that those keys inserted with expiry set to {0} have expired".format(expiry))
             listener.start()
@@ -168,10 +172,10 @@ class ExpiryTests(unittest.TestCase):
                         queue.get(False, 5)
                         deletes_seen += 1
                     except Empty:
-                        print "exception thrown"
-                        print "how many deletes_seen ? {0}".format(deletes_seen)
+                        print("exception thrown")
+                        print("how many deletes_seen ? {0}".format(deletes_seen))
                         was_empty += 1
-                self.assertEquals(deletes_seen, 0, msg="some some deletes")
+                self.assertEqual(deletes_seen, 0, msg="some some deletes")
                 self.log.info("seen {0} CMD_TAP_DELETE".format(deletes_seen))
             finally:
                 listener.aborted = True
@@ -207,7 +211,7 @@ class TapListener(Thread):
 
 
     def tap(self):
-        print "starting tap process"
+        print("starting tap process")
         t = TapConnection(self.server, 11210, callback=self.callback, clientId=str(uuid.uuid4()),
                           opts={memcacheConstants.TAP_FLAG_BACKFILL: 0xffffffff})
         while True and not self.aborted:

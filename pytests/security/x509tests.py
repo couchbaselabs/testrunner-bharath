@@ -1,8 +1,8 @@
 from basetestcase import BaseTestCase
 from security.x509main import x509main
-from newupgradebasetest import NewUpgradeBaseTest
+# from newupgradebasetest import NewUpgradeBaseTest
 from membase.api.rest_client import RestConnection, RestHelper
-import commands
+import subprocess
 import json
 import socket
 from couchbase.bucket import Bucket
@@ -12,6 +12,10 @@ from security.auditmain import audit
 from security.rbac_base import RbacBase
 import os, subprocess
 import copy
+from couchbase.cluster import Cluster
+from couchbase.cluster import PasswordAuthenticator
+from ep_mc_bin_client import MemcachedClient
+from security.ntonencryptionBase import ntonencryptionBase
 
 
 class x509tests(BaseTestCase):
@@ -31,21 +35,26 @@ class x509tests(BaseTestCase):
         self.prefixs = self.input.param('prefixs', 'www.cb-:us.:www.').split(":")
         self.delimeters = self.input.param('delimeter', '.:.:.') .split(":")
         self.setup_once = self.input.param("setup_once", False)
+        self.upload_json_mode = self.input.param("upload_json_mode", 'rest')
+        self.sdk_version = self.input.param('sdk_version', 'pre-vulcan')
         
         self.dns = self.input.param('dns', None)
         self.uri = self.input.param('uri', None)
-        
+        self.enable_nton_local = self.input.param('enable_nton_local',False)
+        self.local_clusterEncryption = self.input.param('local_clusterEncryption','control')
+        self.wildcard_dns = self.input.param('wildcard_dns',None)
+
         copy_servers = copy.deepcopy(self.servers)
         
         # Generate cert and pass on the client ip for cert generation
         if (self.dns is not None) or (self.uri is not None):
-            x509main(self.master)._generate_cert(copy_servers, type=SSLtype, encryption=encryption_type, key_length=key_length, client_ip=self.ip_address, alt_names='non_default', dns=self.dns, uri=self.uri)
+            x509main(self.master)._generate_cert(copy_servers, type=SSLtype, encryption=encryption_type, key_length=key_length, client_ip=self.ip_address, alt_names='non_default', dns=self.dns, uri=self.uri,wildcard_dns=self.wildcard_dns)
         else:
-            x509main(self.master)._generate_cert(copy_servers, type=SSLtype, encryption=encryption_type, key_length=key_length, client_ip=self.ip_address)
+            x509main(self.master)._generate_cert(copy_servers, type=SSLtype, encryption=encryption_type, key_length=key_length, client_ip=self.ip_address,wildcard_dns=self.wildcard_dns)
         self.log.info(" Path is {0} - Prefixs - {1} -- Delimeters - {2}".format(self.paths, self.prefixs, self.delimeters))
         
         if (self.setup_once):
-            x509main(self.master).setup_master(self.client_cert_state, self.paths, self.prefixs, self.delimeters)
+            x509main(self.master).setup_master(self.client_cert_state, self.paths, self.prefixs, self.delimeters, self.upload_json_mode)
             x509main().setup_cluster_nodes_ssl(self.servers)
 
         # reset the severs to ipv6 if there were ipv6
@@ -70,7 +79,7 @@ class x509tests(BaseTestCase):
                 self.sleep(30)
 
     def tearDown(self):
-        print "Into Teardown"
+        self.log.info ("Into Teardown")
         self._reset_original()
         shell = RemoteMachineShellConnection(x509main.SLAVE_HOST)
         shell.execute_command("rm " + x509main.CACERTFILEPATH)
@@ -106,9 +115,9 @@ class x509tests(BaseTestCase):
         s.connect(('couchbase.com', 0))
         return s.getsockname()[0]
         '''
-        status, ipAddress = commands.getstatusoutput("ifconfig en0 | grep 'inet addr:' | cut -d: -f2 |awk '{print $1}'")
+        status, ipAddress = subprocess.getstatusoutput("ifconfig en0 | grep 'inet addr:' | cut -d: -f2 |awk '{print $1}'")
         if '1' not in ipAddress:
-            status, ipAddress = commands.getstatusoutput("ifconfig eth0 | grep  -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | awk '{print $2}'")
+            status, ipAddress = subprocess.getstatusoutput("ifconfig eth0 | grep  -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | awk '{print $2}'")
         return ipAddress
     
     def createBulkDocuments(self, client):
@@ -148,20 +157,51 @@ class x509tests(BaseTestCase):
             return False
 
     def _sdk_connection(self, root_ca_path=x509main.CACERTFILEPATH + x509main.CACERTFILE, bucket='default', host_ip=None):
-        self.sleep(30)
+        self.sleep(10)
         result = False
         self.add_built_in_server_user([{'id': bucket, 'name': bucket, 'password': 'password'}], \
                                       [{'id': bucket, 'name': bucket, 'roles': 'admin'}], self.master)
-        connection_string = 'couchbases://' + host_ip + '/' + bucket + '?certpath=' + root_ca_path
-        self.log.info("Connection string is -{0}".format(connection_string))
-        try:
-            cb = Bucket(connection_string, password='password')
-            if cb is not None:
-                result = True
-                return result, cb
-        except Exception, ex:
-            self.log.info("Expection is  -{0}".format(ex))
-            return result
+        self.add_built_in_server_user([{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}], \
+                                      [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}], self.master)
+        self.sleep(10)
+        if self.sdk_version == 'pre-vulcan':
+            connection_string = 'couchbases://' + host_ip + '/' + bucket + '?certpath=' + root_ca_path
+            self.log.info("Connection string is -{0}".format(connection_string))
+            try:
+                cb = Bucket(connection_string, password='password')
+                if cb is not None:
+                    result = True
+                    return result, cb
+            except Exception as ex:
+                self.log.info("Expection is  -{0}".format(ex))
+        elif self.sdk_version == 'vulcan':
+            key_file = x509main.CACERTFILEPATH + self.ip_address + ".key"
+            chain_file = x509main.CACERTFILEPATH + "/long_chain" + self.ip_address + ".pem"
+            connection_string = 'couchbases://' + host_ip + '/?certpath=' + chain_file + "&keypath=" + key_file
+            self.log.info("Connection string is -{0}".format(connection_string))
+            try:
+                cluster = Cluster(connection_string);
+                cb = cluster.open_bucket(bucket)
+                if cb is not None:
+                    result = True
+                    self.log.info('SDK connection created successfully')
+                    return result, cb
+            except Exception as ex:
+                self.log.info("Expection is  -{0}".format(ex))
+        return result
+
+    def test_bucket_select_audit(self):
+        # security.x509tests.x509tests.test_bucket_select_audit
+        eventID = 20492
+        mc = MemcachedClient(self.master.ip, 11210)
+        mc.sasl_auth_plain(self.master.rest_username, self.master.rest_password)
+        mc.bucket_select('default')
+
+        expectedResults = {"bucket":"default","description":"The specified bucket was selected","id":20492,"name":"select bucket" \
+                           ,"peername":"127.0.0.1:46539","real_userid":{"domain":"memcached","user":"@ns_server"},"sockname":"127.0.0.1:11209"}
+        Audit = audit(eventID=eventID, host=self.master)
+        actualEvent = Audit.returnEvent(eventID)
+        Audit.validateData(actualEvent, expectedResults)
 
     def test_basic_ssl_test(self):
         x509main(self.master).setup_master()
@@ -226,7 +266,7 @@ class x509tests(BaseTestCase):
         x509main(self.master).setup_master()
         try:
             rest.add_node('Administrator', 'password', servs_inout.ip)
-        except Exception, ex:
+        except Exception as ex:
             ex = str(ex)
             # expected_result  = "Error adding node: " + servs_inout.ip + " to the cluster:" + self.master.ip + " - [\"Prepare join failed. Error applying node certificate. Unable to read certificate chain file\"]"
             expected_result = "Error adding node: " + servs_inout.ip + " to the cluster:" + self.master.ip
@@ -394,7 +434,7 @@ class x509tests(BaseTestCase):
             replication_id = restCluster1.start_replication('continuous', 'default', remote_cluster_name)
             if replication_id is not None:
                 self.assertTrue(True, "Replication was not created successfully")
-        except Exception, ex:
+        except Exception as ex:
             self.log.info("Exception is -{0}".format(ex))
         finally:
             restCluster2.delete_bucket()
@@ -673,6 +713,38 @@ class x509tests(BaseTestCase):
         for server in self.servers:
             result = self._sdk_connection(host_ip=server.ip)
             self.assertTrue(result, "Can create a ssl connection with correct certificate")
+    
+    def test_root_crt_rotate_cluster_n2n(self):
+        update_level = self.input.param('update_level','all')
+        #ntonencryptionBase().change_cluster_encryption_cli(self.servers, 'control')
+        #ntonencryptionBase().ntonencryption_cli(self.servers, 'disable')
+        rest = RestConnection(self.master)
+        x509main(self.master).setup_master()
+        x509main().setup_cluster_nodes_ssl(self.servers)
+        rest.create_bucket(bucket='default', ramQuotaMB=100)
+        self.sleep(30)
+        servers_in = self.servers[1:]
+        self.cluster.rebalance(self.servers, servers_in, [])
+
+        for server in self.servers:
+            result = self._sdk_connection(host_ip=server.ip)
+            self.assertTrue(result, "Can create a ssl connection with correct certificate")
+
+        result, cb = self._sdk_connection(host_ip=self.master.ip)
+        create_docs = Thread(name='create_docs', target=self.createBulkDocuments, args=(cb,))
+        create_docs.start()
+
+        x509main(self.master)._delete_inbox_folder()
+        x509main(self.master)._generate_cert(self.servers, root_cn="CB\ Authority", type='openssl', client_ip=self.ip_address)
+        x509main(self.master).setup_master()
+        x509main().setup_cluster_nodes_ssl(self.servers, reload_cert=True)
+        create_docs.join()
+        ntonencryptionBase().ntonencryption_cli(self.servers, 'enable')
+        ntonencryptionBase().change_cluster_encryption_cli(self.servers, update_level)
+
+        for server in self.servers:
+            result = self._sdk_connection(host_ip=server.ip)
+            self.assertTrue(result, "Can create a ssl connection with correct certificate")
 
     # Changing from self signed to ca signed, while there is a connection with self-signed
     def test_root_existing_connection_rotate_cert(self):
@@ -689,7 +761,7 @@ class x509tests(BaseTestCase):
             cb = Bucket(connection_string, password='password')
             if cb is not None:
                 result = True
-        except Exception, ex:
+        except Exception as ex:
             self.log.info("Exception is -{0}".format(ex))
         self.assertTrue(result, "Cannot create a client connection with server")
 
@@ -717,6 +789,9 @@ class x509tests(BaseTestCase):
     
     # Common test case for testing services and other parameter
     def test_add_node_with_cert_diff_services(self):
+        if self.enable_nton_local:
+            ntonencryptionBase().ntonencryption_cli(self.servers, 'enable')
+            ntonencryptionBase().change_cluster_encryption_cli(self.servers, self.local_clusterEncryption)
         servs_inout = self.servers[1:4]
         rest = RestConnection(self.master)
         services_in = []
@@ -796,9 +871,9 @@ class x509tests(BaseTestCase):
             output = x509main()._execute_command_clientcert(host.ip, url='/query/service', port=18093, headers='--http1.1', client_cert=True, curl=True, verb='GET', data="statement='create index idx1 on default(name)'")
         else:
             output = x509main()._execute_command_clientcert(host.ip, url='/query/service', port=18093, headers='--http1.1 -u Administrator:password ', client_cert=False, curl=True, verb='GET', data="statement='create index idx1 on default(name)'")
-        
+
         self.assertEqual(json.loads(output)['status'], "success", "Create Index Failed on port 18093")
-        
+
         output = x509main()._execute_command_clientcert(host.ip, url='/query/service', port=8093, headers='--http1.1 -u Administrator:password ', client_cert=False, curl=True, verb='GET', plain_curl=True, data="statement='create index idx2 on default(name)'")
         self.assertEqual(json.loads(output)['status'], "success", "Create Index Failed on port 8093")
 
@@ -823,11 +898,11 @@ class x509tests(BaseTestCase):
         else:
             output = x509main()._execute_command_clientcert(host.ip, url='/api/index/default_idx', port=18094, headers=" -XPUT -H \"Content-Type: application/json\" -u Administrator:password ",
                                                             client_cert=False, curl=True, verb='GET', data="'" + json.dumps(idx) + "'")
-        self.assertEqual(json.loads(output), {"status":"ok"}, "Issue with creating FTS index with client Cert")
+        self.assertEqual(json.loads(output)['status'], "ok", "Issue with creating FTS index with client Cert")
         
         output = x509main()._execute_command_clientcert(host.ip, url='/api/index/default_idx01', port=8094, headers=" -XPUT -H \"Content-Type: application/json\" -u Administrator:password ",
                                                         client_cert=False, curl=True, verb='GET', data="'" + json.dumps(idx) + "'", plain_curl=True)
-        self.assertEqual(json.loads(output), {"status":"ok"}, "Issue with creating FTS index with client Cert")
+        self.assertEqual(json.loads(output)['status'], "ok", "Issue with creating FTS index with client Cert")
         
         if self.client_cert_state == 'enable':
             output = x509main()._execute_command_clientcert(host.ip, url='/api/index/default_idx', port=18094, headers=" -H \"Content-Type: application/json\" ",
@@ -835,11 +910,11 @@ class x509tests(BaseTestCase):
         else:
             output = x509main()._execute_command_clientcert(host.ip, url='/api/index/default_idx', port=18094, headers=" -H \"Content-Type: application/json\" -u Administrator:password ",
                                                             client_cert=False, curl=True, verb='DELETE')
-        self.assertEqual(json.loads(output), {"status":"ok"}, "Issue with deleteing FTS index with client Cert")
+        self.assertEqual(json.loads(output)['status'], "ok", "Issue with deleteing FTS index with client Cert")
         
         output = x509main()._execute_command_clientcert(host.ip, url='/api/index/default_idx01', port=8094, headers=" -H \"Content-Type: application/json\" -u Administrator:password ",
                                                         client_cert=False, curl=True, verb='DELETE', plain_curl=True)
-        self.assertEqual(json.loads(output), {"status":"ok"}, "Issue with deleteing FTS index on 8094")
+        self.assertEqual(json.loads(output)['status'], "ok", "Issue with deleteing FTS index on 8094")
             
         ''' - Check with FTS team on this        
         if self.client_cert_state == 'enable':
@@ -874,7 +949,7 @@ class x509tests(BaseTestCase):
             rest.create_bucket(bucket='default', ramQuotaMB=100)
                 
         cmd = "curl -v  " + \
-                " -s -u Administrator:password --data pretty=true --data-urlencode 'statement=create bucket default_cbas with {\"name\":\"default\"}' " + \
+                " -s -u Administrator:password --data pretty=true --data-urlencode 'statement=create dataset on default' " + \
                 "http://{0}:{1}/_p/cbas/query/service ". \
                 format(host.ip, 8091)
         
@@ -940,15 +1015,15 @@ class x509tests(BaseTestCase):
             self.assertTrue(True, "CA Cert works with mandatory")
                               
         status, output = x509main()._execute_command_clientcert(host.ip, url='/pools/default', port=8091, headers=" -u Administrator:password ", client_cert=False, curl=False, verb='GET', plain_curl=True)
-        self.assertEqual(status, 401 , "Invalid user gets authenticated successfully")
+        self.assertEqual(status, 401, "Invalid user gets authenticated successfully")
     
     def test_incorrect_user(self):
         host = self.master
         rest = RestConnection(self.master)
         rest.create_bucket(bucket='default', ramQuotaMB=100)
         
-        status, output = x509main()._execute_command_clientcert(host.ip, url='/pools/default', port=18091, headers="", client_cert=True, curl=False)
-        self.assertEqual(status, 401 , "Invalid user gets authenticated successfully")
+        status = x509main()._execute_command_clientcert(host.ip, url='/pools/default', port=18091, headers="", client_cert=True, curl=False)
+        self.assertEqual(status[0], 'error' , "Invalid user gets authenticated successfully")
 
     def test_upload_json_tests(self):
         rest = RestConnection(self.master)
@@ -957,7 +1032,7 @@ class x509tests(BaseTestCase):
         if "Invalid value 'subject.test' for key 'path'" in content:
             self.assertTrue(True, " Correct error message for key path")
     
-
+'''
 class x509_upgrade(NewUpgradeBaseTest):
 
     def setUp(self):
@@ -1048,21 +1123,37 @@ class x509_upgrade(NewUpgradeBaseTest):
         if output == "":
             self.assertTrue(True, "Issue with post on /pools/default")
     
-    def _sdk_connection(self, root_ca_path=x509main.CACERTFILEPATH + x509main.CACERTFILE, bucket='default', host_ip=None):
+    def _sdk_connection(self, root_ca_path=x509main.CACERTFILEPATH + x509main.CACERTFILE, bucket='default', host_ip=None, sdk_version='pre-vulcan'):
         self.sleep(30)
         result = False
         self.add_built_in_server_user([{'id': bucket, 'name': bucket, 'password': 'password'}], \
                                       [{'id': bucket, 'name': bucket, 'roles': 'admin'}], self.master)
-        connection_string = 'couchbases://' + host_ip + '/' + bucket + '?certpath=' + root_ca_path
-        self.log.info("Connection string is -{0}".format(connection_string))
-        try:
-            cb = Bucket(connection_string, password='password')
-            if cb is not None:
-                result = True
-                return result, cb
-        except Exception, ex:
-            self.log.info("Exception is  -{0}".format(ex))
-            return result
+        if sdk_version == 'pre-vulcan':
+            connection_string = 'couchbases://' + host_ip + '/' + bucket + '?certpath=' + root_ca_path
+            self.log.info("Connection string is -{0}".format(connection_string))
+            try:
+                cb = Bucket(connection_string, password='password')
+                if cb is not None:
+                    result = True
+                    return result, cb
+            except Exception as ex:
+                self.log.info("Expection is  -{0}".format(ex))
+        elif sdk_version == 'vulcan':
+            self.add_built_in_server_user([{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}], \
+                                      [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}], self.master)
+            key_file = x509main.CACERTFILEPATH + self.ip_address + ".key"
+            chain_file = x509main.CACERTFILEPATH + "/long_chain" + self.ip_address + ".pem"
+            connection_string = 'couchbases://' + host_ip + '/?certpath=' + chain_file + "&keypath=" + key_file
+            self.log.info("Connection string is -{0}".format(connection_string))
+            try:
+                cluster = Cluster(connection_string);
+                cb = cluster.open_bucket(bucket)
+                if cb is not None:
+                    result = True
+                    return result, cb
+            except Exception as ex:
+                self.log.info("Expection is  -{0}".format(ex))
+        return result
 
     def upgrade_all_nodes(self):
         servers_in = self.servers[1:]
@@ -1122,4 +1213,7 @@ class x509_upgrade(NewUpgradeBaseTest):
         for server in self.servers:
             result = self._sdk_connection(host_ip=server.ip)
             self.assertTrue(result, "Cannot create a security connection with server")
+            result = self._sdk_connection(host_ip=server.ip, sdk_version='vulcan')
+            self.assertTrue(result, "Cannot create a security connection with server")
             self.check_rest_api(server)
+'''

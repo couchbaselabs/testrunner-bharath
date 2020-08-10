@@ -8,17 +8,20 @@ import socket
 import string
 import time
 import traceback
-from httplib import IncompleteRead
+import sys
+from functools import cmp_to_key
+from http.client import IncompleteRead
 from multiprocessing import Process, Manager, Semaphore
 from threading import Thread
 
 import crc32
 import logger
 import testconstants
-from TestInput import TestInputServer, TestInputSingleton
+from collection.collections_rest_client import CollectionsRest
 from couchbase_helper.document import DesignDocument
 from couchbase_helper.documentgenerator import BatchedDocumentGenerator
 from couchbase_helper.stats_tools import StatsCommon
+from deepdiff import DeepDiff
 from mc_bin_client import MemcachedError
 from membase.api.exception import BucketCreationException
 from membase.api.exception import N1QLQueryException, DropIndexException, CreateIndexException, \
@@ -33,20 +36,38 @@ from memcached.helper.data_helper import MemcachedClientHelper
 from memcached.helper.kvstore import KVStore
 from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
 from tasks.future import Future
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY, ALLOW_HTP, \
-    CBAS_QUOTA
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, \
+    THROUGHPUT_CONCURRENCY, ALLOW_HTP, CBAS_QUOTA, CLUSTER_QUOTA_RATIO
+
+from TestInput import TestInputServer, TestInputSingleton
 
 try:
     CHECK_FLAG = False
-    if (testconstants.TESTRUNNER_CLIENT in os.environ.keys()) and os.environ[testconstants.TESTRUNNER_CLIENT] == testconstants.PYTHON_SDK:
-        from sdk_client import SDKSmartClient as VBucketAwareMemcached
-        from sdk_client import SDKBasedKVStoreAwareSmartClient as KVStoreAwareSmartClient
+    if (TestInputSingleton.input.param("testrunner_client", None) == testconstants.PYTHON_SDK) or \
+        ((testconstants.TESTRUNNER_CLIENT in list(os.environ.keys())) and os.environ[testconstants.TESTRUNNER_CLIENT] == testconstants.PYTHON_SDK):
+        try:
+            from sdk_client import SDKSmartClient as VBucketAwareMemcached
+            from sdk_client import SDKBasedKVStoreAwareSmartClient as KVStoreAwareSmartClient
+        except:
+            from sdk_client3 import SDKSmartClient as VBucketAwareMemcached
+            from sdk_client3 import SDKBasedKVStoreAwareSmartClient as KVStoreAwareSmartClient
+        if (TestInputSingleton.input.param("enable_sdk_logging", False)):
+            import logging
+            import couchbase
+
+            logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+            couchbase.enable_logging()
     else:
         CHECK_FLAG = True
-        from memcached.helper.data_helper import VBucketAwareMemcached,KVStoreAwareSmartClient
+        from memcached.helper.data_helper import VBucketAwareMemcached, KVStoreAwareSmartClient
 except Exception as e:
-    CHECK_FLAG = True
-    from memcached.helper.data_helper import VBucketAwareMemcached,KVStoreAwareSmartClient
+    CHECK_FLAG = False
+    try:
+        from sdk_client import SDKSmartClient as VBucketAwareMemcached
+        from sdk_client import SDKBasedKVStoreAwareSmartClient as KVStoreAwareSmartClient
+    except:
+        from sdk_client3 import SDKSmartClient as VBucketAwareMemcached
+        from sdk_client3 import SDKBasedKVStoreAwareSmartClient as KVStoreAwareSmartClient
 
 # TODO: Setup stacktracer
 # TODO: Needs "easy_install pygments"
@@ -59,6 +80,7 @@ PENDING = 'PENDING'
 EXECUTING = 'EXECUTING'
 CHECKING = 'CHECKING'
 FINISHED = 'FINISHED'
+
 
 class Task(Future):
     def __init__(self, name):
@@ -88,10 +110,11 @@ class Task(Future):
     def check(self, task_manager):
         raise NotImplementedError
 
-    def set_unexpected_exception(self, e, suffix = ""):
+    def set_unexpected_exception(self, e, suffix=""):
         self.log.error("Unexpected exception [{0}] caught".format(e) + suffix)
         self.log.error(''.join(traceback.format_stack()))
         self.set_exception(e)
+
 
 class NodeInitializeTask(Task):
     def __init__(self, server, disabled_consistent_view=None,
@@ -101,7 +124,7 @@ class NodeInitializeTask(Task):
                  maxParallelReplicaIndexers=None,
                  port=None, quota_percent=None,
                  index_quota_percent=None,
-                 services = None, gsi_type='forestdb'):
+                 services=None, gsi_type='forestdb'):
         Task.__init__(self, "node_init_task")
         self.server = server
         self.port = port or server.port
@@ -120,82 +143,84 @@ class NodeInitializeTask(Task):
     def execute(self, task_manager):
         try:
             rest = RestConnection(self.server)
-        except ServerUnavailableException as error:
-                self.state = FINISHED
-                self.set_exception(error)
-                return
+        except Exception as error:
+            self.state = FINISHED
+            print("debuging hanging issue task 127" + str(error))
+            self.set_exception(error)
+            return
+        self.log.info("server: %s, nodes/self ", self.server)
         info = Future.wait_until(lambda: rest.get_nodes_self(),
-                                 lambda x: x.memoryTotal > 0, 10)
-        self.log.info("server: %s, nodes/self: %s", self.server, info.__dict__)
+                                 lambda x: x.memoryTotal > 0 or x.storageTotalRam > 0,
+                                 timeout_secs=60, interval_time=0.1,
+                                 exponential_backoff=False)
+        self.log.info(" %s", info.__dict__)
 
         username = self.server.rest_username
         password = self.server.rest_password
 
-        if int(info.port) in range(9091,9991):
+        if int(info.port) in range(9091, 9991):
             self.state = FINISHED
             self.set_result(True)
             return
 
-        self.quota = int(info.mcdMemoryReserved * 2/3)
+        self.quota = int(info.mcdMemoryReserved * CLUSTER_QUOTA_RATIO)
         if self.index_quota_percent:
-            self.index_quota = int((info.mcdMemoryReserved * 2/3) * \
-                                      self.index_quota_percent / 100)
-            rest.set_service_memoryQuota(service='indexMemoryQuota', username=username, password=password, memoryQuota=self.index_quota)
+            self.index_quota = int((info.mcdMemoryReserved * CLUSTER_QUOTA_RATIO) * \
+                                   self.index_quota_percent // 100)
+            rest.set_service_memoryQuota(service='indexMemoryQuota', username=username, \
+                                         password=password, memoryQuota=self.index_quota)
         if self.quota_percent:
-           self.quota = int(info.mcdMemoryReserved * self.quota_percent / 100)
+            self.quota = int(info.mcdMemoryReserved * self.quota_percent / 100)
 
         """ Adjust KV RAM to correct value when there is INDEX
             and FTS services added to node from Watson  """
         index_quota = INDEX_QUOTA
-        kv_quota = int(info.mcdMemoryReserved * 2/3)
+        cluster_setting = rest.cluster_status()
+        fts_quota = FTS_QUOTA
+        if cluster_setting:
+            if cluster_setting["ftsMemoryQuota"] and \
+                    int(cluster_setting["ftsMemoryQuota"]) >= 256:
+                fts_quota = int(cluster_setting["ftsMemoryQuota"])
+        kv_quota = int(info.mcdMemoryReserved * CLUSTER_QUOTA_RATIO)
         if self.index_quota_percent:
-                index_quota = self.index_quota
+            index_quota = self.index_quota
         if not self.quota_percent:
             set_services = copy.deepcopy(self.services)
             if set_services is None:
                 set_services = ["kv"]
-#             info = rest.get_nodes_self()
-#             cb_version = info.version[:5]
-#             if cb_version in COUCHBASE_FROM_VERSION_4:
+            #             info = rest.get_nodes_self()
+            #             cb_version = info.version[:5]
+            #             if cb_version in COUCHBASE_FROM_VERSION_4:
             if "index" in set_services:
                 self.log.info("quota for index service will be %s MB" % (index_quota))
                 kv_quota -= index_quota
                 self.log.info("set index quota to node %s " % self.server.ip)
                 rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=index_quota)
             if "fts" in set_services:
-                self.log.info("quota for fts service will be %s MB" % (FTS_QUOTA))
-                kv_quota -= FTS_QUOTA
-                self.log.info("set both index and fts quota at node %s "% self.server.ip)
-                rest.set_service_memoryQuota(service='ftsMemoryQuota', memoryQuota=FTS_QUOTA)
+                self.log.info("quota for fts service will be %s MB" % (fts_quota))
+                kv_quota -= fts_quota
+                self.log.info("set both index and fts quota at node %s " % self.server.ip)
+                rest.set_service_memoryQuota(service='ftsMemoryQuota', memoryQuota=fts_quota)
             if "cbas" in set_services:
                 self.log.info("quota for cbas service will be %s MB" % (CBAS_QUOTA))
                 kv_quota -= CBAS_QUOTA
-                rest.set_service_memoryQuota(service = "cbasMemoryQuota", memoryQuota=CBAS_QUOTA)
+                rest.set_service_memoryQuota(service="cbasMemoryQuota", memoryQuota=CBAS_QUOTA)
             if kv_quota < MIN_KV_QUOTA:
-                    raise Exception("KV RAM needs to be more than %s MB"
-                            " at node  %s"  % (MIN_KV_QUOTA, self.server.ip))
+                raise Exception("KV RAM needs to be more than %s MB"
+                                " at node  %s" % (MIN_KV_QUOTA, self.server.ip))
             if kv_quota < int(self.quota):
                 self.quota = kv_quota
 
         rest.init_cluster_memoryQuota(username, password, self.quota)
-        if rest.is_cluster_compat_mode_greater_than(4.0):
-            if self.gsi_type == "plasma":
-                if not rest.is_cluster_compat_mode_greater_than(5.0):
-                    rest.set_indexer_storage_mode(username, password, "forestdb")
-                else:
-                    rest.set_indexer_storage_mode(username, password, self.gsi_type)
-            else:
-                rest.set_indexer_storage_mode(username, password, self.gsi_type)
-
 
         if self.services:
-            status = rest.init_node_services(username= username, password = password,\
-                                          port = self.port, hostname= self.server.ip,\
-                                                              services= self.services)
+            status = rest.init_node_services(username=username, password=password, \
+                                             port=self.port, hostname=self.server.ip, \
+                                             services=self.services)
             if not status:
                 self.state = FINISHED
-                self.set_exception(Exception('unable to set services for server %s'\
-                                                               % (self.server.ip)))
+                self.set_exception(Exception('unable to set services for server %s' \
+                                             % (self.server.ip)))
                 return
         if self.disable_consistent_view is not None:
             rest.set_reb_cons_view(self.disable_consistent_view)
@@ -209,18 +234,31 @@ class NodeInitializeTask(Task):
             rest.set_max_parallel_replica_indexers(self.maxParallelReplicaIndexers)
 
         rest.init_cluster(username, password, self.port)
+        remote_shell = RemoteMachineShellConnection(self.server)
+        remote_shell.enable_diag_eval_on_non_local_hosts()
+        remote_shell.disconnect()
+        if rest.is_cluster_compat_mode_greater_than(4.0):
+            if self.gsi_type == "plasma":
+                if not rest.is_cluster_compat_mode_greater_than(5.0):
+                    rest.set_indexer_storage_mode(username, password, "forestdb")
+                else:
+                    rest.set_indexer_storage_mode(username, password, self.gsi_type)
+            else:
+                rest.set_indexer_storage_mode(username, password, self.gsi_type)
         self.server.port = self.port
         try:
             rest = RestConnection(self.server)
-        except ServerUnavailableException as error:
-                self.state = FINISHED
-                self.set_exception(error)
-                return
+        except Exception as error:
+            self.state = FINISHED
+            print("debuging hanging issue task 230" + str(error))
+            self.set_exception(error)
+            return
         info = rest.get_nodes_self()
 
         if info is None:
             self.state = FINISHED
-            self.set_exception(Exception('unable to get information on a server %s, it is available?' % (self.server.ip)))
+            self.set_exception(
+                Exception('unable to get information on a server %s, it is available?' % (self.server.ip)))
             return
         self.state = CHECKING
         task_manager.schedule(self)
@@ -235,6 +273,7 @@ class BucketCreateTask(Task):
         Task.__init__(self, "bucket_create_task")
         self.server = bucket_params['server']
         self.bucket = bucket_params['bucket_name']
+        self.alt_addr = TestInputSingleton.input.param("alt_addr", False)
         self.replicas = bucket_params['replicas']
         self.port = bucket_params['port']
         self.size = bucket_params['size']
@@ -243,6 +282,11 @@ class BucketCreateTask(Task):
         self.enable_replica_index = bucket_params['enable_replica_index']
         self.eviction_policy = bucket_params['eviction_policy']
         self.lww = bucket_params['lww']
+
+        self.storageBackend = 'couchstore'
+        if self.bucket_type == 'membase' and 'bucket_storage' in bucket_params:
+            self.storageBackend = bucket_params['bucket_storage']
+
         if 'maxTTL' in bucket_params:
             self.maxttl = bucket_params['maxTTL']
         else:
@@ -260,18 +304,19 @@ class BucketCreateTask(Task):
     def execute(self, task_manager):
         try:
             rest = RestConnection(self.server)
-        except ServerUnavailableException as error:
-                self.state = FINISHED
-                self.set_exception(error)
-                return
+        except Exception as error:
+            self.state = FINISHED
+            print("debuging hanging issue task 279" + str(error))
+            self.set_exception(error)
+            return
         info = rest.get_nodes_self()
 
-        if self.size <= 0:
-            self.size = info.memoryQuota * 2 / 3
+        if self.size is None or int(self.size) <= 0:
+            self.size = info.memoryQuota * 2 // 3
 
         authType = 'none' if self.password is None else 'sasl'
 
-        if int(info.port) in xrange(9091, 9991):
+        if int(info.port) in range(9091, 9991):
             try:
                 self.port = info.port
                 rest.create_bucket(bucket=self.bucket)
@@ -282,39 +327,38 @@ class BucketCreateTask(Task):
                 self.set_exception(e)
             return
 
-
         version = rest.get_nodes_self().version
         try:
             if float(version[:2]) >= 3.0 and self.bucket_priority is not None:
                 rest.create_bucket(bucket=self.bucket,
-                               ramQuotaMB=self.size,
-                               replicaNumber=self.replicas,
-                               proxyPort=self.port,
-                               authType=authType,
-                               saslPassword=self.password,
-                               bucketType=self.bucket_type,
-                               replica_index=self.enable_replica_index,
-                               flushEnabled=self.flush_enabled,
-                               evictionPolicy=self.eviction_policy,
-                               threadsNumber=self.bucket_priority,
-                               lww=self.lww,
-                               maxTTL=self.maxttl,
-                               compressionMode=self.compressionMode
-                               )
+                                   ramQuotaMB=self.size,
+                                   replicaNumber=self.replicas,
+                                   proxyPort=self.port,
+                                   authType=authType,
+                                   saslPassword=self.password,
+                                   bucketType=self.bucket_type,
+                                   replica_index=self.enable_replica_index,
+                                   flushEnabled=self.flush_enabled,
+                                   evictionPolicy=self.eviction_policy,
+                                   threadsNumber=self.bucket_priority,
+                                   lww=self.lww,
+                                   maxTTL=self.maxttl,
+                                   compressionMode=self.compressionMode,
+                                   storageBackend=self.storageBackend)
             else:
                 rest.create_bucket(bucket=self.bucket,
-                               ramQuotaMB=self.size,
-                               replicaNumber=self.replicas,
-                               proxyPort=self.port,
-                               authType=authType,
-                               saslPassword=self.password,
-                               bucketType=self.bucket_type,
-                               replica_index=self.enable_replica_index,
-                               flushEnabled=self.flush_enabled,
-                               evictionPolicy=self.eviction_policy,
-                               lww=self.lww,
-                               maxTTL=self.maxttl,
-                               compressionMode=self.compressionMode)
+                                   ramQuotaMB=self.size,
+                                   replicaNumber=self.replicas,
+                                   proxyPort=self.port,
+                                   authType=authType,
+                                   saslPassword=self.password,
+                                   bucketType=self.bucket_type,
+                                   replica_index=self.enable_replica_index,
+                                   flushEnabled=self.flush_enabled,
+                                   evictionPolicy=self.eviction_policy,
+                                   lww=self.lww,
+                                   maxTTL=self.maxttl,
+                                   compressionMode=self.compressionMode)
             self.state = CHECKING
             task_manager.schedule(self)
 
@@ -328,24 +372,24 @@ class BucketCreateTask(Task):
 
     def check(self, task_manager):
         try:
-            if self.bucket_type == 'memcached' or int(self.port) in xrange(9091, 9991):
+            if self.bucket_type == 'memcached' or int(self.port) in range(9091, 9991):
                 self.set_result(True)
                 self.state = FINISHED
                 return
-            if BucketOperationHelper.wait_for_memcached(self.server, self.bucket):
+            if BucketOperationHelper.wait_for_memcached(self.server, self.bucket, self.alt_addr):
                 self.log.info("bucket '{0}' was created with per node RAM quota: {1}".format(self.bucket, self.size))
                 self.set_result(True)
                 self.state = FINISHED
                 return
             else:
-                self.log.warn("vbucket map not ready after try {0}".format(self.retries))
+                self.log.warning("vbucket map not ready after try {0}".format(self.retries))
                 if self.retries >= 5:
                     self.set_result(False)
                     self.state = FINISHED
                     return
         except Exception as e:
             self.log.error("Unexpected error: %s" % str(e))
-            self.log.warn("vbucket map not ready after try {0}".format(self.retries))
+            self.log.warning("vbucket map not ready after try {0}".format(self.retries))
             if self.retries >= 5:
                 self.state = FINISHED
                 self.set_exception(e)
@@ -390,9 +434,206 @@ class BucketDeleteTask(Task):
             self.log.info(StatsCommon.get_stats([self.server], self.bucket, "timings"))
             self.set_unexpected_exception(e)
 
+
+class CollectionCreateTask(Task):
+    def __init__(self, server, bucket, scope, collection, params=None):
+        Task.__init__(self, "collection_create_task")
+        self.server = server
+        self.bucket_name = bucket
+        self.scope_name = scope
+        self.collection_name = collection
+        self.collection_params = params
+
+    def execute(self, task_manager):
+        try:
+            RestConnection(self.server)
+        except ServerUnavailableException as error:
+            self.state = FINISHED
+            self.set_exception(error)
+            return
+        try:
+            CollectionsRest(self.server).create_collection(bucket=self.bucket_name, scope=self.scope_name,
+                                                           collection=self.collection_name,
+                                                           params=self.collection_params)
+            self.state = CHECKING
+            task_manager.schedule(self)
+
+        # catch and set all unexpected exceptions
+        except Exception as e:
+            self.state = FINISHED
+            self.set_unexpected_exception(e)
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)
+
+
+class CollectionDeleteTask(Task):
+    def __init__(self, server, bucket, scope, collection):
+        Task.__init__(self, "collection_delete_task")
+        self.server = server
+        self.bucket_name = bucket
+        self.scope_name = scope
+        self.collection_name = collection
+
+    def execute(self, task_manager):
+        try:
+            RestConnection(self.server)
+        except ServerUnavailableException as error:
+            self.state = FINISHED
+            self.set_exception(error)
+            return
+        try:
+            CollectionsRest(self.server).delete_collection(bucket=self.bucket_name, scope=self.scope_name,
+                                                           collection=self.collection_name)
+            self.state = CHECKING
+            task_manager.schedule(self)
+
+        # catch and set all unexpected exceptions
+        except Exception as e:
+            self.state = FINISHED
+            self.set_unexpected_exception(e)
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)
+
+
+class ScopeCollectionCreateTask(Task):
+    def __init__(self, server, bucket, scope, collection, params=None):
+        Task.__init__(self, "collection_create_task")
+        self.server = server
+        self.bucket_name = bucket
+        self.scope_name = scope
+        self.collection_name = collection
+        self.collection_params = params
+
+    def execute(self, task_manager):
+        try:
+            RestConnection(self.server)
+        except ServerUnavailableException as error:
+            self.state = FINISHED
+            self.set_exception(error)
+            return
+        try:
+            CollectionsRest(self.server).create_scope_collection(bucket=self.bucket_name, scope=self.scope_name,
+                                                                 collection=self.collection_name,
+                                                                 params=self.collection_params)
+            self.state = CHECKING
+            task_manager.schedule(self)
+
+        # catch and set all unexpected exceptions
+        except Exception as e:
+            self.state = FINISHED
+            self.set_unexpected_exception(e)
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)
+
+
+class ScopeCollectionDeleteTask(Task):
+    def __init__(self, server, bucket, scope, collection):
+        Task.__init__(self, "collection_delete_task")
+        self.server = server
+        self.bucket_name = bucket
+        self.scope_name = scope
+        self.collection_name = collection
+
+    def execute(self, task_manager):
+        try:
+            RestConnection(self.server)
+        except ServerUnavailableException as error:
+            self.state = FINISHED
+            self.set_exception(error)
+            return
+        try:
+            CollectionsRest(self.server).delete_scope_collection(bucket=self.bucket_name, scope=self.scope_name,
+                                                                 collection=self.collection_name)
+            self.state = CHECKING
+            task_manager.schedule(self)
+
+        # catch and set all unexpected exceptions
+        except Exception as e:
+            self.state = FINISHED
+            self.set_unexpected_exception(e)
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)
+
+
+class ScopeCreateTask(Task):
+    def __init__(self, server, bucket, scope, params=None):
+        Task.__init__(self, "scope_create_task")
+        self.server = server
+        self.bucket_name = bucket
+        self.scope_name = scope
+        self.scope_params = params
+
+    def execute(self, task_manager):
+        try:
+            RestConnection(self.server)
+        except ServerUnavailableException as error:
+            self.state = FINISHED
+            self.set_exception(error)
+            return
+        try:
+            CollectionsRest(self.server).create_scope(bucket=self.bucket_name, scope=self.scope_name,
+                                                      params=self.scope_params)
+            self.state = CHECKING
+            task_manager.schedule(self)
+
+        # catch and set all unexpected exceptions
+        except Exception as e:
+            self.state = FINISHED
+            self.set_unexpected_exception(e)
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)
+
+
+class ScopeDeleteTask(Task):
+    def __init__(self, server, bucket, scope):
+        Task.__init__(self, "scope_delete_task")
+        self.server = server
+        self.bucket_name = bucket
+        self.scope_name = scope
+
+    def execute(self, task_manager):
+        try:
+            RestConnection(self.server)
+        except ServerUnavailableException as error:
+            self.state = FINISHED
+            self.set_exception(error)
+            return
+        try:
+            CollectionsRest(self.server).delete_scope(bucket=self.bucket_name, scope=self.scope_name)
+            self.state = CHECKING
+            task_manager.schedule(self)
+
+        # catch and set all unexpected exceptions
+        except Exception as e:
+            self.state = FINISHED
+            self.set_unexpected_exception(e)
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)
+
+
 class RebalanceTask(Task):
-    def __init__(self, servers, to_add=[], to_remove=[], do_stop=False, progress=30,
-                 use_hostnames=False, services=None):
+    def __init__(self, servers, to_add=[], to_remove=[],
+                 do_stop=False, progress=30,
+                 use_hostnames=False, services=None,
+                 sleep_before_rebalance=None):
         Task.__init__(self, "rebalance_task")
         self.servers = servers
         self.to_add = to_add
@@ -400,10 +641,11 @@ class RebalanceTask(Task):
         self.start_time = None
         self.services = services
         self.monitor_vbuckets_shuffling = False
+        self.sleep_before_rebalance = sleep_before_rebalance
 
         try:
             self.rest = RestConnection(self.servers[0])
-        except ServerUnavailableException, e:
+        except ServerUnavailableException as e:
             self.log.error(e)
             self.state = FINISHED
             self.set_exception(e)
@@ -427,13 +669,17 @@ class RebalanceTask(Task):
                 if self.monitor_vbuckets_shuffling and node_version_check:
                     services_map = self.rest.get_nodes_services()
                     for remove_node in self.to_remove:
-                         key = "{0}:{1}".format(remove_node.ip,remove_node.port)
-                         services = services_map[key]
-                         if "kv" not in services:
+                        key = "{0}:{1}".format(remove_node.ip, remove_node.port)
+                        services = services_map[key]
+                        if "kv" not in services:
                             self.monitor_vbuckets_shuffling = False
                 if self.monitor_vbuckets_shuffling:
                     self.log.info("This is swap rebalance and we will monitor vbuckets shuffling")
             self.add_nodes(task_manager)
+            if self.sleep_before_rebalance:
+                self.log.info("Sleep {0}secs before rebalance_start"
+                              .format(self.sleep_before_rebalance))
+                time.sleep(self.sleep_before_rebalance)
             self.start_rebalance(task_manager)
             self.state = CHECKING
             task_manager.schedule(self)
@@ -448,15 +694,15 @@ class RebalanceTask(Task):
         node_index = 0
         for node in self.to_add:
             self.log.info("adding node {0}:{1} to cluster".format(node.ip, node.port))
-            if self.services != None:
+            if self.services is not None:
                 services_for_node = [self.services[node_index]]
                 node_index += 1
             if self.use_hostnames:
                 self.rest.add_node(master.rest_username, master.rest_password,
-                                   node.hostname, node.port, services = services_for_node)
+                                   node.hostname, node.port, services=services_for_node)
             else:
                 self.rest.add_node(master.rest_username, master.rest_password,
-                                   node.ip, node.port, services = services_for_node)
+                                   node.ip, node.port, services=services_for_node)
 
     def start_rebalance(self, task_manager):
         nodes = self.rest.node_statuses()
@@ -487,7 +733,7 @@ class RebalanceTask(Task):
                         ejectedNodes.append(node.id)
         if self.rest.is_cluster_mixed():
             # workaround MB-8094
-            self.log.warn("cluster is mixed. sleep for 15 seconds before rebalance")
+            self.log.warning("cluster is mixed. sleep for 15 seconds before rebalance")
             time.sleep(15)
 
         self.rest.rebalance(otpNodes=[node.id for node in nodes], ejectedNodes=ejectedNodes)
@@ -503,12 +749,12 @@ class RebalanceTask(Task):
                 new_vbuckets = RestHelper(self.rest)._get_vbuckets(non_swap_servers, None)
                 for vb_type in ["active_vb", "replica_vb"]:
                     for srv in non_swap_servers:
-                        if not(len(self.old_vbuckets[srv][vb_type]) + 1 >= len(new_vbuckets[srv][vb_type]) and\
-                           len(self.old_vbuckets[srv][vb_type]) - 1 <= len(new_vbuckets[srv][vb_type])):
+                        if not (len(self.old_vbuckets[srv][vb_type]) + 1 >= len(new_vbuckets[srv][vb_type]) and \
+                                len(self.old_vbuckets[srv][vb_type]) - 1 <= len(new_vbuckets[srv][vb_type])):
                             msg = "Vbuckets were suffled! Expected %s for %s" % (vb_type, srv.ip) + \
-                                " are %s. And now are %s" % (
-                                len(self.old_vbuckets[srv][vb_type]),
-                                len(new_vbuckets[srv][vb_type]))
+                                  " are %s. And now are %s" % (
+                                      len(self.old_vbuckets[srv][vb_type]),
+                                      len(new_vbuckets[srv][vb_type]))
                             self.log.error(msg)
                             self.log.error("Old vbuckets: %s, new vbuckets %s" % (self.old_vbuckets, new_vbuckets))
                             raise Exception(msg)
@@ -542,39 +788,40 @@ class RebalanceTask(Task):
                 task_manager.schedule(self, 10)
             else:
                 self.state = FINISHED
-                #self.set_result(False)
+                # self.set_result(False)
                 self.rest.print_UI_logs()
-                self.set_exception(RebalanceFailedException(\
-                                "seems like rebalance hangs. please check logs!"))
+                self.set_exception(RebalanceFailedException( \
+                    "seems like rebalance hangs. please check logs!"))
         else:
             success_cleaned = []
             for removed in self.to_remove:
                 try:
                     rest = RestConnection(removed)
-                except ServerUnavailableException, e:
+                except ServerUnavailableException as e:
                     self.log.error(e)
                     continue
                 start = time.time()
                 while time.time() - start < 30:
                     try:
                         if 'pools' in rest.get_pools_info() and \
-                                      (len(rest.get_pools_info()["pools"]) == 0):
+                                (len(rest.get_pools_info()["pools"]) == 0):
                             success_cleaned.append(removed)
                             break
                         else:
                             time.sleep(0.1)
-                    except (ServerUnavailableException, IncompleteRead), e:
+                    except (ServerUnavailableException, IncompleteRead) as e:
                         self.log.error(e)
             result = True
             for node in set(self.to_remove) - set(success_cleaned):
-                self.log.error("node {0}:{1} was not cleaned after removing from cluster"\
-                                                              .format(node.ip, node.port))
+                self.log.error("node {0}:{1} was not cleaned after removing from cluster" \
+                               .format(node.ip, node.port))
                 result = False
 
             self.log.info("rebalancing was completed with progress: {0}% in {1} sec".
                           format(progress, time.time() - self.start_time))
             self.state = FINISHED
             self.set_result(result)
+
 
 class StatsWaitTask(Task):
     EQUAL = '=='
@@ -584,7 +831,7 @@ class StatsWaitTask(Task):
     GREATER_THAN = '>'
     GREATER_THAN_EQ = '>='
 
-    def __init__(self, servers, bucket, param, stat, comparison, value):
+    def __init__(self, servers, bucket, param, stat, comparison, value, scope=None, collection=None):
         Task.__init__(self, "stats_wait_task")
         self.servers = servers
         self.bucket = bucket
@@ -595,6 +842,8 @@ class StatsWaitTask(Task):
         self.comparison = comparison
         self.value = value
         self.conns = {}
+        self.scope = scope
+        self.collection = collection
 
     def execute(self, task_manager):
         self.state = CHECKING
@@ -606,12 +855,12 @@ class StatsWaitTask(Task):
             try:
                 client = self._get_connection(server)
                 stats = client.stats(self.param)
-                if not stats.has_key(self.stat):
+                if self.stat not in stats:
                     self.state = FINISHED
                     self.set_exception(Exception("Stat {0} not found".format(self.stat)))
                     return
                 if stats[self.stat].isdigit():
-                    stat_result += long(stats[self.stat])
+                    stat_result += int(stats[self.stat])
                 else:
                     stat_result = stats[self.stat]
             except EOFError as ex:
@@ -619,24 +868,27 @@ class StatsWaitTask(Task):
                 self.set_exception(ex)
                 return
         if not self._compare(self.comparison, str(stat_result), self.value):
-            self.log.warn("Not Ready: %s %s %s %s expected on %s, %s bucket" % (self.stat, stat_result,
-                      self.comparison, self.value, self._stringify_servers(), self.bucket))
+            self.log.warning("Not Ready: %s %s %s %s expected on %s, %s bucket" % (self.stat, stat_result,
+                                                                                   self.comparison, self.value,
+                                                                                   self._stringify_servers(),
+                                                                                   self.bucket))
             task_manager.schedule(self, 5)
             return
         self.log.info("Saw %s %s %s %s expected on %s,%s bucket" % (self.stat, stat_result,
-                      self.comparison, self.value, self._stringify_servers(), self.bucket))
+                                                                    self.comparison, self.value,
+                                                                    self._stringify_servers(), self.bucket))
 
-        for server, conn in self.conns.items():
+        for server, conn in list(self.conns.items()):
             conn.close()
         self.state = FINISHED
         self.set_result(True)
 
     def _stringify_servers(self):
-        return ''.join([`server.ip + ":" + str(server.port)` for server in self.servers])
+        return ''.join([repr(server.ip + ":" + str(server.port)) for server in self.servers])
 
-    def _get_connection(self, server, admin_user='cbadminbucket',admin_pass='password'):
-        if not self.conns.has_key(server):
-            for i in xrange(3):
+    def _get_connection(self, server, admin_user='cbadminbucket', admin_pass='password'):
+        if server not in self.conns:
+            for i in range(3):
                 try:
                     self.conns[server] = MemcachedClientHelper.direct_client(server, self.bucket, admin_user=admin_user,
                                                                              admin_pass=admin_pass)
@@ -649,60 +901,69 @@ class StatsWaitTask(Task):
         return self.conns[server]
 
     def _compare(self, cmp_type, a, b):
-        if isinstance(b, (int, long)) and a.isdigit():
-            a = long(a)
-        elif isinstance(b, (int, long)) and not a.isdigit():
-                return False
-        if (cmp_type == StatsWaitTask.EQUAL and a == b) or\
-            (cmp_type == StatsWaitTask.NOT_EQUAL and a != b) or\
-            (cmp_type == StatsWaitTask.LESS_THAN_EQ and a <= b) or\
-            (cmp_type == StatsWaitTask.GREATER_THAN_EQ and a >= b) or\
-            (cmp_type == StatsWaitTask.LESS_THAN and a < b) or\
-            (cmp_type == StatsWaitTask.GREATER_THAN and a > b):
+        if isinstance(b, int) and a.isdigit():
+            a = int(a)
+        elif isinstance(b, int) and not a.isdigit():
+            return False
+        if (cmp_type == StatsWaitTask.EQUAL and a == b) or \
+                (cmp_type == StatsWaitTask.NOT_EQUAL and a != b) or \
+                (cmp_type == StatsWaitTask.LESS_THAN_EQ and a <= b) or \
+                (cmp_type == StatsWaitTask.GREATER_THAN_EQ and a >= b) or \
+                (cmp_type == StatsWaitTask.LESS_THAN and a < b) or \
+                (cmp_type == StatsWaitTask.GREATER_THAN and a > b):
             return True
         return False
 
 
 class XdcrStatsWaitTask(StatsWaitTask):
-    def __init__(self, servers, bucket, param, stat, comparison, value):
-        StatsWaitTask.__init__(self, servers, bucket, param, stat, comparison, value)
+    def __init__(self, servers, bucket, param, stat, comparison, value, scope=None, collection=None):
+        StatsWaitTask.__init__(self, servers, bucket, param, stat, comparison, value, scope, collection)
 
     def check(self, task_manager):
         stat_result = 0
         for server in self.servers:
             try:
                 rest = RestConnection(server)
-                stat = 'replications/' + rest.get_replication_for_buckets(self.bucket, self.bucket)['id'] + '/' + self.stat
+                stat = 'replications/' + rest.get_replication_for_buckets(self.bucket, self.bucket)[
+                    'id'] + '/' + self.stat
                 # just get the required value, don't fetch the big big structure of stats
                 stats_value = rest.fetch_bucket_xdcr_stats(self.bucket)['op']['samples'][stat][-1]
-                stat_result += long(stats_value)
-            except (EOFError, Exception)  as ex:
+                stat_result += int(stats_value)
+            except (EOFError, Exception) as ex:
                 self.state = FINISHED
                 self.set_exception(ex)
                 return
         if not self._compare(self.comparison, str(stat_result), self.value):
-            self.log.warn("Not Ready: %s %s %s %s expected on %s, %s bucket" % (self.stat, stat_result,
-                      self.comparison, self.value, self._stringify_servers(), self.bucket))
+            self.log.warning("Not Ready: %s %s %s %s expected on %s, %s bucket" % (self.stat, stat_result,
+                                                                                   self.comparison, self.value,
+                                                                                   self._stringify_servers(),
+                                                                                   self.bucket))
             task_manager.schedule(self, 5)
             return
         self.log.info("Saw %s %s %s %s expected on %s,%s bucket" % (self.stat, stat_result,
-                      self.comparison, self.value, self._stringify_servers(), self.bucket))
+                                                                    self.comparison, self.value,
+                                                                    self._stringify_servers(), self.bucket))
 
-        for server, conn in self.conns.items():
+        for server, conn in list(self.conns.items()):
             conn.close()
         self.state = FINISHED
         self.set_result(True)
 
+
 class GenericLoadingTask(Thread, Task):
-    def __init__(self, server, bucket, kv_store, batch_size=1, pause_secs=1, timeout_secs=60, compression=True):
+    def __init__(self, server, bucket, kv_store, batch_size=1, pause_secs=1, timeout_secs=60, compression=True,
+                 scope=None, collection=None):
         Thread.__init__(self)
         Task.__init__(self, "load_gen_task")
+
         self.kv_store = kv_store
         self.batch_size = batch_size
         self.pause = pause_secs
         self.timeout = timeout_secs
         self.server = server
         self.bucket = bucket
+        self.collection = collection
+        self.scope = scope
         if CHECK_FLAG:
             self.client = VBucketAwareMemcached(RestConnection(server), bucket)
         else:
@@ -722,14 +983,14 @@ class GenericLoadingTask(Thread, Task):
 
     def run(self):
         while self.has_next() and not self.done():
-            self.next()
+            next(self)
         self.state = FINISHED
         self.set_result(True)
 
     def has_next(self):
         raise NotImplementedError
 
-    def next(self):
+    def __next__(self):
         raise NotImplementedError
 
     def _unlocked_create(self, partition, key, value, is_base64_value=False):
@@ -739,14 +1000,15 @@ class GenericLoadingTask(Thread, Task):
                 value_json['mutated'] = 0
             value = json.dumps(value_json)
         except ValueError:
-            index = random.choice(range(len(value)))
+            index = random.choice(list(range(len(value))))
             if not is_base64_value:
                 value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
         except TypeError:
             value = json.dumps(value)
 
         try:
-            self.client.set(key, self.exp, self.flag, value)
+            self.client.set(key, self.exp, self.flag, value,  scope=self.scope, collection=self.collection)
+
             if self.only_store_hash:
                 value = str(crc32.crc32_hash(value))
             partition.set(key, value, self.exp, self.flag)
@@ -754,10 +1016,9 @@ class GenericLoadingTask(Thread, Task):
             self.state = FINISHED
             self.set_exception(error)
 
-
     def _unlocked_read(self, partition, key):
         try:
-            o, c, d = self.client.get(key)
+            o, c, d = self.client.get(key,  scope=self.scope, collection=self.collection)
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND and partition.get_valid(key) is None:
                 pass
@@ -767,7 +1028,7 @@ class GenericLoadingTask(Thread, Task):
 
     def _unlocked_replica_read(self, partition, key):
         try:
-            o, c, d = self.client.getr(key)
+            o, c, d = self.client.getr(key, scope=self.scope, collection=self.collection)
         except Exception as error:
             self.state = FINISHED
             self.set_exception(error)
@@ -775,7 +1036,7 @@ class GenericLoadingTask(Thread, Task):
     def _unlocked_update(self, partition, key):
         value = None
         try:
-            o, c, value = self.client.get(key)
+            o, c, value = self.client.get(key,  scope=self.scope, collection=self.collection)
             if value is None:
                 return
 
@@ -791,19 +1052,20 @@ class GenericLoadingTask(Thread, Task):
                 self.log.error("%s, key: %s update operation." % (error, key))
                 self.set_exception(error)
                 return
-        except ValueError:
+        except (ValueError, json.JSONDecodeError) as e:
             if value is None:
                 return
-            index = random.choice(range(len(value)))
-            value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
+            index = random.choice(list(range(len(value))))
+            value = value[0:index] + random.choice(string.ascii_uppercase).encode() + value[index + 1:]
         except BaseException as error:
             self.state = FINISHED
             self.set_exception(error)
 
         try:
-            self.client.set(key, self.exp, self.flag, value)
+            self.client.set(key, self.exp, self.flag, value, scope=self.scope, collection=self.collection)
             if self.only_store_hash:
-                value = str(crc32.crc32_hash(value))
+                if value != None:
+                    value = str(crc32.crc32_hash(value))
             partition.set(key, value, self.exp, self.flag)
         except BaseException as error:
             self.state = FINISHED
@@ -811,7 +1073,7 @@ class GenericLoadingTask(Thread, Task):
 
     def _unlocked_delete(self, partition, key):
         try:
-            self.client.delete(key)
+            self.client.delete(key, scope=self.scope, collection=self.collection)
             partition.delete(key)
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND and partition.get_valid(key) is None:
@@ -826,7 +1088,7 @@ class GenericLoadingTask(Thread, Task):
 
     def _unlocked_append(self, partition, key, value):
         try:
-            o, c, old_value = self.client.get(key)
+            o, c, old_value = self.client.get(key, scope=self.scope, collection=self.collection)
             if value is None:
                 return
             value_json = json.loads(value)
@@ -843,8 +1105,8 @@ class GenericLoadingTask(Thread, Task):
                 self.set_exception(error)
                 return
         except ValueError:
-            o, c, old_value = self.client.get(key)
-            index = random.choice(range(len(value)))
+            o, c, old_value = self.client.get(key, scope=self.scope, collection=self.collection)
+            index = random.choice(list(range(len(value))))
             value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
             old_value += value
         except BaseException as error:
@@ -852,7 +1114,7 @@ class GenericLoadingTask(Thread, Task):
             self.set_exception(error)
 
         try:
-            self.client.append(key, value)
+            self.client.append(key, value, scope=self.scope, collection=self.collection)
             if self.only_store_hash:
                 old_value = str(crc32.crc32_hash(old_value))
             partition.set(key, old_value)
@@ -860,9 +1122,8 @@ class GenericLoadingTask(Thread, Task):
             self.state = FINISHED
             self.set_exception(error)
 
-
     # start of batch methods
-    def _create_batch_client(self, key_val, shared_client = None):
+    def _create_batch_client(self, key_val, shared_client=None):
         """
         standalone method for creating key/values in batch (sans kvstore)
 
@@ -873,30 +1134,36 @@ class GenericLoadingTask(Thread, Task):
         try:
             self._process_values_for_create(key_val)
             client = shared_client or self.client
-            client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False)
-        except (MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError, RuntimeError) as error:
+
+            client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False,
+                            scope=self.scope, collection=self.collection)
+        except (
+                MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError,
+                RuntimeError) as error:
             self.state = FINISHED
             self.set_exception(error)
 
     def _create_batch(self, partition_keys_dic, key_val):
-            self._create_batch_client(key_val)
-            self._populate_kvstore(partition_keys_dic, key_val)
+        self._create_batch_client(key_val)
+        self._populate_kvstore(partition_keys_dic, key_val)
 
     def _update_batch(self, partition_keys_dic, key_val):
         try:
             self._process_values_for_update(partition_keys_dic, key_val)
-            self.client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False)
+            self.client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False,
+                                 scope=self.scope, collection=self.collection)
             self._populate_kvstore(partition_keys_dic, key_val)
-        except (MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError, RuntimeError) as error:
+        except (
+                MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError,
+                RuntimeError) as error:
             self.state = FINISHED
             self.set_exception(error)
 
-
     def _delete_batch(self, partition_keys_dic, key_val):
-        for partition, keys in partition_keys_dic.items():
+        for partition, keys in list(partition_keys_dic.items()):
             for key in keys:
                 try:
-                    self.client.delete(key)
+                    self.client.delete(key, scope=self.scope, collection=self.collection)
                     partition.delete(key)
                 except MemcachedError as error:
                     if error.status == ERR_NOT_FOUND and partition.get_valid(key) is None:
@@ -909,49 +1176,50 @@ class GenericLoadingTask(Thread, Task):
                     self.state = FINISHED
                     self.set_exception(error)
 
-
     def _read_batch(self, partition_keys_dic, key_val):
         try:
-            o, c, d = self.client.getMulti(key_val.keys(), self.pause, self.timeout)
+            self.client.getMulti(list(key_val.keys()), self.pause, self.timeout, scope=self.scope,
+                                 collection=self.collection)
+            # print "the key is {} from collection {}".format(c, collection)
         except MemcachedError as error:
-                self.state = FINISHED
-                self.set_exception(error)
+            self.state = FINISHED
+            self.set_exception(error)
 
     def _process_values_for_create(self, key_val):
-        for key, value in key_val.items():
+        for key, value in list(key_val.items()):
             try:
                 value_json = json.loads(value)
                 value_json['mutated'] = 0
                 value = json.dumps(value_json)
             except ValueError:
-                index = random.choice(range(len(value)))
+                index = random.choice(list(range(len(value))))
                 value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
             except TypeError:
-                 value = json.dumps(value)
+                value = json.dumps(value)
             finally:
                 key_val[key] = value
 
     def _process_values_for_update(self, partition_keys_dic, key_val):
-        for partition, keys in partition_keys_dic.items():
+        for partition, keys in list(partition_keys_dic.items()):
             for key in keys:
                 value = partition.get_valid(key)
                 if value is None:
                     del key_val[key]
                     continue
                 try:
-                    value = key_val[key]  # new updated value, however it is not their in orginal code "LoadDocumentsTask"
+                    value = key_val[
+                        key]  # new updated value, however it is not their in orginal code "LoadDocumentsTask"
                     value_json = json.loads(value)
                     value_json['mutated'] += 1
                     value = json.dumps(value_json)
                 except ValueError:
-                    index = random.choice(range(len(value)))
+                    index = random.choice(list(range(len(value))))
                     value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
                 finally:
                     key_val[key] = value
 
-
     def _populate_kvstore(self, partition_keys_dic, key_val):
-        for partition, keys in partition_keys_dic.items():
+        for partition, keys in list(partition_keys_dic.items()):
             self._populate_kvstore_partition(partition, keys, key_val)
 
     def _release_locks_on_kvstore(self):
@@ -969,28 +1237,31 @@ class LoadDocumentsTask(GenericLoadingTask):
 
     def __init__(self, server, bucket, generator, kv_store, op_type, exp, flag=0,
                  only_store_hash=True, proxy_client=None, batch_size=1, pause_secs=1, timeout_secs=30,
-                 compression=True):
-        GenericLoadingTask.__init__(self, server, bucket, kv_store, batch_size=batch_size,pause_secs=pause_secs,
-                                    timeout_secs=timeout_secs, compression=compression)
+                 compression=True, scope=None, collection=None):
+        GenericLoadingTask.__init__(self, server, bucket, kv_store, batch_size=batch_size, pause_secs=pause_secs,
+                                    timeout_secs=timeout_secs, compression=compression, scope=scope,
+                                    collection=collection)
 
         self.generator = generator
         self.op_type = op_type
         self.exp = exp
         self.flag = flag
         self.only_store_hash = only_store_hash
+        self.scope = scope
+        self.collection = collection
 
         if proxy_client:
             self.log.info("Changing client to proxy %s:%s..." % (proxy_client.host,
-                                                              proxy_client.port))
+                                                                 proxy_client.port))
             self.client = proxy_client
 
     def has_next(self):
         return self.generator.has_next()
 
-    def next(self, override_generator = None):
+    def next(self, override_generator=None):
         if self.batch_size == 1:
-            key, value = self.generator.next()
-            partition = self.kv_store.acquire_partition(key)
+            key, value = next(self.generator)
+            partition = self.kv_store.acquire_partition(key, self.bucket, self.scope, self.collection)
             if self.op_type == 'create':
                 is_base64_value = (self.generator.__class__.__name__ == 'Base64Generator')
                 self._unlocked_create(partition, key, value, is_base64_value=is_base64_value)
@@ -1007,12 +1278,14 @@ class LoadDocumentsTask(GenericLoadingTask):
             else:
                 self.state = FINISHED
                 self.set_exception(Exception("Bad operation type: %s" % self.op_type))
-            self.kv_store.release_partition(key)
+            self.kv_store.release_partition(key, self.bucket, self.scope, self.collection)
 
         else:
             doc_gen = override_generator or self.generator
             key_value = doc_gen.next_batch()
-            partition_keys_dic = self.kv_store.acquire_partitions(key_value.keys())
+
+            partition_keys_dic = self.kv_store.acquire_partitions(list(key_value.keys()), self.bucket,
+                                                                  self.scope, self.collection)
             if self.op_type == 'create':
                 self._create_batch(partition_keys_dic, key_value)
             elif self.op_type == 'update':
@@ -1024,16 +1297,16 @@ class LoadDocumentsTask(GenericLoadingTask):
             else:
                 self.state = FINISHED
                 self.set_exception(Exception("Bad operation type: %s" % self.op_type))
-            self.kv_store.release_partitions(partition_keys_dic.keys())
-
+            self.kv_store.release_partitions(list(partition_keys_dic.keys()))
 
 
 class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
     def __init__(self, server, bucket, generators, kv_store, op_type, exp, flag=0, only_store_hash=True,
-                 batch_size=1,pause_secs=1, timeout_secs=60, compression=True):
+                 batch_size=1, pause_secs=1, timeout_secs=60, compression=True, scope=None, collection=None):
         LoadDocumentsTask.__init__(self, server, bucket, generators[0], kv_store, op_type, exp, flag=flag,
-                    only_store_hash=only_store_hash, batch_size=batch_size, pause_secs=pause_secs,
-                                   timeout_secs=timeout_secs, compression=compression)
+                                   only_store_hash=only_store_hash, batch_size=batch_size, pause_secs=pause_secs,
+                                   timeout_secs=timeout_secs, compression=compression, scope=scope,
+                                   collection=collection)
 
         if batch_size == 1:
             self.generators = generators
@@ -1048,11 +1321,11 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
         self.is_high_throughput_mode = False
         if ALLOW_HTP and not TestInputSingleton.input.param("disable_HTP", False):
             self.is_high_throughput_mode = self.op_type == "create" and \
-                self.batch_size > 1 and \
-                len(self.generators) < self.process_concurrency
+                                           self.batch_size > 1 and \
+                                           len(self.generators) < self.process_concurrency
 
         self.input_generators = generators
-
+        self.bucket = bucket
         self.op_types = None
         self.buckets = None
         if isinstance(op_type, list):
@@ -1060,6 +1333,8 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
         if isinstance(bucket, list):
             self.buckets = bucket
         self.compression = compression
+        self.scope = scope
+        self.collection = collection
 
     def run(self):
         if self.op_types:
@@ -1099,23 +1374,25 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
         for gen in self.input_generators:
             gen_start = int(gen.start)
             gen_end = max(int(gen.end), 1)
-            gen_range = max(int(gen.end/self.process_concurrency), 1)
+            gen_range = max(int(gen.end / self.process_concurrency), 1)
             for pos in range(gen_start, gen_end, gen_range):
-                partition_gen = copy.deepcopy(gen)
-                partition_gen.start = pos
-                partition_gen.itr = pos
-                partition_gen.end = pos+gen_range
-                if partition_gen.end > gen.end:
-                    partition_gen.end = gen.end
-                batch_gen = BatchedDocumentGenerator(
+                try:
+                    partition_gen = copy.deepcopy(gen)
+                    partition_gen.start = pos
+                    partition_gen.itr = pos
+                    partition_gen.end = pos + gen_range
+                    if partition_gen.end > gen.end:
+                        partition_gen.end = gen.end
+                    batch_gen = BatchedDocumentGenerator(
                         partition_gen,
                         self.batch_size)
-                self.generators.append(batch_gen)
+                    self.generators.append(batch_gen)
+                except Exception as e:
+                    traceback.print_exc()
 
         iterator = 0
         all_processes = []
         for generator in self.generators:
-
             # only start processing when there resources available
             CONCURRENCY_LOCK.acquire()
 
@@ -1136,7 +1413,7 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
         while self.shared_kvstore_queue.empty() is False:
 
             # get partitions created by child process
-            rv =  self.shared_kvstore_queue.get()
+            rv = self.shared_kvstore_queue.get()
             if rv["err"] is not None:
                 raise Exception(rv["err"])
 
@@ -1145,39 +1422,40 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
             self.kv_store.merge_partitions(generator_partitions)
 
             # terminate child process
-            iterator-=1
+            iterator -= 1
             all_processes[iterator].terminate()
 
     def run_generator(self, generator, iterator):
 
-        # create a tmp kvstore to track work
         tmp_kv_store = KVStore()
         rv = {"err": None, "partitions": None}
 
         try:
+
             if CHECK_FLAG:
                 client = VBucketAwareMemcached(
-                        RestConnection(self.server),
-                        self.bucket)
+                    RestConnection(self.server),
+                    self.bucket)
             else:
                 client = VBucketAwareMemcached(
                     RestConnection(self.server),
                     self.bucket, compression=self.compression)
-            if self.op_types:
-                self.op_type = self.op_types[iterator]
-            if self.buckets:
-                self.bucket = self.buckets[iterator]
+            try:
+                if self.op_types:
+                    self.op_type = self.op_types[iterator]
+                if self.buckets:
+                    self.bucket = self.buckets[iterator]
 
-            while generator.has_next() and not self.done():
+                while generator.has_next() and not self.done():
+                    # generate
+                    key_value = generator.next_batch()
+                    # create
+                    self._create_batch_client(key_value, client)
 
-                # generate
-                key_value = generator.next_batch()
-
-                # create
-                self._create_batch_client(key_value, client)
-
-                # cache
-                self.cache_items(tmp_kv_store, key_value)
+                    # cache
+                    self.cache_items(tmp_kv_store, key_value)
+            except Exception as e:
+                traceback.print_exc()
 
         except Exception as ex:
             rv["err"] = ex
@@ -1190,31 +1468,36 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
             # release concurrency lock
             CONCURRENCY_LOCK.release()
 
-
     def cache_items(self, store, key_value):
         """
             unpacks keys,values and adds them to provided store
         """
-        for key, value in key_value.iteritems():
+        for key, value in key_value.items():
+
             if self.only_store_hash:
                 value = str(crc32.crc32_hash(value))
-            store.partition(key)["partition"].set(
+
+            partition = store.partition(key, self.scope, self.collection, self.bucket)
+            partition["partition"].set(
                 key,
                 value,
                 self.exp,
                 self.flag)
+
 
 class ESLoadGeneratorTask(Task):
     """
         Class to load/update/delete documents into/from Elastic Search
     """
 
-    def __init__(self, es_instance, index_name, generator, op_type="create"):
+    def __init__(self, es_instance, index_name, generator, op_type="create", scope=None, collection=None):
         Task.__init__(self, "ES_loader_task")
         self.es_instance = es_instance
         self.index_name = index_name
         self.generator = generator
         self.iterator = 0
+        self.scope = scope
+        self.collection = collection
         self.log.info("Starting to load data into Elastic Search ...")
 
     def check(self, task_manager):
@@ -1227,7 +1510,7 @@ class ESLoadGeneratorTask(Task):
             self.es_instance.load_data(self.index_name,
                                        json.dumps(doc, encoding='utf-8'),
                                        doc['type'],
-                                       key)
+                                       key, self.scope, self.collection)
             self.iterator += 1
             if math.fmod(self.iterator, 500) == 0.0:
                 self.log.info("{0} documents loaded into ES".
@@ -1235,13 +1518,14 @@ class ESLoadGeneratorTask(Task):
         self.state = FINISHED
         self.set_result(True)
 
+
 class ESBulkLoadGeneratorTask(Task):
     """
         Class to load/update/delete documents into/from Elastic Search
     """
 
     def __init__(self, es_instance, index_name, generator, op_type="create",
-                 batch=1000):
+                 batch=1000, scope=None, collection=None):
         Task.__init__(self, "ES_loader_task")
         self.es_instance = es_instance
         self.index_name = index_name
@@ -1249,6 +1533,8 @@ class ESBulkLoadGeneratorTask(Task):
         self.iterator = 0
         self.op_type = op_type
         self.batch_size = batch
+        self.scope = scope
+        self.collection = collection
         self.log.info("Starting operation '%s' on Elastic Search ..." % op_type)
 
     def check(self, task_manager):
@@ -1279,7 +1565,7 @@ class ESBulkLoadGeneratorTask(Task):
             if batched == self.batch_size or not self.generator.has_next():
                 es_file = open(es_filename, "wb")
                 for line in es_bulk_docs:
-                    es_file.write("%s\n" %line)
+                    es_file.write("{}\n".format(line).encode())
                 es_file.close()
                 self.es_instance.load_bulk_data(es_filename)
                 loaded += batched
@@ -1288,13 +1574,13 @@ class ESBulkLoadGeneratorTask(Task):
                 batched = 0
         indexed = self.es_instance.get_index_count(self.index_name)
         self.log.info("ES index count for '{0}': {1}".
-                              format(self.index_name, indexed))
+                      format(self.index_name, indexed))
         self.state = FINISHED
         self.set_result(True)
 
 
 class ESRunQueryCompare(Task):
-    def __init__(self, fts_index, es_instance, query_index, es_index_name=None):
+    def __init__(self, fts_index, es_instance, query_index, es_index_name=None, n1ql_executor=None):
         Task.__init__(self, "Query_runner_task")
         self.fts_index = fts_index
         self.fts_query = fts_index.fts_queries[query_index]
@@ -1306,6 +1592,7 @@ class ESRunQueryCompare(Task):
         self.query_index = query_index
         self.passed = True
         self.es_index_name = es_index_name or "es_index"
+        self.n1ql_executor = n1ql_executor
 
     def check(self, task_manager):
         self.state = FINISHED
@@ -1313,52 +1600,54 @@ class ESRunQueryCompare(Task):
 
     def execute(self, task_manager):
         self.es_compare = True
+        should_verify_n1ql = True
         try:
             self.log.info("---------------------------------------"
                           "-------------- Query # %s -------------"
                           "---------------------------------------"
-                          % str(self.query_index+1))
+                          % str(self.query_index + 1))
             try:
                 fts_hits, fts_doc_ids, fts_time, fts_status = \
                     self.run_fts_query(self.fts_query)
-                self.log.info("Status: %s" %fts_status)
+                self.log.info("Status: %s" % fts_status)
                 if fts_hits < 0:
                     self.passed = False
-                elif 'errors' in fts_status.keys() and fts_status['errors']:
-                        if fts_status['successful'] == 0 and \
-                                (list(set(fts_status['errors'].values())) ==
-                                    [u'context deadline exceeded'] or
-                                list(set(fts_status['errors'].values())) ==
-                                    [u'TooManyClauses[maxClauseCount is set to 1024]']):
-                            # too many clauses in the query for fts to process
-                            self.log.info("FTS chose not to run this big query"
-                                          "...skipping ES validation")
-                            self.passed = True
-                            self.es_compare = False
-                        elif 0 < fts_status['successful'] < \
-                                self.fts_index.num_pindexes:
-                            # partial results
-                            self.log.info("FTS returned partial results..."
-                                          "skipping ES validation")
-                            self.passed = True
-                            self.es_compare = False
+                elif 'errors' in list(fts_status.keys()) and fts_status['errors']:
+                    if fts_status['successful'] == 0 and \
+                            (list(set(fts_status['errors'].values())) ==
+                             ['context deadline exceeded'] or
+                             "TooManyClauses" in str(list(set(fts_status['errors'].values())))):
+                        # too many clauses in the query for fts to process
+                        self.log.info("FTS chose not to run this big query"
+                                      "...skipping ES validation")
+                        self.passed = True
+                        self.es_compare = False
+                        should_verify_n1ql = False
+                    elif 0 < fts_status['successful'] < \
+                            self.fts_index.num_pindexes:
+                        # partial results
+                        self.log.info("FTS returned partial results..."
+                                      "skipping ES validation")
+                        self.passed = True
+                        self.es_compare = False
                 self.log.info("FTS hits for query: %s is %s (took %sms)" % \
-                        (json.dumps(self.fts_query, ensure_ascii=False),
-                        fts_hits,
-                        float(fts_time)/1000000))
+                              (json.dumps(self.fts_query, ensure_ascii=False),
+                               fts_hits,
+                               float(fts_time) / 1000000))
             except ServerUnavailableException:
                 self.log.error("ERROR: FTS Query timed out (client timeout=70s)!")
                 self.passed = False
+            es_hits = 0
             if self.es and self.es_query:
                 es_hits, es_doc_ids, es_time = self.run_es_query(self.es_query)
                 self.log.info("ES hits for query: %s on %s is %s (took %sms)" % \
-                              (json.dumps(self.es_query,  ensure_ascii=False),
+                              (json.dumps(self.es_query, ensure_ascii=False),
                                self.es_index_name,
                                es_hits,
                                es_time))
                 if self.passed and self.es_compare:
                     if int(es_hits) != int(fts_hits):
-                        msg = "FAIL: FTS hits: %s, while ES hits: %s"\
+                        msg = "FAIL: FTS hits: %s, while ES hits: %s" \
                               % (fts_hits, es_hits)
                         self.log.error(msg)
                     es_but_not_fts = list(set(es_doc_ids) - set(fts_doc_ids))
@@ -1377,8 +1666,72 @@ class ESRunQueryCompare(Task):
                                   % (len(es_but_not_fts), es_but_not_fts[:50])
                         self.log.error(msg)
                         self.passed = False
+
+            if fts_hits <= 0 and es_hits == 0:
+                should_verify_n1ql = False
+
+            if self.n1ql_executor and should_verify_n1ql:
+                if self.fts_index.dataset == 'all':
+                    query_type = 'emp'
+                    if int(TestInputSingleton.input.param("doc_maps", 1)) > 1:
+                        query_type = 'wiki'
+                    wiki_fields = ["revision.text", "title"]
+                    if any(field in str(json.dumps(self.fts_query)) for field in wiki_fields):
+                        query_type = 'wiki'
+                else:
+                    query_type = self.fts_index.dataset
+                geo_strings = ['"field": "geo"']
+                if any(geo_str in str(json.dumps(self.fts_query)) for geo_str in geo_strings):
+                    query_type = 'earthquake'
+
+                n1ql_query = "select meta().id from default where type='" + str(
+                    query_type) + "' and search(default, " + str(
+                    json.dumps(self.fts_query)) + ")"
+                self.log.info("Running N1QL query: " + str(n1ql_query))
+                n1ql_result = self.n1ql_executor.run_n1ql_query(query=n1ql_query)
+                if n1ql_result['status'] == 'success':
+                    n1ql_hits = n1ql_result['metrics']['resultCount']
+                    n1ql_doc_ids = []
+                    for res in n1ql_result['results']:
+                        n1ql_doc_ids.append(res['id'])
+                    n1ql_time = n1ql_result['metrics']['elapsedTime']
+
+                    self.log.info("N1QL hits for query: %s is %s (took %s)" % \
+                                  (json.dumps(n1ql_query, ensure_ascii=False),
+                                   n1ql_hits,
+                                   n1ql_time))
+                    if self.passed:
+                        if int(n1ql_hits) != int(fts_hits):
+                            msg = "FAIL: FTS hits: %s, while N1QL hits: %s" \
+                                  % (fts_hits, n1ql_hits)
+                            self.log.error(msg)
+                        n1ql_but_not_fts = list(set(n1ql_doc_ids) - set(fts_doc_ids))
+                        fts_but_not_n1ql = list(set(fts_doc_ids) - set(n1ql_doc_ids))
+                        if not (n1ql_but_not_fts or fts_but_not_n1ql):
+                            self.log.info("SUCCESS: Docs returned by FTS = docs"
+                                          " returned by N1QL, doc_ids verified")
+                        else:
+                            if fts_but_not_n1ql:
+                                msg = "FAIL: Following %s doc(s) were not returned" \
+                                      " by N1QL,but FTS, printing 50: %s" \
+                                      % (len(fts_but_not_n1ql), fts_but_not_n1ql[:50])
+                            else:
+                                msg = "FAIL: Following %s docs were not returned" \
+                                      " by FTS, but N1QL, printing 50: %s" \
+                                      % (len(n1ql_but_not_fts), n1ql_but_not_fts[:50])
+                            self.log.error(msg)
+                            self.passed = False
+                else:
+                    self.passed = False
+                    self.log.info("N1QL query execution is failed.")
+                    self.log.error(n1ql_result["errors"][0]['msg'])
             self.state = CHECKING
             task_manager.schedule(self)
+
+            if not should_verify_n1ql and self.n1ql_executor:
+                self.log.info("Skipping N1QL result validation since FTS results are - " + str(
+                    fts_hits) + " and es results are - " + str(es_hits) + ".")
+
         except Exception as e:
             self.log.error(e)
             self.set_exception(e)
@@ -1394,8 +1747,9 @@ class ESRunQueryCompare(Task):
 # This will be obsolete with the implementation of batch operations in LoadDocumentsTaks
 class BatchedLoadDocumentsTask(GenericLoadingTask):
     def __init__(self, server, bucket, generator, kv_store, op_type, exp, flag=0, only_store_hash=True,
-                 batch_size=100, pause_secs=1, timeout_secs=60, compression=True):
-        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression)
+                 batch_size=100, pause_secs=1, timeout_secs=60, compression=True, scope=None, collection=None):
+        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression, scope=scope,
+                                    collection=collection)
         self.batch_generator = BatchedDocumentGenerator(generator, batch_size)
         self.op_type = op_type
         self.exp = exp
@@ -1406,11 +1760,13 @@ class BatchedLoadDocumentsTask(GenericLoadingTask):
         self.timeout = timeout_secs
         self.bucket = bucket
         self.server = server
+        self.scope=scope
+        self.collection = collection
 
     def has_next(self):
         has = self.batch_generator.has_next()
         if math.fmod(self.batch_generator._doc_gen.itr, 50000) == 0.0 or not has:
-            self.log.info("Batch {0} documents queued #: {1} with exp:{2} @ {3}, bucket {4}".\
+            self.log.info("Batch {0} documents queued #: {1} with exp:{2} @ {3}, bucket {4}". \
                           format(self.op_type,
                                  (self.batch_generator._doc_gen.itr - self.batch_generator._doc_gen.start),
                                  self.exp,
@@ -1418,9 +1774,10 @@ class BatchedLoadDocumentsTask(GenericLoadingTask):
                                  self.bucket))
         return has
 
-    def next(self):
+    def __next__(self):
         key_value = self.batch_generator.next_batch()
-        partition_keys_dic = self.kv_store.acquire_partitions(key_value.keys())
+        partition_keys_dic = self.kv_store.acquire_partitions(list(key_value.keys()), self.bucket, self.scope,
+                                                              self.collection)
         if self.op_type == 'create':
             self._create_batch(partition_keys_dic, key_value)
         elif self.op_type == 'update':
@@ -1432,33 +1789,37 @@ class BatchedLoadDocumentsTask(GenericLoadingTask):
         else:
             self.state = FINISHED
             self.set_exception(Exception("Bad operation type: %s" % self.op_type))
-        self.kv_store.release_partitions(partition_keys_dic.keys())
+        self.kv_store.release_partitions(list(partition_keys_dic.keys()), self.scope, self.collection)
 
     def _create_batch(self, partition_keys_dic, key_val):
         try:
             self._process_values_for_create(key_val)
-            self.client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False)
+            self.client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False,
+                                 scope=self.scope, collection=self.collection)
             self._populate_kvstore(partition_keys_dic, key_val)
-        except (MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError, RuntimeError) as error:
+        except (
+                MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError,
+                RuntimeError) as error:
             self.state = FINISHED
             self.set_exception(error)
-
 
     def _update_batch(self, partition_keys_dic, key_val):
         try:
             self._process_values_for_update(partition_keys_dic, key_val)
-            self.client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False)
+            self.client.setMulti(self.exp, self.flag, key_val, self.pause, self.timeout, parallel=False,
+                                 scope=self.scope, collection=self.collection)
             self._populate_kvstore(partition_keys_dic, key_val)
-        except (MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError, RuntimeError) as error:
+        except (
+                MemcachedError, ServerUnavailableException, socket.error, EOFError, AttributeError,
+                RuntimeError) as error:
             self.state = FINISHED
             self.set_exception(error)
 
-
     def _delete_batch(self, partition_keys_dic, key_val):
-        for partition, keys in partition_keys_dic.items():
+        for partition, keys in list(partition_keys_dic.items()):
             for key in keys:
                 try:
-                    self.client.delete(key)
+                    self.client.delete(key, scope=self.scope, collection=self.collection)
                     partition.delete(key)
                 except MemcachedError as error:
                     if error.status == ERR_NOT_FOUND and partition.get_valid(key) is None:
@@ -1471,47 +1832,47 @@ class BatchedLoadDocumentsTask(GenericLoadingTask):
                     self.state = FINISHED
                     self.set_exception(error)
 
-
     def _read_batch(self, partition_keys_dic, key_val):
         try:
-            o, c, d = self.client.getMulti(key_val.keys(), self.pause, self.timeout)
+            self.client.getMulti(list(key_val.keys()), self.pause, self.timeout, scope=self.scope,
+                                 collection=self.collection)
         except MemcachedError as error:
-                self.state = FINISHED
-                self.set_exception(error)
+            self.state = FINISHED
+            self.set_exception(error)
 
     def _process_values_for_create(self, key_val):
-        for key, value in key_val.items():
+        for key, value in list(key_val.items()):
             try:
                 value_json = json.loads(value)
                 value_json['mutated'] = 0
                 value = json.dumps(value_json)
             except ValueError:
-                index = random.choice(range(len(value)))
+                index = random.choice(list(range(len(value))))
                 value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
             finally:
                 key_val[key] = value
 
     def _process_values_for_update(self, partition_keys_dic, key_val):
-        for partition, keys in partition_keys_dic.items():
+        for partition, keys in list(partition_keys_dic.items()):
             for key in keys:
                 value = partition.get_valid(key)
                 if value is None:
                     del key_val[key]
                     continue
                 try:
-                    value = key_val[key]  # new updated value, however it is not their in orginal code "LoadDocumentsTask"
+                    value = key_val[
+                        key]  # new updated value, however it is not their in orginal code "LoadDocumentsTask"
                     value_json = json.loads(value)
                     value_json['mutated'] += 1
                     value = json.dumps(value_json)
                 except ValueError:
-                    index = random.choice(range(len(value)))
+                    index = random.choice(list(range(len(value))))
                     value = value[0:index] + random.choice(string.ascii_uppercase) + value[index + 1:]
                 finally:
                     key_val[key] = value
 
-
     def _populate_kvstore(self, partition_keys_dic, key_val):
-        for partition, keys in partition_keys_dic.items():
+        for partition, keys in list(partition_keys_dic.items()):
             self._populate_kvstore_partition(partition, keys, key_val)
 
     def _release_locks_on_kvstore(self):
@@ -1525,10 +1886,11 @@ class BatchedLoadDocumentsTask(GenericLoadingTask):
             partition.set(key, key_val[key], self.exp, self.flag)
 
 
-
 class WorkloadTask(GenericLoadingTask):
-    def __init__(self, server, bucket, kv_store, num_ops, create, read, update, delete, exp, compression=True):
-        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression)
+    def __init__(self, server, bucket, kv_store, num_ops, create, read, update, delete, exp, compression=True,
+                 scope=None, collection=None):
+        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression,
+                                    scope=scope, collection=collection)
         self.itr = 0
         self.num_ops = num_ops
         self.create = create
@@ -1536,22 +1898,25 @@ class WorkloadTask(GenericLoadingTask):
         self.update = create + read + update
         self.delete = create + read + update + delete
         self.exp = exp
+        self.scope = scope
+        self.collection = collection
+        self.bucket = bucket
 
     def has_next(self):
         if self.num_ops == 0 or self.itr < self.num_ops:
             return True
         return False
 
-    def next(self):
+    def __next__(self):
         self.itr += 1
         rand = random.randint(1, self.delete)
-        if rand > 0 and rand <= self.create:
+        if 0 < rand <= self.create:
             self._create_random_key()
-        elif rand > self.create and rand <= self.read:
+        elif self.create < rand <= self.read:
             self._get_random_key()
-        elif rand > self.read and rand <= self.update:
+        elif self.read < rand <= self.update:
             self._update_random_key()
-        elif rand > self.update and rand <= self.delete:
+        elif self.update < rand <= self.delete:
             self._delete_random_key()
 
     def _get_random_key(self):
@@ -1561,11 +1926,11 @@ class WorkloadTask(GenericLoadingTask):
 
         key = partition.get_random_valid_key()
         if key is None:
-            self.kv_store.release_partition(part_num)
+            self.kv_store.release_partitions(part_num)
             return
 
         self._unlocked_read(partition, key)
-        self.kv_store.release_partition(part_num)
+        self.kv_store.release_partitions(part_num)
 
     def _create_random_key(self):
         partition, part_num = self.kv_store.acquire_random_partition(False)
@@ -1574,16 +1939,16 @@ class WorkloadTask(GenericLoadingTask):
 
         key = partition.get_random_deleted_key()
         if key is None:
-            self.kv_store.release_partition(part_num)
+            self.kv_store.release_partitions(part_num)
             return
 
         value = partition.get_deleted(key)
         if value is None:
-            self.kv_store.release_partition(part_num)
+            self.kv_store.release_partitions(part_num)
             return
 
         self._unlocked_create(partition, key, value)
-        self.kv_store.release_partition(part_num)
+        self.kv_store.release_partitions(part_num)
 
     def _update_random_key(self):
         partition, part_num = self.kv_store.acquire_random_partition()
@@ -1592,11 +1957,11 @@ class WorkloadTask(GenericLoadingTask):
 
         key = partition.get_random_valid_key()
         if key is None:
-            self.kv_store.release_partition(part_num)
+            self.kv_store.release_partitions(part_num)
             return
 
         self._unlocked_update(partition, key)
-        self.kv_store.release_partition(part_num)
+        self.kv_store.release_partitions(part_num)
 
     def _delete_random_key(self):
         partition, part_num = self.kv_store.acquire_random_partition()
@@ -1605,72 +1970,92 @@ class WorkloadTask(GenericLoadingTask):
 
         key = partition.get_random_valid_key()
         if key is None:
-            self.kv_store.release_partition(part_num)
+            self.kv_store.release_partitions(part_num)
             return
 
         self._unlocked_delete(partition, key)
-        self.kv_store.release_partition(part_num)
+        self.kv_store.release_partitions(part_num)
+
 
 class ValidateDataTask(GenericLoadingTask):
     def __init__(self, server, bucket, kv_store, max_verify=None, only_store_hash=True, replica_to_read=None,
-                 compression=True):
-        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression)
-        self.valid_keys, self.deleted_keys = kv_store.key_set()
+                 compression=True, scope=None, collection=None):
+        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression,
+                                    scope=scope, collection=collection)
+        self.collection = collection
+        self.scope = scope
+        self.bucket = bucket
+        self.valid_keys, self.deleted_keys = kv_store.key_set(bucket=self.bucket, scope=self.scope,
+                                                              collection=self.collection)
         self.num_valid_keys = len(self.valid_keys)
         self.num_deleted_keys = len(self.deleted_keys)
         self.itr = 0
         self.max_verify = self.num_valid_keys + self.num_deleted_keys
         self.only_store_hash = only_store_hash
         self.replica_to_read = replica_to_read
+        self.bucket = bucket
+        self.server = server
         if max_verify is not None:
             self.max_verify = min(max_verify, self.max_verify)
-        self.log.info("%s items will be verified on %s bucket" % (self.max_verify, bucket))
+        self.log.info(
+            "%s items will be verified on %s bucket on scope %s on collection %s" % (self.max_verify, bucket,
+                                                                                     self.scope, self.collection))
         self.start_time = time.time()
 
     def has_next(self):
-        if self.itr < (self.num_valid_keys + self.num_deleted_keys) and\
-            self.itr < self.max_verify:
+        if self.itr < (self.num_valid_keys + self.num_deleted_keys) and \
+                self.itr < self.max_verify:
             if not self.itr % 50000:
                 self.log.info("{0} items were verified".format(self.itr))
             return True
         self.log.info("{0} items were verified in {1} sec.the average number of ops\
             - {2} per second ".format(self.itr, time.time() - self.start_time,
-                self.itr / (time.time() - self.start_time)).rstrip())
+                                      self.itr // (time.time() - self.start_time)).rstrip())
         return False
 
-    def next(self):
+    def __next__(self):
         if self.itr < self.num_valid_keys:
-            self._check_valid_key(self.valid_keys[self.itr])
+            self._check_valid_key(self.valid_keys[self.itr], self.bucket, scope=self.scope, collection=self.collection)
         else:
-            self._check_deleted_key(self.deleted_keys[self.itr - self.num_valid_keys])
+            self._check_deleted_key(self.deleted_keys[self.itr - self.num_valid_keys], self.bucket,
+                                    scope=self.scope, collection=self.collection)
         self.itr += 1
 
-    def _check_valid_key(self, key):
-        partition = self.kv_store.acquire_partition(key)
+    def _check_valid_key(self, key, bucket="default", scope=None, collection=None):
+        partition = self.kv_store.acquire_partition(key, bucket, scope=scope,  collection=collection)
 
         value = partition.get_valid(key)
         flag = partition.get_flag(key)
         if value is None or flag is None:
-            self.kv_store.release_partition(key)
+            self.kv_store.release_partition(key, bucket, scope=scope, collection=collection)
             return
 
         try:
             if self.replica_to_read is None:
-                o, c, d = self.client.get(key)
+
+                o, c, d = self.client.get(key, scope=scope, collection=collection)
             else:
-                o, c, d = self.client.getr(key, replica_index=self.replica_to_read)
+                o, c, d = self.client.getr(key, replica_index=self.replica_to_read, scope=scope, collection=collection)
+            try:
+                d = d.decode()
+            except AttributeError:
+                pass
             if self.only_store_hash:
                 if crc32.crc32_hash(d) != int(value):
                     self.state = FINISHED
-                    self.set_exception(Exception('Key: %s, Bad hash result: %d != %d for key %s' % (key, crc32.crc32_hash(d), int(value), key)))
+                    self.set_exception(Exception(
+                        'Key: %s, Bad hash result: %d != %d for key %s' % (key, crc32.crc32_hash(d), int(value), key)))
             else:
                 value = json.dumps(value)
                 if d != json.loads(value):
+                    self.log.info(f"the scope {scope} collection is {collection} for which the value is failing")
                     self.state = FINISHED
-                    self.set_exception(Exception('Key: %s, Bad result: %s != %s for key %s' % (key, json.dumps(d), value, key)))
+                    self.set_exception(
+                        Exception('Key: %s, Bad result: %s != %s for key %s' % (key, json.dumps(d), value, key)))
             if CHECK_FLAG and o != flag:
                 self.state = FINISHED
-                self.set_exception(Exception('Key: %s, Bad result for flag value: %s != the value we set: %s' % (key, o, flag)))
+                self.set_exception(
+                    Exception('Key: %s, Bad result for flag value: %s != the value we set: %s' % (key, o, flag)))
 
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND and partition.get_valid(key) is None:
@@ -1682,13 +2067,13 @@ class ValidateDataTask(GenericLoadingTask):
             self.log.error("Unexpected error: %s" % str(error))
             self.state = FINISHED
             self.set_exception(error)
-        self.kv_store.release_partition(key)
+        self.kv_store.release_partition(key, bucket, scope=scope, collection=collection)
 
-    def _check_deleted_key(self, key):
-        partition = self.kv_store.acquire_partition(key)
+    def _check_deleted_key(self, key, bucket="default", scope=None, collection=None):
+        partition = self.kv_store.acquire_partition(key, bucket, scope=scope, collection=collection)
 
         try:
-            self.client.delete(key)
+            self.client.delete(key, scope=scope, collection=collection)
             if partition.get_valid(key) is not None:
                 self.state = FINISHED
                 self.set_exception(Exception('Not Deletes: %s' % (key)))
@@ -1702,12 +2087,18 @@ class ValidateDataTask(GenericLoadingTask):
             if error.rc != NotFoundError:
                 self.state = FINISHED
                 self.set_exception(error)
-        self.kv_store.release_partition(key)
+        self.kv_store.release_partition(key, bucket, scope=scope, collection=collection)
+
 
 class ValidateDataWithActiveAndReplicaTask(GenericLoadingTask):
-    def __init__(self, server, bucket, kv_store, max_verify=None, compression=True):
-        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression)
-        self.valid_keys, self.deleted_keys = kv_store.key_set()
+    def __init__(self, server, bucket, kv_store, max_verify=None, compression=True, scope=None, collection=None):
+        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression,
+                                    scope=scope, collection=collection)
+        self.collection = collection
+        self.scope = scope
+        self.bucket = bucket
+        self.valid_keys, self.deleted_keys = kv_store.key_set(bucket=self.bucket, scope=self.scope,
+                                                              collection=self.collection)
         self.num_valid_keys = len(self.valid_keys)
         self.num_deleted_keys = len(self.deleted_keys)
         self.itr = 0
@@ -1718,36 +2109,44 @@ class ValidateDataWithActiveAndReplicaTask(GenericLoadingTask):
         self.start_time = time.time()
 
     def has_next(self):
-        if self.itr < (self.num_valid_keys + self.num_deleted_keys) and\
-            self.itr < self.max_verify:
+        if self.itr < (self.num_valid_keys + self.num_deleted_keys) and \
+                self.itr < self.max_verify:
             if not self.itr % 50000:
                 self.log.info("{0} items were verified".format(self.itr))
             return True
         self.log.info("{0} items were verified in {1} sec.the average number of ops\
             - {2} per second ".format(self.itr, time.time() - self.start_time,
-                self.itr / (time.time() - self.start_time)).rstrip())
+                                      self.itr // (time.time() - self.start_time)).rstrip())
         return False
 
-    def next(self):
+    def __next__(self):
         if self.itr < self.num_valid_keys:
-            self._check_valid_key(self.valid_keys[self.itr])
+            self._check_valid_key(self.valid_keys[self.itr], self.bucket, self.scope, self.collection)
         else:
-            self._check_deleted_key(self.deleted_keys[self.itr - self.num_valid_keys])
+            self._check_deleted_key(self.deleted_keys[self.itr - self.num_valid_keys], self.bucket,
+                                    self.scope, self.collection)
         self.itr += 1
 
-    def _check_valid_key(self, key):
+    def _check_valid_key(self, key, bucket, scope=None, collection=None):
+        partition = self.kv_store.acquire_partition(key, bucket, scope=scope, collection=collection)
         try:
-            o, c, d = self.client.get(key)
-            o_r, c_r, d_r = self.client.getr(key, replica_index=0)
+            o, c, d = self.client.get(key, scope=scope, collection=collection)
+            o_r, c_r, d_r = self.client.getr(key, replica_index=0, scope=scope, collection=collection)
             if o != o_r:
                 self.state = FINISHED
-                self.set_exception(Exception('ACTIVE AND REPLICA FLAG CHECK FAILED :: Key: %s, Bad result for CAS value: REPLICA FLAG %s != ACTIVE FLAG %s' % (key, o_r, o)))
+                self.set_exception(Exception(
+                    'ACTIVE AND REPLICA FLAG CHECK FAILED :: Key: %s, Bad result for CAS value: REPLICA FLAG %s != ACTIVE FLAG %s' % (
+                        key, o_r, o)))
             if c != c_r:
                 self.state = FINISHED
-                self.set_exception(Exception('ACTIVE AND REPLICA CAS CHECK FAILED :: Key: %s, Bad result for CAS value: REPLICA CAS %s != ACTIVE CAS %s' % (key, c_r, c)))
+                self.set_exception(Exception(
+                    'ACTIVE AND REPLICA CAS CHECK FAILED :: Key: %s, Bad result for CAS value: REPLICA CAS %s != ACTIVE CAS %s' % (
+                        key, c_r, c)))
             if d != d_r:
                 self.state = FINISHED
-                self.set_exception(Exception('ACTIVE AND REPLICA VALUE CHECK FAILED :: Key: %s, Bad result for Value value: REPLICA VALUE %s != ACTIVE VALUE %s' % (key, d_r, d)))
+                self.set_exception(Exception(
+                    'ACTIVE AND REPLICA VALUE CHECK FAILED :: Key: %s, Bad result for Value value: REPLICA VALUE %s != ACTIVE VALUE %s' % (
+                        key, d_r, d)))
 
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND and partition.get_valid(key) is None:
@@ -1760,13 +2159,13 @@ class ValidateDataWithActiveAndReplicaTask(GenericLoadingTask):
             self.state = FINISHED
             self.set_exception(error)
 
-    def _check_deleted_key(self, key):
-        partition = self.kv_store.acquire_partition(key)
+    def _check_deleted_key(self, key, bucket, scope=None, collection=None):
+        partition = self.kv_store.acquire_partition(key, bucket, scope=scope, collection=collection)
         try:
-            self.client.delete(key)
+            self.client.delete(key, scope=scope, collection=collection)
             if partition.get_valid(key) is not None:
                 self.state = FINISHED
-                self.set_exception(Exception('ACTIVE CHECK :: Not Deletes: %s' % (key)))
+                self.set_exception(Exception('ACTIVE CHECK :: Not Deletes: %s' % key))
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND:
                 pass
@@ -1777,13 +2176,19 @@ class ValidateDataWithActiveAndReplicaTask(GenericLoadingTask):
             if error.rc != NotFoundError:
                 self.state = FINISHED
                 self.set_exception(error)
-        self.kv_store.release_partition(key)
+        self.kv_store.release_partition(key, bucket, scope=scope, collection=collection)
+
 
 class BatchedValidateDataTask(GenericLoadingTask):
     def __init__(self, server, bucket, kv_store, max_verify=None, only_store_hash=True, batch_size=100,
-                 timeout_sec=5, compression=True):
-        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression)
-        self.valid_keys, self.deleted_keys = kv_store.key_set()
+                 timeout_sec=5, compression=True, scope=None, collection=None):
+        GenericLoadingTask.__init__(self, server, bucket, kv_store, compression=compression, scope=scope,
+                                    collection=collection)
+        self.collection = collection
+        self.scope = scope
+        self.bucket = bucket
+        self.valid_keys, self.deleted_keys = kv_store.key_set(bucket=self.bucket, scope=self.scope,
+                                                              collection=self.collection)
         self.num_valid_keys = len(self.valid_keys)
         self.num_deleted_keys = len(self.deleted_keys)
         self.itr = 0
@@ -1801,40 +2206,44 @@ class BatchedValidateDataTask(GenericLoadingTask):
         if self.itr < (self.num_valid_keys + self.num_deleted_keys) and self.itr < self.max_verify:
             has = True
         if math.fmod(self.itr, 10000) == 0.0:
-                self.log.info("{0} items were verified".format(self.itr))
+            self.log.info("{0} items were verified".format(self.itr))
         if not has:
             self.log.info("{0} items were verified in {1} sec.the average number of ops\
                 - {2} per second".format(self.itr, time.time() - self.start_time,
-                self.itr / (time.time() - self.start_time)).rstrip())
+                                         self.itr // (time.time() - self.start_time)).rstrip())
         return has
 
-    def next(self):
+    def __next__(self):
         if self.itr < self.num_valid_keys:
             keys_batch = self.valid_keys[self.itr:self.itr + self.batch_size]
             self.itr += len(keys_batch)
-            self._check_valid_keys(keys_batch)
+            self._check_valid_keys(keys_batch, self.bucket, self.scope, self.collection)
         else:
-            self._check_deleted_key(self.deleted_keys[self.itr - self.num_valid_keys])
+            self._check_deleted_key(self.deleted_keys[self.itr - self.num_valid_keys], self.bucket, self.scope,
+                                    self.collection)
             self.itr += 1
 
-    def _check_valid_keys(self, keys):
-        partition_keys_dic = self.kv_store.acquire_partitions(keys)
+    def _check_valid_keys(self, keys, bucket, scope=None, collection=None):
+        partition_keys_dic = self.kv_store.acquire_partitions(keys, bucket, scope=scope, collection=collection)
         try:
-            key_vals = self.client.getMulti(keys, parallel=True, timeout_sec=self.timeout_sec)
-        except ValueError, error:
+            key_vals = self.client.getMulti(keys, parallel=True, timeout_sec=self.timeout_sec, scope=scope,
+                                            collection=collection)
+        except ValueError as error:
+            self.log.error("Read failed via memcached client. Error: %s" % str(error))
             self.state = FINISHED
-            self.kv_store.release_partitions(partition_keys_dic.keys())
+            self.kv_store.release_partitions(list(partition_keys_dic.keys()))
             self.set_exception(error)
             return
-        except BaseException, error:
-        # handle all other exception, for instance concurrent.futures._base.TimeoutError
+        except BaseException as error:
+            # handle all other exception, for instance concurrent.futures._base.TimeoutError
+            self.log.error("Read failed via memcached client. Error: %s" % str(error))
             self.state = FINISHED
-            self.kv_store.release_partitions(partition_keys_dic.keys())
+            self.kv_store.release_partitions(list(partition_keys_dic.keys()))
             self.set_exception(error)
             return
-        for partition, keys in partition_keys_dic.items():
+        for partition, keys in list(partition_keys_dic.items()):
             self._check_validity(partition, keys, key_vals)
-        self.kv_store.release_partitions(partition_keys_dic.keys())
+        self.kv_store.release_partitions(list(partition_keys_dic.keys()))
 
     def _check_validity(self, partition, keys, key_vals):
 
@@ -1849,23 +2258,25 @@ class BatchedValidateDataTask(GenericLoadingTask):
                 if self.only_store_hash:
                     if crc32.crc32_hash(d) != int(value):
                         self.state = FINISHED
-                        self.set_exception(Exception('Key: %s Bad hash result: %d != %d' % (key, crc32.crc32_hash(d), int(value))))
+                        self.set_exception(
+                            Exception('Key: %s Bad hash result: %d != %d' % (key, crc32.crc32_hash(d), int(value))))
                 else:
-                    #value = json.dumps(value)
+                    # value = json.dumps(value)
                     if json.loads(d) != json.loads(value):
                         self.state = FINISHED
                         self.set_exception(Exception('Key: %s Bad result: %s != %s' % (key, json.dumps(d), value)))
                 if CHECK_FLAG and o != flag:
                     self.state = FINISHED
-                    self.set_exception(Exception('Key: %s Bad result for flag value: %s != the value we set: %s' % (key, o, flag)))
+                    self.set_exception(
+                        Exception('Key: %s Bad result for flag value: %s != the value we set: %s' % (key, o, flag)))
             except KeyError as error:
                 self.state = FINISHED
                 self.set_exception(error)
 
-    def _check_deleted_key(self, key):
-        partition = self.kv_store.acquire_partition(key)
+    def _check_deleted_key(self, key, bucket, scope=None, collection=None):
+        partition = self.kv_store.acquire_partition(key, bucket, scope=scope, collection=collection)
         try:
-            self.client.delete(key)
+            self.client.delete(key, scope=scope, collection=collection)
             if partition.get_valid(key) is not None:
                 self.state = FINISHED
                 self.set_exception(Exception('Not Deletes: %s' % (key)))
@@ -1874,24 +2285,30 @@ class BatchedValidateDataTask(GenericLoadingTask):
                 pass
             else:
                 self.state = FINISHED
-                self.kv_store.release_partitions(key)
+                self.kv_store.release_partition(key, bucket, scope=scope, collection=collection)
                 self.set_exception(error)
         except Exception as error:
             if error.rc != NotFoundError:
                 self.state = FINISHED
-                self.kv_store.release_partitions(key)
+                self.kv_store.release_partition(key, bucket, scope=scope, collection=collection)
                 self.set_exception(error)
-        self.kv_store.release_partition(key)
+        self.kv_store.release_partition(key, bucket, scope=scope, collection=collection)
 
 
 class VerifyRevIdTask(GenericLoadingTask):
     def __init__(self, src_server, dest_server, bucket, src_kv_store, dest_kv_store, max_err_count=200000,
-                 max_verify=None, compression=True):
-        GenericLoadingTask.__init__(self, src_server, bucket, src_kv_store, compression=compression)
+                 max_verify=None, compression=True, scope=None, collection=None):
+        GenericLoadingTask.__init__(self, src_server, bucket, src_kv_store, compression=compression,
+                                    scope=scope, collection=collection)
+        from memcached.helper.data_helper import VBucketAwareMemcached as SmartClient
+        self.collection = collection
+        self.scope = scope
         self.client_src = SmartClient(RestConnection(src_server), bucket)
         self.client_dest = SmartClient(RestConnection(dest_server), bucket)
-        self.src_valid_keys, self.src_deleted_keys = src_kv_store.key_set()
-        self.dest_valid_keys, self.dest_del_keys = dest_kv_store.key_set()
+        self.src_valid_keys, self.src_deleted_keys = src_kv_store.key_set(bucket=self.bucket, scope=self.scope,
+                                                                          collection=self.collection)
+        self.dest_valid_keys, self.dest_del_keys = dest_kv_store.key_set(bucket=self.bucket, scope=self.scope,
+                                                                         collection=self.collection)
         self.num_valid_keys = len(self.src_valid_keys)
         self.num_deleted_keys = len(self.src_deleted_keys)
         self.keys_not_found = {self.client.rest.ip: [], self.client_dest.rest.ip: []}
@@ -1905,12 +2322,13 @@ class VerifyRevIdTask(GenericLoadingTask):
         self.max_err_count = max_err_count
         self.src_server = src_server
         self.bucket = bucket
-        self.log.info("RevID verification: in progress for %s ..." % bucket.name)
+        self.log.info(f"RevID verification: in progress for {self.bucket.name} in scope:{scope}"
+                      f" in collection: {collection}")
 
     def has_next(self):
         if self.itr < (self.num_valid_keys + self.num_deleted_keys) and \
-                        self.err_count < self.max_err_count and \
-                        self.itr < self.max_verify:
+                self.err_count < self.max_err_count and \
+                self.itr < self.max_verify:
             return True
         self.log.info("RevId Verification : {0} existing items have been verified"
                       .format(self.itr if self.itr < self.num_valid_keys else self.num_valid_keys))
@@ -1927,39 +2345,41 @@ class VerifyRevIdTask(GenericLoadingTask):
         server_count = server.fetch_bucket_stats(bucket=self.bucket.name)["op"]["samples"]["curr_items"][-1]
         if server_count > self.num_valid_keys:
             self.set_exception(Exception("ERROR: {0} keys present on bucket {1} "
-                                        "on {2} while kvstore expects only {3}"
-                                        .format(server_count, self.bucket.name,
-                                         self.src_server.ip, self.num_valid_keys)))
+                                         "on {2} while kvstore expects only {3}"
+                                         .format(server_count, self.bucket.name,
+                                                 self.src_server.ip, self.num_valid_keys)))
         return False
 
-    def next(self):
+    def __next__(self):
         if self.itr < self.num_valid_keys:
-            self._check_key_revId(self.src_valid_keys[self.itr])
+            self._check_key_revId(self.src_valid_keys[self.itr], collection=self.collection)
         elif self.itr < (self.num_valid_keys + self.num_deleted_keys):
             # verify deleted/expired keys
             self._check_key_revId(self.src_deleted_keys[self.itr - self.num_valid_keys],
-                                  ignore_meta_data=['expiration','cas'])
+                                  ignore_meta_data=['expiration', 'cas'], collection=self.collection)
         self.itr += 1
 
         # show progress of verification for every 50k items
         if math.fmod(self.itr, 50000) == 0.0:
             self.log.info("{0} items have been verified".format(self.itr))
 
-
-    def __get_meta_data(self, client, key):
+    def __get_meta_data(self, client, key, scope=None, collection=None):
         try:
             mc = client.memcached(key)
-            meta_data = eval("{'deleted': %s, 'flags': %s, 'expiration': %s, 'seqno': %s, 'cas': %s}" % (mc.getMeta(key)))
+            meta_data = eval("{'deleted': %s, 'flags': %s, 'expiration': %s, 'seqno': %s, 'cas': %s}" % (
+                mc.getMeta(key, scope=scope, collection=collection)))
             return meta_data
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND:
                 # if a filter was specified, the key will not be found in
                 # target kv store if key did not match filter expression
-                if key not in self.src_deleted_keys and key in (self.dest_valid_keys+self.dest_del_keys):
+                if key not in self.src_deleted_keys and key in (self.dest_valid_keys + self.dest_del_keys):
                     self.err_count += 1
-                    self.keys_not_found[client.rest.ip].append(("key: %s" % key, "vbucket: %s" % client._get_vBucket_id(key)))
+                    self.keys_not_found[client.rest.ip].append(
+                        ("key: %s" % key, "vbucket: %s" % client._get_vBucket_id(key, scope=scope,
+                                                                                 collection=collection)))
                 else:
-                    self.not_matching_filter_keys +=1
+                    self.not_matching_filter_keys += 1
             else:
                 self.state = FINISHED
                 self.set_exception(error)
@@ -1968,9 +2388,11 @@ class VerifyRevIdTask(GenericLoadingTask):
             self.state = FINISHED
             self.set_unexpected_exception(e)
 
-    def _check_key_revId(self, key, ignore_meta_data=[]):
-        src_meta_data = self.__get_meta_data(self.client_src, key)
-        dest_meta_data = self.__get_meta_data(self.client_dest, key)
+    def _check_key_revId(self, key, ignore_meta_data=None, scope=None, collection=None):
+        if ignore_meta_data is None:
+            ignore_meta_data = []
+        src_meta_data = self.__get_meta_data(self.client_src, key, scope=scope, collection=collection)
+        dest_meta_data = self.__get_meta_data(self.client_dest, key, scope=scope, collection=collection)
         if not src_meta_data or not dest_meta_data:
             return
         prev_error_count = self.err_count
@@ -1987,15 +2409,15 @@ class VerifyRevIdTask(GenericLoadingTask):
                 "seqno on Destination should not be 0, Error Count:{0}".format(self.err_count))
 
         # verify all metadata
-        for meta_key in src_meta_data.keys():
+        for meta_key in list(src_meta_data.keys()):
             check = True
             if meta_key == 'flags' and not CHECK_FLAG:
                 check = False
             if check and src_meta_data[meta_key] != dest_meta_data[meta_key] and meta_key not in ignore_meta_data:
                 self.err_count += 1
                 err_msg.append("{0} mismatch: Source {0}:{1}, Destination {0}:{2}, Error Count:{3}"
-                    .format(meta_key, src_meta_data[meta_key],
-                        dest_meta_data[meta_key], self.err_count))
+                               .format(meta_key, src_meta_data[meta_key],
+                                       dest_meta_data[meta_key], self.err_count))
 
         if self.err_count - prev_error_count > 0 and self.err_count < 200:
             self.log.error("===== Verifying rev_ids failed for key: {0}, bucket:{1} =====".format(key, self.bucket))
@@ -2004,12 +2426,18 @@ class VerifyRevIdTask(GenericLoadingTask):
             self.log.error("Dest meta data: %s" % dest_meta_data)
             self.state = FINISHED
 
+
 class VerifyMetaDataTask(GenericLoadingTask):
-    def __init__(self, dest_server, bucket, kv_store, meta_data_store, max_err_count=100, compression=True):
-        GenericLoadingTask.__init__(self, dest_server, bucket, kv_store, compression=compression)
+    def __init__(self, dest_server, bucket, kv_store, meta_data_store, max_err_count=100, compression=True,
+                 scope=None, collection=None):
+        GenericLoadingTask.__init__(self, dest_server, bucket, kv_store, compression=compression, scope=scope,
+                                    collection=collection)
         from memcached.helper.data_helper import VBucketAwareMemcached as SmartClient
+        self.collections = collection
+        self.scope = scope
         self.client = SmartClient(RestConnection(dest_server), bucket)
-        self.valid_keys, self.deleted_keys = kv_store.key_set()
+        self.valid_keys, self.deleted_keys = kv_store.key_set(bucket=self.bucket,
+                                                              scope=self.scope, collection=self.collection)
         self.num_valid_keys = len(self.valid_keys)
         self.num_deleted_keys = len(self.deleted_keys)
         self.keys_not_found = {self.client.rest.ip: [], self.client.rest.ip: []}
@@ -2027,36 +2455,38 @@ class VerifyMetaDataTask(GenericLoadingTask):
                       .format(self.itr - self.num_valid_keys if self.itr > self.num_valid_keys else 0))
         return False
 
-    def next(self):
+    def __next__(self):
         if self.itr < self.num_valid_keys:
-            self._check_key_meta_data(self.valid_keys[self.itr])
+            self._check_key_meta_data(self.valid_keys[self.itr], self.collections)
         elif self.itr < (self.num_valid_keys + self.num_deleted_keys):
             # verify deleted/expired keys
             self._check_key_meta_data(self.deleted_keys[self.itr - self.num_valid_keys],
-                                  ignore_meta_data=['expiration'])
+                                      ignore_meta_data=['expiration'], scope=self.scope, collection=self.collections)
         self.itr += 1
 
         # show progress of verification for every 50k items
         if math.fmod(self.itr, 50000) == 0.0:
             self.log.info("{0} items have been verified".format(self.itr))
 
-    def __get_meta_data(self, client, key):
+    def __get_meta_data(self, client, key, scope=None, collection=None):
         try:
             mc = client.memcached(key)
-            meta_data = eval("{'deleted': %s, 'flags': %s, 'expiration': %s, 'seqno': %s, 'cas': %s}" % (mc.getMeta(key)))
+            meta_data = eval("{'deleted': %s, 'flags': %s, 'expiration': %s, 'seqno': %s, 'cas': %s}" % (
+                mc.getMeta(key, scope=scope, collection=collection)))
             return meta_data
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND:
                 if key not in self.deleted_keys:
                     self.err_count += 1
-                    self.keys_not_found[client.rest.ip].append(("key: %s" % key, "vbucket: %s" % client._get_vBucket_id(key)))
+                    self.keys_not_found[client.rest.ip].append(
+                        ("key: %s" % key, "vbucket: %s" % client._get_vBucket_id(key)))
             else:
                 self.state = FINISHED
                 self.set_exception(error)
 
-    def _check_key_meta_data(self, key, ignore_meta_data=[]):
+    def _check_key_meta_data(self, key, ignore_meta_data=[], scope=None, collection=None):
         src_meta_data = self.meta_data_store[key]
-        dest_meta_data = self.__get_meta_data(self.client, key)
+        dest_meta_data = self.__get_meta_data(self.client, key, scope=scope, collection=collection)
         if not src_meta_data or not dest_meta_data:
             return
         prev_error_count = self.err_count
@@ -2068,12 +2498,12 @@ class VerifyMetaDataTask(GenericLoadingTask):
                 "seqno on Destination should not be 0, Error Count:{0}".format(self.err_count))
 
         # verify all metadata
-        for meta_key in src_meta_data.keys():
+        for meta_key in list(src_meta_data.keys()):
             if src_meta_data[meta_key] != dest_meta_data[meta_key] and meta_key not in ignore_meta_data:
                 self.err_count += 1
                 err_msg.append("{0} mismatch: Source {0}:{1}, Destination {0}:{2}, Error Count:{3}"
-                    .format(meta_key, src_meta_data[meta_key],
-                        dest_meta_data[meta_key], self.err_count))
+                               .format(meta_key, src_meta_data[meta_key],
+                                       dest_meta_data[meta_key], self.err_count))
 
         if self.err_count - prev_error_count > 0:
             self.log.error("===== Verifying meta data failed for key: {0} =====".format(key))
@@ -2082,12 +2512,17 @@ class VerifyMetaDataTask(GenericLoadingTask):
             self.log.error("Dest meta data: %s" % dest_meta_data)
             self.state = FINISHED
 
+
 class GetMetaDataTask(GenericLoadingTask):
-    def __init__(self, dest_server, bucket, kv_store, compression=True):
-        GenericLoadingTask.__init__(self, dest_server, bucket, kv_store, compression=compression)
+    def __init__(self, dest_server, bucket, kv_store, compression=True, scope=None, collection=None):
+        GenericLoadingTask.__init__(self, dest_server, bucket, kv_store, compression=compression,
+                                    scope=scope, collection=collection)
         from memcached.helper.data_helper import VBucketAwareMemcached as SmartClient
+        self.collection = collection
+        self.scope = scope
         self.client = SmartClient(RestConnection(dest_server), bucket)
-        self.valid_keys, self.deleted_keys = kv_store.key_set()
+        self.valid_keys, self.deleted_keys = kv_store.key_set(bucket=self.bucket, scope=self.scope,
+                                                              collection=self.collection)
         self.num_valid_keys = len(self.valid_keys)
         self.num_deleted_keys = len(self.deleted_keys)
         self.keys_not_found = {self.client.rest.ip: [], self.client.rest.ip: []}
@@ -2105,29 +2540,38 @@ class GetMetaDataTask(GenericLoadingTask):
                       .format(self.itr - self.num_valid_keys if self.itr > self.num_valid_keys else 0))
         return False
 
-    def next(self):
+    def __next__(self):
         if self.itr < self.num_valid_keys:
-            self.meta_data_store[self.valid_keys[self.itr]] = self.__get_meta_data(self.client,self.valid_keys[self.itr])
+            self.meta_data_store[self.valid_keys[self.itr]] = self.__get_meta_data(self.client,
+                                                                                   self.valid_keys[self.itr],
+                                                                                   self.scope, self.collection)
         elif self.itr < (self.num_valid_keys + self.num_deleted_keys):
-            self.meta_data_store[self.deleted_keys[self.itr - self.num_valid_keys]] = self.__get_meta_data(self.client,self.deleted_keys[self.itr - self.num_valid_keys])
+            self.meta_data_store[self.deleted_keys[self.itr - self.num_valid_keys]] = self.__get_meta_data(self.client,
+                                                                                                           self.deleted_keys[
+                                                                                                               self.itr - self.num_valid_keys],
+                                                                                                           scope=self.scope,
+                                                                                                           collection=self.collection)
         self.itr += 1
 
-    def __get_meta_data(self, client, key):
+    def __get_meta_data(self, client, key, scope=None, collection=None):
         try:
             mc = client.memcached(key)
-            meta_data = eval("{'deleted': %s, 'flags': %s, 'expiration': %s, 'seqno': %s, 'cas': %s}" % (mc.getMeta(key)))
+            meta_data = eval("{'deleted': %s, 'flags': %s, 'expiration': %s, 'seqno': %s, 'cas': %s}" % (
+                mc.getMeta(key, scope=scope, collection=collection)))
             return meta_data
         except MemcachedError as error:
             if error.status == ERR_NOT_FOUND:
                 if key not in self.deleted_keys:
                     self.err_count += 1
-                    self.keys_not_found[client.rest.ip].append(("key: %s" % key, "vbucket: %s" % client._get_vBucket_id(key)))
+                    self.keys_not_found[client.rest.ip].append(
+                        ("key: %s" % key, "vbucket: %s" % client._get_vBucket_id(key)))
             else:
                 self.state = FINISHED
                 self.set_exception(error)
 
     def get_meta_data_store(self):
         return self.meta_data_store
+
 
 class ViewCreateTask(Task):
     def __init__(self, server, design_doc_name, view, bucket="default", with_query=True,
@@ -2197,7 +2641,7 @@ class ViewCreateTask(Task):
             # only query if the DDoc has a view
             if self.view:
                 if self.with_query:
-                    query = {"stale" : "ok"}
+                    query = {"stale": "ok"}
                     if self.view.is_spatial:
                         content = \
                             self.rest.query_view(self.design_doc_name, self.view.name,
@@ -2207,17 +2651,18 @@ class ViewCreateTask(Task):
                             self.rest.query_view(self.design_doc_name, self.view.name,
                                                  self.bucket, query)
                 else:
-                     _, json_parsed, _ = self.rest._get_design_doc(self.bucket, self.design_doc_name)
-                     if self.view.is_spatial:
-                         if self.view.name not in json_parsed["spatial"].keys():
-                             self.set_exception(
+                    _, json_parsed, _ = self.rest._get_design_doc(self.bucket, self.design_doc_name)
+                    if self.view.is_spatial:
+                        if self.view.name not in list(json_parsed["spatial"].keys()):
+                            self.set_exception(
                                 Exception("design doc {O} doesn't contain spatial view {1}".format(
+                                    self.design_doc_name, self.view.name)))
+                    else:
+                        if self.view.name not in list(json_parsed["views"].keys()):
+                            self.set_exception(Exception("design doc {O} doesn't contain view {1}".format(
                                 self.design_doc_name, self.view.name)))
-                     else:
-                         if self.view.name not in json_parsed["views"].keys():
-                             self.set_exception(Exception("design doc {O} doesn't contain view {1}".format(
-                                self.design_doc_name, self.view.name)))
-                self.log.info("view : {0} was created successfully in ddoc: {1}".format(self.view.name, self.design_doc_name))
+                self.log.info(
+                    "view : {0} was created successfully in ddoc: {1}".format(self.view.name, self.design_doc_name))
             else:
                 # if we have reached here, it means design doc was successfully updated
                 self.log.info("Design Document : {0} was updated successfully".format(self.design_doc_name))
@@ -2232,7 +2677,7 @@ class ViewCreateTask(Task):
                 self._check_ddoc_replication_on_nodes()
 
         except QueryViewException as e:
-            if e.message.find('not_found') or e.message.find('view_undefined') > -1:
+            if str(e).find('not_found') or str(e).find('view_undefined') > -1:
                 task_manager.schedule(self, 2)
             else:
                 self.state = FINISHED
@@ -2273,12 +2718,12 @@ class ViewCreateTask(Task):
             return
 
         for node in nodes:
-            server_info = {"ip" : node.ip,
-                       "port" : node.port,
-                       "username" : self.rest.username,
-                       "password" : self.rest.password}
+            server_info = {"ip": node.ip,
+                           "port": node.port,
+                           "username": self.rest.username,
+                           "password": self.rest.password}
 
-            for count in xrange(retry_count):
+            for count in range(retry_count):
                 try:
                     rest_node = RestConnection(server_info)
                     content, meta = rest_node.get_ddoc(self.bucket, self.design_doc_name)
@@ -2286,19 +2731,24 @@ class ViewCreateTask(Task):
                     if new_rev_id == self.ddoc_rev_no:
                         break
                     else:
-                        self.log.info("Design Doc {0} version is not updated on node {1}:{2}. Retrying.".format(self.design_doc_name, node.ip, node.port))
+                        self.log.info("Design Doc {0} version is not updated on node {1}:{2}. Retrying.".format(
+                            self.design_doc_name, node.ip, node.port))
                         time.sleep(2)
                 except ReadDocumentException as e:
-                    if(count < retry_count):
-                        self.log.info("Design Doc {0} not yet available on node {1}:{2}. Retrying.".format(self.design_doc_name, node.ip, node.port))
+                    if (count < retry_count):
+                        self.log.info(
+                            "Design Doc {0} not yet available on node {1}:{2}. Retrying.".format(self.design_doc_name,
+                                                                                                 node.ip, node.port))
                         time.sleep(2)
                     else:
-                        self.log.error("Design Doc {0} failed to replicate on node {1}:{2}".format(self.design_doc_name, node.ip, node.port))
+                        self.log.error(
+                            "Design Doc {0} failed to replicate on node {1}:{2}".format(self.design_doc_name, node.ip,
+                                                                                        node.port))
                         self.set_exception(e)
                         self.state = FINISHED
                         break
                 except Exception as e:
-                    if(count < retry_count):
+                    if (count < retry_count):
                         self.log.info("Unexpected Exception Caught. Retrying.")
                         time.sleep(2)
                     else:
@@ -2306,7 +2756,8 @@ class ViewCreateTask(Task):
                         self.state = FINISHED
                         break
             else:
-                self.set_exception(Exception("Design Doc {0} version mismatch on node {1}:{2}".format(self.design_doc_name, node.ip, node.port)))
+                self.set_exception(Exception(
+                    "Design Doc {0} version mismatch on node {1}:{2}".format(self.design_doc_name, node.ip, node.port)))
 
 
 class ViewDeleteTask(Task):
@@ -2359,13 +2810,14 @@ class ViewDeleteTask(Task):
         try:
             rest = RestConnection(self.server)
             # make sure view was deleted
-            query = {"stale" : "ok"}
+            query = {"stale": "ok"}
             content = \
                 rest.query_view(self.design_doc_name, self.view.name, self.bucket, query)
             self.state = FINISHED
             self.set_result(False)
         except QueryViewException as e:
-            self.log.info("view : {0} was successfully deleted in ddoc: {1}".format(self.view.name, self.design_doc_name))
+            self.log.info(
+                "view : {0} was successfully deleted in ddoc: {1}".format(self.view.name, self.design_doc_name))
             self.state = FINISHED
             self.set_result(True)
 
@@ -2373,6 +2825,7 @@ class ViewDeleteTask(Task):
         except Exception as e:
             self.state = FINISHED
             self.set_unexpected_exception(e)
+
 
 class ViewQueryTask(Task):
     def __init__(self, server, design_doc_name, view_name,
@@ -2420,21 +2873,24 @@ class ViewQueryTask(Task):
                 rest.query_view(self.design_doc_name, self.view_name, self.bucket, self.query, self.timeout)
 
             self.log.info("Server: %s, Design Doc: %s, View: %s, (%d rows) expected, (%d rows) returned" % \
-                          (self.server.ip, self.design_doc_name, self.view_name, self.expected_rows, len(content['rows'])))
+                          (self.server.ip, self.design_doc_name, self.view_name, self.expected_rows,
+                           len(content['rows'])))
 
-            raised_error = content.get(u'error', '') or ''.join([str(item) for item in content.get(u'errors', [])])
+            raised_error = content.get('error', '') or ''.join([str(item) for item in content.get('errors', [])])
             if raised_error:
                 raise QueryViewException(self.view_name, raised_error)
 
             if len(content['rows']) == self.expected_rows:
                 self.log.info("expected number of rows: '{0}' was found for view query".format(self.
-                            expected_rows))
+                                                                                               expected_rows))
                 self.state = FINISHED
                 self.set_result(True)
             else:
                 if len(content['rows']) > self.expected_rows:
-                    raise QueryViewException(self.view_name, "Server: {0}, Design Doc: {1}, actual returned rows: '{2}' are greater than expected {3}"
-                                             .format(self.server.ip, self.design_doc_name, len(content['rows']), self.expected_rows,))
+                    raise QueryViewException(self.view_name,
+                                             "Server: {0}, Design Doc: {1}, actual returned rows: '{2}' are greater than expected {3}"
+                                             .format(self.server.ip, self.design_doc_name, len(content['rows']),
+                                                     self.expected_rows, ))
                 if "stale" in self.query:
                     if self.query["stale"].lower() == "false":
                         self.state = FINISHED
@@ -2452,17 +2908,18 @@ class ViewQueryTask(Task):
             self.state = FINISHED
             self.set_unexpected_exception(e)
 
+
 class N1QLQueryTask(Task):
     def __init__(self,
                  server, bucket,
-                 query, n1ql_helper = None,
+                 query, n1ql_helper=None,
                  expected_result=None,
-                 verify_results = True,
-                 is_explain_query = False,
-                 index_name = None,
+                 verify_results=True,
+                 is_explain_query=False,
+                 index_name=None,
                  retry_time=2,
-                 scan_consistency = None,
-                 scan_vector = None):
+                 scan_consistency=None,
+                 scan_vector=None):
         Task.__init__(self, "query_n1ql_task")
         self.server = server
         self.bucket = bucket
@@ -2483,12 +2940,13 @@ class N1QLQueryTask(Task):
             self.log.info(" <<<<< START Executing Query {0} >>>>>>".format(self.query))
             if not self.is_explain_query:
                 self.msg, self.isSuccess = self.n1ql_helper.run_query_and_verify_result(
-                    query = self.query, server = self.server, expected_result = self.expected_result,
-                    scan_consistency = self.scan_consistency, scan_vector = self.scan_vector,
-                    verify_results = self.verify_results)
+                    query=self.query, server=self.server, expected_result=self.expected_result,
+                    scan_consistency=self.scan_consistency, scan_vector=self.scan_vector,
+                    verify_results=self.verify_results)
             else:
-                self.actual_result = self.n1ql_helper.run_cbq_query(query = self.query, server = self.server,
-                 scan_consistency = self.scan_consistency, scan_vector = self.scan_vector)
+                self.actual_result = self.n1ql_helper.run_cbq_query(query=self.query, server=self.server,
+                                                                    scan_consistency=self.scan_consistency,
+                                                                    scan_vector=self.scan_vector)
                 self.log.info(self.actual_result)
             self.log.info(" <<<<< Done Executing Query {0} >>>>>>".format(self.query))
             self.state = CHECKING
@@ -2505,22 +2963,24 @@ class N1QLQueryTask(Task):
 
     def check(self, task_manager):
         try:
-           # Verify correctness of result set
-           if self.verify_results:
-            if not self.is_explain_query:
-                if not self.isSuccess:
-                    self.log.info(" Query {0} results leads to INCORRECT RESULT ".format(self.query))
-                    raise N1QLQueryException(self.msg)
-            else:
-                check = self.n1ql_helper.verify_index_with_explain(self.actual_result, self.index_name)
-                if not check:
-                    actual_result = self.n1ql_helper.run_cbq_query(query = "select * from system:indexes", server = self.server)
-                    self.log.info(actual_result)
-                    raise Exception(" INDEX usage in Query {0} :: NOT FOUND {1} :: as observed in result {2}".format(
-                        self.query, self.index_name, self.actual_result))
-           self.log.info(" <<<<< Done VERIFYING Query {0} >>>>>>".format(self.query))
-           self.set_result(True)
-           self.state = FINISHED
+            # Verify correctness of result set
+            if self.verify_results:
+                if not self.is_explain_query:
+                    if not self.isSuccess:
+                        self.log.info(" Query {0} results leads to INCORRECT RESULT ".format(self.query))
+                        raise N1QLQueryException(self.msg)
+                else:
+                    check = self.n1ql_helper.verify_index_with_explain(self.actual_result, self.index_name)
+                    if not check:
+                        actual_result = self.n1ql_helper.run_cbq_query(query="select * from system:indexes",
+                                                                       server=self.server)
+                        self.log.info(actual_result)
+                        raise Exception(
+                            " INDEX usage in Query {0} :: NOT FOUND {1} :: as observed in result {2}".format(
+                                self.query, self.index_name, self.actual_result))
+            self.log.info(" <<<<< Done VERIFYING Query {0} >>>>>>".format(self.query))
+            self.set_result(True)
+            self.state = FINISHED
         except N1QLQueryException as e:
             # subsequent query failed! exit
             self.state = FINISHED
@@ -2530,12 +2990,13 @@ class N1QLQueryTask(Task):
             self.state = FINISHED
             self.set_unexpected_exception(e)
 
+
 class CreateIndexTask(Task):
     def __init__(self,
                  server, bucket, index_name,
-                 query, n1ql_helper = None,
-                 retry_time=2, defer_build = False,
-                 timeout = 240):
+                 query, n1ql_helper=None,
+                 retry_time=2, defer_build=False,
+                 timeout=240):
         Task.__init__(self, "create_index_task")
         self.server = server
         self.bucket = bucket
@@ -2549,7 +3010,7 @@ class CreateIndexTask(Task):
     def execute(self, task_manager):
         try:
             # Query and get results
-            self.n1ql_helper.run_cbq_query(query = self.query, server = self.server)
+            self.n1ql_helper.run_cbq_query(query=self.query, server=self.server)
             self.state = CHECKING
             task_manager.schedule(self)
         except CreateIndexException as e:
@@ -2564,10 +3025,11 @@ class CreateIndexTask(Task):
 
     def check(self, task_manager):
         try:
-           # Verify correctness of result set
+            # Verify correctness of result set
             check = True
             if not self.defer_build:
-                check = self.n1ql_helper.is_index_online_and_in_list(self.bucket, self.index_name, server = self.server, timeout = self.timeout)
+                check = self.n1ql_helper.is_index_online_and_in_list(self.bucket, self.index_name, server=self.server,
+                                                                     timeout=self.timeout)
             if not check:
                 raise CreateIndexException("Index {0} not created as expected ".format(self.index_name))
             self.set_result(True)
@@ -2583,10 +3045,11 @@ class CreateIndexTask(Task):
             self.log.error(e)
             self.set_exception(e)
 
+
 class BuildIndexTask(Task):
     def __init__(self,
                  server, bucket,
-                 query, n1ql_helper = None,
+                 query, n1ql_helper=None,
                  retry_time=2):
         Task.__init__(self, "build_index_task")
         self.server = server
@@ -2598,7 +3061,7 @@ class BuildIndexTask(Task):
     def execute(self, task_manager):
         try:
             # Query and get results
-            self.n1ql_helper.run_cbq_query(query = self.query, server = self.server)
+            self.n1ql_helper.run_cbq_query(query=self.query, server=self.server)
             self.state = CHECKING
             task_manager.schedule(self)
         except CreateIndexException as e:
@@ -2613,7 +3076,7 @@ class BuildIndexTask(Task):
 
     def check(self, task_manager):
         try:
-           # Verify correctness of result set
+            # Verify correctness of result set
             self.set_result(True)
             self.state = FINISHED
         except CreateIndexException as e:
@@ -2626,12 +3089,13 @@ class BuildIndexTask(Task):
             self.state = FINISHED
             self.set_unexpected_exception(e)
 
+
 class MonitorIndexTask(Task):
     def __init__(self,
                  server, bucket, index_name,
-                 n1ql_helper = None,
+                 n1ql_helper=None,
                  retry_time=2,
-                 timeout = 240):
+                 timeout=240):
         Task.__init__(self, "build_index_task")
         self.server = server
         self.bucket = bucket
@@ -2643,7 +3107,7 @@ class MonitorIndexTask(Task):
     def execute(self, task_manager):
         try:
             check = self.n1ql_helper.is_index_online_and_in_list(self.bucket, self.index_name,
-             server = self.server, timeout = self.timeout)
+                                                                 server=self.server, timeout=self.timeout)
             if not check:
                 self.state = FINISHED
                 raise CreateIndexException("Index {0} not created as expected ".format(self.index_name))
@@ -2672,10 +3136,11 @@ class MonitorIndexTask(Task):
             self.state = FINISHED
             self.set_unexpected_exception(e)
 
+
 class DropIndexTask(Task):
     def __init__(self,
                  server, bucket, index_name,
-                 query, n1ql_helper = None,
+                 query, n1ql_helper=None,
                  retry_time=2):
         Task.__init__(self, "drop_index_task")
         self.server = server
@@ -2689,10 +3154,10 @@ class DropIndexTask(Task):
     def execute(self, task_manager):
         try:
             # Query and get results
-            check = self.n1ql_helper._is_index_in_list(self.bucket, self.index_name, server = self.server)
+            check = self.n1ql_helper._is_index_in_list(self.bucket, self.index_name, server=self.server)
             if not check:
                 raise DropIndexException("index {0} does not exist will not drop".format(self.index_name))
-            self.n1ql_helper.run_cbq_query(query = self.query, server = self.server)
+            self.n1ql_helper.run_cbq_query(query=self.query, server=self.server)
             self.state = CHECKING
             task_manager.schedule(self)
         except N1QLQueryException as e:
@@ -2706,8 +3171,8 @@ class DropIndexTask(Task):
 
     def check(self, task_manager):
         try:
-        # Verify correctness of result set
-            check = self.n1ql_helper._is_index_in_list(self.bucket, self.index_name, server = self.server)
+            # Verify correctness of result set
+            check = self.n1ql_helper._is_index_in_list(self.bucket, self.index_name, server=self.server)
             if check:
                 raise Exception("Index {0} not dropped as expected ".format(self.index_name))
             self.set_result(True)
@@ -2720,6 +3185,7 @@ class DropIndexTask(Task):
         except Exception as e:
             self.state = FINISHED
             self.set_unexpected_exception(e)
+
 
 class MonitorViewQueryResultsTask(Task):
     def __init__(self, servers, design_doc_name, view,
@@ -2753,38 +3219,39 @@ class MonitorViewQueryResultsTask(Task):
             self.results = self.rest.query_view(
                 self.design_doc_name, self.view_name, self.bucket, self.query,
                 self.timeout)
-            raised_error = self.results.get(u'error', '') or ''.join([str(item) for item in self.results.get(u'errors', [])])
+            raised_error = self.results.get('error', '') or ''.join(
+                [str(item) for item in self.results.get('errors', [])])
             if raised_error:
                 raise QueryViewException(self.view_name, raised_error)
             else:
                 self.log.info("view %s, query %s: expected- %s, actual -%s" % (
-                                        self.design_doc_name, self.query,
-                                        len(self.expected_docs),
-                                        len(self.results.get(u'rows', []))))
+                    self.design_doc_name, self.query,
+                    len(self.expected_docs),
+                    len(self.results.get('rows', []))))
                 self.state = CHECKING
                 task_manager.schedule(self)
-        except QueryViewException, ex:
+        except QueryViewException as ex:
             self.log.error("During query run (ddoc=%s, query=%s, server=%s) error is: %s" % (
-                                self.design_doc_name, self.query, self.servers[0].ip, str(ex)))
+                self.design_doc_name, self.query, self.servers[0].ip, str(ex)))
             if self.error and str(ex).find(self.error) != -1:
                 self.state = FINISHED
-                self.set_result({"passed" : True,
-                                 "errors" : str(ex)})
+                self.set_result({"passed": True,
+                                 "errors": str(ex)})
             elif self.current_retry == self.retries:
                 self.state = FINISHED
-                self.set_result({"passed" : False,
-                                 "errors" : str(ex)})
+                self.set_result({"passed": False,
+                                 "errors": str(ex)})
             elif str(ex).find('view_undefined') != -1 or \
-                str(ex).find('not_found') != -1 or \
-                str(ex).find('unable to reach') != -1 or \
-                str(ex).find('socket error') != -1 or \
-                str(ex).find('econnrefused') != -1 or \
-                str(ex).find("doesn't exist") != -1 or \
-                str(ex).find('missing') != -1 or \
-                str(ex).find("Undefined set view") != -1:
+                    str(ex).find('not_found') != -1 or \
+                    str(ex).find('unable to reach') != -1 or \
+                    str(ex).find('socket error') != -1 or \
+                    str(ex).find('econnrefused') != -1 or \
+                    str(ex).find("doesn't exist") != -1 or \
+                    str(ex).find('missing') != -1 or \
+                    str(ex).find("Undefined set view") != -1:
                 self.log.error(
-                       "view_results not ready yet ddoc=%s , try again in 10 seconds..." %
-                       self.design_doc_name)
+                    "view_results not ready yet ddoc=%s , try again in 10 seconds..." %
+                    self.design_doc_name)
                 task_manager.schedule(self, 10)
             elif str(ex).find('timeout') != -1:
                 self.connection_timeout = self.connection_timeout * 2
@@ -2793,36 +3260,36 @@ class MonitorViewQueryResultsTask(Task):
                 task_manager.schedule(self, 10)
             else:
                 self.state = FINISHED
-                res = {"passed" : False,
-                       "errors" : str(ex)}
-                if self.results and self.results.get(u'rows', []):
+                res = {"passed": False,
+                       "errors": str(ex)}
+                if self.results and self.results.get('rows', []):
                     res['results'] = self.results
                 self.set_result(res)
-        except Exception, ex:
+        except Exception as ex:
             if self.current_retry == self.retries:
                 self.state = CHECKING
                 self.log.error("view %s, query %s: verifying results" % (
-                                        self.design_doc_name, self.query))
+                    self.design_doc_name, self.query))
                 task_manager.schedule(self)
             else:
                 self.log.error(
-                       "view_results not ready yet ddoc=%s , try again in 10 seconds..." %
-                       self.design_doc_name)
+                    "view_results not ready yet ddoc=%s , try again in 10 seconds..." %
+                    self.design_doc_name)
                 task_manager.schedule(self, 10)
 
     def check(self, task_manager):
         try:
-            if self.view.red_func and (('reduce' in self.query and\
-                        self.query['reduce'] == "true") or (not 'reduce' in self.query)):
-                if len(self.expected_docs) != len(self.results.get(u'rows', [])):
+            if self.view.red_func and (('reduce' in self.query and \
+                                        self.query['reduce'] == "true") or (not 'reduce' in self.query)):
+                if len(self.expected_docs) != len(self.results.get('rows', [])):
                     if self.current_retry == self.retries:
                         self.state = FINISHED
                         msg = "ddoc=%s, query=%s, server=%s" % (
                             self.design_doc_name, self.query, self.servers[0].ip)
                         msg += "Number of groups expected:%s, actual:%s" % (
-                             len(self.expected_docs), len(self.results.get(u'rows', [])))
-                        self.set_result({"passed" : False,
-                                         "errors" : msg})
+                            len(self.expected_docs), len(self.results.get('rows', [])))
+                        self.set_result({"passed": False,
+                                         "errors": msg})
                     else:
                         RestHelper(self.rest)._wait_for_indexer_ddoc(self.servers, self.design_doc_name)
                         self.state = EXECUTING
@@ -2831,95 +3298,95 @@ class MonitorViewQueryResultsTask(Task):
                     for row in self.expected_docs:
                         key_expected = row['key']
 
-                        if not (key_expected in [key['key'] for key in self.results.get(u'rows', [])]):
+                        if not (key_expected in [key['key'] for key in self.results.get('rows', [])]):
                             if self.current_retry == self.retries:
                                 self.state = FINISHED
                                 msg = "ddoc=%s, query=%s, server=%s" % (
                                     self.design_doc_name, self.query, self.servers[0].ip)
                                 msg += "Key expected but not present :%s" % (key_expected)
-                                self.set_result({"passed" : False,
-                                                 "errors" : msg})
+                                self.set_result({"passed": False,
+                                                 "errors": msg})
                             else:
                                 RestHelper(self.rest)._wait_for_indexer_ddoc(self.servers, self.design_doc_name)
                                 self.state = EXECUTING
                                 task_manager.schedule(self, 10)
                         else:
-                            for res in self.results.get(u'rows', []):
+                            for res in self.results.get('rows', []):
                                 if key_expected == res['key']:
                                     value = res['value']
                                     break
                             msg = "ddoc=%s, query=%s, server=%s\n" % (
-                                    self.design_doc_name, self.query, self.servers[0].ip)
+                                self.design_doc_name, self.query, self.servers[0].ip)
                             msg += "Key %s: expected value %s, actual: %s" % (
-                                                                key_expected, row['value'], value)
+                                key_expected, row['value'], value)
                             self.log.info(msg)
                             if row['value'] == value:
                                 self.state = FINISHED
                                 self.log.info(msg)
-                                self.set_result({"passed" : True,
-                                                 "errors" : []})
+                                self.set_result({"passed": True,
+                                                 "errors": []})
                             else:
                                 if self.current_retry == self.retries:
                                     self.state = FINISHED
                                     self.log.error(msg)
-                                    self.set_result({"passed" : True,
-                                                     "errors" : msg})
+                                    self.set_result({"passed": True,
+                                                     "errors": msg})
                                 else:
                                     RestHelper(self.rest)._wait_for_indexer_ddoc(self.servers, self.design_doc_name)
                                     self.state = EXECUTING
                                     task_manager.schedule(self, 10)
                 return
-            if len(self.expected_docs) > len(self.results.get(u'rows', [])):
+            if len(self.expected_docs) > len(self.results.get('rows', [])):
                 if self.current_retry == self.retries:
                     self.state = FINISHED
-                    self.set_result({"passed" : False,
-                                     "errors" : [],
-                                     "results" : self.results})
+                    self.set_result({"passed": False,
+                                     "errors": [],
+                                     "results": self.results})
                 else:
                     RestHelper(self.rest)._wait_for_indexer_ddoc(self.servers, self.design_doc_name)
                     if self.current_retry == 70:
                         self.query["stale"] = 'false'
-                    self.log.info("View result is still not expected (ddoc=%s, query=%s, server=%s). retry in 10 sec" % (
-                                    self.design_doc_name, self.query, self.servers[0].ip))
+                    self.log.info(
+                        "View result is still not expected (ddoc=%s, query=%s, server=%s). retry in 10 sec" % (
+                            self.design_doc_name, self.query, self.servers[0].ip))
                     self.state = EXECUTING
                     task_manager.schedule(self, 10)
-            elif len(self.expected_docs) < len(self.results.get(u'rows', [])):
+            elif len(self.expected_docs) < len(self.results.get('rows', [])):
                 self.state = FINISHED
-                self.set_result({"passed" : False,
-                                 "errors" : [],
-                                 "results" : self.results})
-            elif len(self.expected_docs) == len(self.results.get(u'rows', [])):
+                self.set_result({"passed": False,
+                                 "errors": [],
+                                 "results": self.results})
+            elif len(self.expected_docs) == len(self.results.get('rows', [])):
                 if self.verify_rows:
                     expected_ids = [row['id'] for row in self.expected_docs]
-                    rows_ids = [str(row['id']) for row in self.results[u'rows']]
+                    rows_ids = [str(row['id']) for row in self.results['rows']]
                     if expected_ids == rows_ids:
                         self.state = FINISHED
-                        self.set_result({"passed" : True,
-                                         "errors" : []})
+                        self.set_result({"passed": True,
+                                         "errors": []})
                     else:
                         if self.current_retry == self.retries:
                             self.state = FINISHED
-                            self.set_result({"passed" : False,
-                                             "errors" : [],
-                                             "results" : self.results})
+                            self.set_result({"passed": False,
+                                             "errors": [],
+                                             "results": self.results})
                         else:
                             self.state = EXECUTING
                             task_manager.schedule(self, 10)
                 else:
                     self.state = FINISHED
-                    self.set_result({"passed" : True,
-                                     "errors" : []})
+                    self.set_result({"passed": True,
+                                     "errors": []})
         # catch and set all unexpected exceptions
-        except Exception, e:
+        except Exception as e:
             self.state = FINISHED
             self.log.error("Exception caught %s" % str(e))
             self.set_exception(e)
-            self.set_result({"passed" : False,
-                             "errors" : str(e)})
+            self.set_result({"passed": False,
+                             "errors": str(e)})
 
 
 class ModifyFragmentationConfigTask(Task):
-
     """
         Given a config dictionary attempt to configure fragmentation settings.
         This task will override the default settings that are provided for
@@ -2930,17 +3397,17 @@ class ModifyFragmentationConfigTask(Task):
         Task.__init__(self, "modify_frag_config_task")
 
         self.server = server
-        self.config = {"parallelDBAndVC" : "false",
-                       "dbFragmentThreshold" : None,
-                       "viewFragmntThreshold" : None,
-                       "dbFragmentThresholdPercentage" : 100,
-                       "viewFragmntThresholdPercentage" : 100,
-                       "allowedTimePeriodFromHour" : None,
-                       "allowedTimePeriodFromMin" : None,
-                       "allowedTimePeriodToHour" : None,
-                       "allowedTimePeriodToMin" : None,
-                       "allowedTimePeriodAbort" : None,
-                       "autoCompactionDefined" : "true"}
+        self.config = {"parallelDBAndVC": "false",
+                       "dbFragmentThreshold": None,
+                       "viewFragmntThreshold": None,
+                       "dbFragmentThresholdPercentage": 100,
+                       "viewFragmntThresholdPercentage": 100,
+                       "allowedTimePeriodFromHour": None,
+                       "allowedTimePeriodFromMin": None,
+                       "allowedTimePeriodToHour": None,
+                       "allowedTimePeriodToMin": None,
+                       "allowedTimePeriodAbort": None,
+                       "autoCompactionDefined": "true"}
         self.bucket = bucket
 
         for key in config:
@@ -2968,7 +3435,6 @@ class ModifyFragmentationConfigTask(Task):
             self.state = FINISHED
             self.set_exception(e)
 
-
     def check(self, task_manager):
         try:
             rest = RestConnection(self.server)
@@ -2992,7 +3458,6 @@ class ModifyFragmentationConfigTask(Task):
 
 
 class MonitorActiveTask(Task):
-
     """
         Attempt to monitor active task that  is available in _active_tasks API.
         It allows to monitor indexer, bucket compaction.
@@ -3022,7 +3487,7 @@ class MonitorActiveTask(Task):
         self.target_key = ""
 
         if self.type == 'indexer':
-            pass # no special actions
+            pass  # no special actions
         elif self.type == "bucket_compaction":
             self.target_key = "original_target"
         elif self.type == "view_compaction":
@@ -3039,14 +3504,15 @@ class MonitorActiveTask(Task):
         self.current_iter = 0
         self.task = None
 
-
     def execute(self, task_manager):
         tasks = self.rest.active_tasks()
         for task in tasks:
             if task["type"] == self.type and ((
-                        self.target_key == "designDocument" and task[self.target_key] == self.target_value) or (
-                        self.target_key == "original_target" and task[self.target_key]["type"] == self.target_value) or (
-                        self.type == 'indexer') ):
+                                                      self.target_key == "designDocument" and task[
+                                                  self.target_key] == self.target_value) or (
+                                                      self.target_key == "original_target" and task[self.target_key][
+                                                  "type"] == self.target_value) or (
+                                                      self.type == 'indexer')):
                 self.current_progress = task["progress"]
                 self.task = task
                 self.log.info("monitoring active task was found:" + str(task))
@@ -3071,7 +3537,6 @@ class MonitorActiveTask(Task):
             self.log.info("task for monitoring %s:%s completed" % (self.type, self.target_value))
             self.set_result(True)
 
-
     def check(self, task_manager):
         tasks = self.rest.active_tasks()
         for task in tasks:
@@ -3080,9 +3545,9 @@ class MonitorActiveTask(Task):
                 self.log.info("progress %s:%s - %s %%" % (self.type, self.target_value, task["progress"]))
                 # reached expected progress
                 if task["progress"] >= self.wait_progress:
-                        self.state = FINISHED
-                        self.log.error("progress was reached %s" % self.wait_progress)
-                        self.set_result(True)
+                    self.state = FINISHED
+                    self.log.error("progress was reached %s" % self.wait_progress)
+                    self.set_result(True)
                 # progress value was changed
                 if task["progress"] > self.current_progress:
                     self.current_progress = task["progress"]
@@ -3097,7 +3562,8 @@ class MonitorActiveTask(Task):
                     # num iteration with the same progress = num_iterations
                     else:
                         self.state = FINISHED
-                        self.log.error("progress for active task was not changed during %s sec" % 2 * self.num_iterations)
+                        self.log.error(
+                            "progress for active task was not changed during %s sec" % 2 * self.num_iterations)
                         self.set_result(False)
                 else:
                     self.state = FINISHED
@@ -3109,8 +3575,8 @@ class MonitorActiveTask(Task):
         self.log.info("task %s:%s was completed" % (self.type, self.target_value))
         self.set_result(True)
 
-class MonitorViewFragmentationTask(Task):
 
+class MonitorViewFragmentationTask(Task):
     """
         Attempt to monitor fragmentation that is occurring for a given design_doc.
         execute stage is just for preliminary sanity checking of values and environment.
@@ -3131,11 +3597,10 @@ class MonitorViewFragmentationTask(Task):
         self.fragmentation_value = fragmentation_value
         self.design_doc_name = design_doc_name
 
-
     def execute(self, task_manager):
 
         # sanity check of fragmentation value
-        if  self.fragmentation_value < 0 or self.fragmentation_value > 100:
+        if self.fragmentation_value < 0 or self.fragmentation_value > 100:
             err_msg = \
                 "Invalid value for fragmentation %d" % self.fragmentation_value
             self.state = FINISHED
@@ -3145,7 +3610,8 @@ class MonitorViewFragmentationTask(Task):
         try:
             auto_compact_percentage = self._get_current_auto_compaction_percentage()
             if auto_compact_percentage != "undefined" and auto_compact_percentage < self.fragmentation_value:
-                self.log.warn("Auto compaction is set to %s. Therefore fragmentation_value %s may not be reached" % (auto_compact_percentage, self.fragmentation_value))
+                self.log.warning("Auto compaction is set to %s. Therefore fragmentation_value %s may not be reached" % (
+                    auto_compact_percentage, self.fragmentation_value))
 
             self.state = CHECKING
             task_manager.schedule(self, 5)
@@ -3156,7 +3622,6 @@ class MonitorViewFragmentationTask(Task):
         except Exception as e:
             self.state = FINISHED
             self.set_unexpected_exception(e)
-
 
     def _get_current_auto_compaction_percentage(self):
         """ check at bucket level and cluster level for compaction percentage """
@@ -3170,14 +3635,14 @@ class MonitorViewFragmentationTask(Task):
             content = rest.cluster_status()
 
         auto_compact_percentage = \
-                content["autoCompactionSettings"]["viewFragmentationThreshold"]["percentage"]
+            content["autoCompactionSettings"]["viewFragmentationThreshold"]["percentage"]
 
         return auto_compact_percentage
 
     def check(self, task_manager):
 
         rest = RestConnection(self.server)
-        new_frag_value = MonitorViewFragmentationTask.\
+        new_frag_value = MonitorViewFragmentationTask. \
             calc_ddoc_fragmentation(rest, self.design_doc_name, bucket=self.bucket)
 
         self.log.info("%s: current amount of fragmentation = %d" % (self.design_doc_name,
@@ -3195,19 +3660,19 @@ class MonitorViewFragmentationTask(Task):
         nodes = rest.node_statuses()
         info = []
         for node in nodes:
-            server_info = {"ip" : node.ip,
-                           "port" : node.port,
-                           "username" : rest.username,
-                           "password" : rest.password}
+            server_info = {"ip": node.ip,
+                           "port": node.port,
+                           "username": rest.username,
+                           "password": rest.password}
             rest = RestConnection(server_info)
             status = False
             try:
                 status, content = rest.set_view_info(bucket, design_doc_name)
             except Exception as e:
-                print(str(e))
+                print((str(e)))
                 if "Error occured reading set_view _info" in str(e) and with_rebalance:
-                    print("node {0} {1} is not ready yet?: {2}".format(
-                                    node.id, node.port, e.message))
+                    print(("node {0} {1} is not ready yet?: {2}".format(
+                        node.id, node.port, str(e))))
                 else:
                     raise e
             if status:
@@ -3223,8 +3688,8 @@ class MonitorViewFragmentationTask(Task):
 
         nodes_ddoc_info = \
             MonitorViewFragmentationTask.aggregate_ddoc_info(rest,
-                                                         design_doc_name,
-                                                         bucket, with_rebalance)
+                                                             design_doc_name,
+                                                             bucket, with_rebalance)
         total_disk_size = sum([content['disk_size'] for content in nodes_ddoc_info])
         total_data_size = sum([content['data_size'] for content in nodes_ddoc_info])
 
@@ -3234,8 +3699,8 @@ class MonitorViewFragmentationTask(Task):
 
         return total_fragmentation
 
-class ViewCompactionTask(Task):
 
+class ViewCompactionTask(Task):
     """
         Executes view compaction for a given design doc. This is technicially view compaction
         as represented by the api and also because the fragmentation is generated by the
@@ -3289,15 +3754,16 @@ class ViewCompactionTask(Task):
                           format(self.design_doc_name,
                                  new_compaction_revision, fragmentation))
 
-            if new_compaction_revision == self.compaction_revision and _compaction_running :
+            if new_compaction_revision == self.compaction_revision and _compaction_running:
                 # compaction ran successfully but compaction was not changed
                 # perhaps we are still compacting
                 self.log.info("design doc {0} is compacting".format(self.design_doc_name))
                 task_manager.schedule(self, 3)
-            elif new_compaction_revision > self.compaction_revision or\
-                 self.precompacted_fragmentation > fragmentation:
-                self.log.info("{1}: compactor was run, compaction revision was changed on {0}".format(new_compaction_revision,
-                                                                                                      self.design_doc_name))
+            elif new_compaction_revision > self.compaction_revision or \
+                    self.precompacted_fragmentation > fragmentation:
+                self.log.info(
+                    "{1}: compactor was run, compaction revision was changed on {0}".format(new_compaction_revision,
+                                                                                            self.design_doc_name))
                 frag_val_diff = fragmentation - self.precompacted_fragmentation
                 self.log.info("%s: fragmentation went from %d to %d" % \
                               (self.design_doc_name,
@@ -3309,8 +3775,9 @@ class ViewCompactionTask(Task):
                     # perhaps we are still compacting
                     if self._is_compacting():
                         task_manager.schedule(self, 2)
-                    self.log.info("compaction was completed, but fragmentation value {0} is more than before compaction {1}".
-                                  format(fragmentation, self.precompacted_fragmentation))
+                    self.log.info(
+                        "compaction was completed, but fragmentation value {0} is more than before compaction {1}".
+                            format(fragmentation, self.precompacted_fragmentation))
                     # probably we already compacted, but no work needed to be done
                     self.set_result(self.with_rebalance)
                 else:
@@ -3318,7 +3785,7 @@ class ViewCompactionTask(Task):
                 self.state = FINISHED
             else:
                 # Sometimes the compacting is not started immediately
-                for i in xrange(17):
+                for i in range(17):
                     time.sleep(3)
                     if self._is_compacting():
                         task_manager.schedule(self, 2)
@@ -3326,12 +3793,12 @@ class ViewCompactionTask(Task):
                     else:
                         new_compaction_revision, fragmentation = self._get_compaction_details()
                         self.log.info("{2}: stats compaction: ({0},{1})".
-                          format(new_compaction_revision, fragmentation,
-                                 self.design_doc_name))
+                                      format(new_compaction_revision, fragmentation,
+                                             self.design_doc_name))
                         # case of rebalance when with concurrent updates it's possible that
                         # compaction value has not changed significantly
                         if new_compaction_revision > self.compaction_revision and self.with_rebalance:
-                            self.log.warn("the compaction revision was increased,\
+                            self.log.warning("the compaction revision was increased,\
                              but the actual fragmentation value has not changed significantly")
                             self.set_result(True)
                             self.state = FINISHED
@@ -3342,10 +3809,10 @@ class ViewCompactionTask(Task):
                 self.log.info("design doc {0} is compacting:{1}".format(self.design_doc_name, self._is_compacting()))
                 new_compaction_revision, fragmentation = self._get_compaction_details()
                 self.log.error("stats compaction still: ({0},{1})".
-                          format(new_compaction_revision, fragmentation))
+                               format(new_compaction_revision, fragmentation))
                 status, content = self.rest.set_view_info(self.bucket, self.design_doc_name)
                 stats = content["stats"]
-                self.log.warn("general compaction stats:{0}".format(stats))
+                self.log.warning("general compaction stats:{0}".format(stats))
                 self.set_exception(Exception("Check system logs, looks like compaction failed to start"))
 
         except (SetViewInfoNotFound) as ex:
@@ -3360,15 +3827,19 @@ class ViewCompactionTask(Task):
         status, content = self.rest.set_view_info(self.bucket, self.design_doc_name)
         curr_no_of_compactions = content["stats"]["compactions"]
         curr_ddoc_fragemtation = \
-            MonitorViewFragmentationTask.calc_ddoc_fragmentation(self.rest, self.design_doc_name, self.bucket, self.with_rebalance)
+            MonitorViewFragmentationTask.calc_ddoc_fragmentation(self.rest, self.design_doc_name, self.bucket,
+                                                                 self.with_rebalance)
         return (curr_no_of_compactions, curr_ddoc_fragemtation)
 
     def _is_compacting(self):
         status, content = self.rest.set_view_info(self.bucket, self.design_doc_name)
         return content["compact_running"] == True
 
+
 '''task class for failover. This task will only failover nodes but doesn't
  rebalance as there is already a task to do that'''
+
+
 class FailoverTask(Task):
     def __init__(self, servers, to_failover=[], wait_for_pending=0, graceful=False, use_hostnames=False):
         Task.__init__(self, "failover_task")
@@ -3399,12 +3870,13 @@ class FailoverTask(Task):
         # call REST fail_over for the nodes to be failed over
         for server in self.to_failover:
             for node in rest.node_statuses():
-                if (server.hostname if self.use_hostnames else server.ip) == node.ip and int(server.port) == int(node.port):
+                if (server.hostname if self.use_hostnames else server.ip) == node.ip and int(server.port) == int(
+                        node.port):
                     self.log.info("Failing over {0}:{1} with graceful={2}".format(node.ip, node.port, self.graceful))
                     rest.fail_over(node.id, self.graceful)
 
-class GenerateExpectedViewResultsTask(Task):
 
+class GenerateExpectedViewResultsTask(Task):
     """
         Task to produce the set of keys that are expected to be returned
         by querying the provided <view>.  Results can be later passed to
@@ -3417,17 +3889,17 @@ class GenerateExpectedViewResultsTask(Task):
         Also NOTE, this task is to be used with doc_generators that
         produce json like documentgenerator.DocumentGenerator
     """
+
     def __init__(self, doc_generators, view, query):
         Task.__init__(self, "generate_view_query_results_task")
         self.doc_generators = doc_generators
         self.view = view
         self.query = query
         self.emitted_rows = []
-        self.is_reduced = self.view.red_func is not None and (('reduce' in query and query['reduce'] == "true") or\
-                         (not 'reduce' in query))
+        self.is_reduced = self.view.red_func is not None and (('reduce' in query and query['reduce'] == "true") or \
+                                                              (not 'reduce' in query))
         self.custom_red_fn = self.is_reduced and not self.view.red_func in ['_count', '_sum', '_stats']
         self.type_filter = None
-
 
     def execute(self, task_manager):
         try:
@@ -3436,14 +3908,14 @@ class GenerateExpectedViewResultsTask(Task):
             self.log.info("Finished generating expected query results")
             self.state = CHECKING
             task_manager.schedule(self)
-        except Exception, ex:
+        except Exception as ex:
             self.state = FINISHED
-            self.set_unexpected_exception(e)
+            self.set_unexpected_exception(ex)
+            traceback.print_exc()
 
     def check(self, task_manager):
         self.state = FINISHED
         self.set_result(self.emitted_rows)
-
 
     def generate_emitted_rows(self):
         emit_key = re.sub(r',.*', '', re.sub(r'.*emit\([ +]?doc\.', '', self.view.map_func))
@@ -3454,9 +3926,9 @@ class GenerateExpectedViewResultsTask(Task):
         if re.match(r'.*new RegExp\("\^.*', self.view.map_func):
             filter_what = re.sub(r'.*new RegExp\(.*\)*doc\.', '',
                                  re.sub(r'\.match\(.*', '', self.view.map_func))
-            self.type_filter = {"filter_what" : filter_what,
-                               "filter_expr" : re.sub(r'[ +]?"\);.*', '',
-                                 re.sub(r'.*.new RegExp\("\^', '', self.view.map_func))}
+            self.type_filter = {"filter_what": filter_what,
+                                "filter_expr": re.sub(r'[ +]?"\);.*', '',
+                                                      re.sub(r'.*.new RegExp\("\^', '', self.view.map_func))}
         if self.is_reduced and self.view.red_func != "_count":
             emit_value = re.sub(r'\);.*', '', re.sub(r'.*emit\([ +]?\[*],[ +]?doc\.', '', self.view.map_func))
             if self.view.map_func.count("[") <= 1:
@@ -3466,7 +3938,7 @@ class GenerateExpectedViewResultsTask(Task):
             query_doc_gen = copy.deepcopy(doc_gen)
             while query_doc_gen.has_next():
 
-                _id, val = query_doc_gen.next()
+                _id, val = next(query_doc_gen)
                 val = json.loads(val)
 
                 if isinstance(emit_key, list):
@@ -3479,13 +3951,13 @@ class GenerateExpectedViewResultsTask(Task):
                     filter_expr = r'\A{0}.*'.format(self.type_filter["filter_expr"])
                     if re.match(filter_expr, val[self.type_filter["filter_what"]]) is None:
                         continue
-                if isinstance(val_emit_key, unicode):
+                if isinstance(val_emit_key, str):
                     val_emit_key = val_emit_key.encode('utf-8')
                 if not self.is_reduced or self.view.red_func == "_count" or self.custom_red_fn:
-                    self.emitted_rows.append({'id' : _id, 'key' : val_emit_key})
+                    self.emitted_rows.append({'id': _id, 'key': val_emit_key})
                 else:
                     val_emit_value = val[emit_value]
-                    self.emitted_rows.append({'value' : val_emit_value, 'key' : val_emit_key, 'id' : _id, })
+                    self.emitted_rows.append({'value': val_emit_value, 'key': val_emit_key, 'id': _id, })
 
     def filter_emitted_rows(self):
 
@@ -3498,10 +3970,9 @@ class GenerateExpectedViewResultsTask(Task):
         inclusive_end_false = 'inclusive_end' in query and query['inclusive_end'] == "false"
         key_set = 'key' in query
 
-
         # sort expected results to match view results
         expected_rows = sorted(self.emitted_rows,
-                               cmp=GenerateExpectedViewResultsTask.cmp_result_rows,
+                               key=cmp_to_key(lambda a, b: GenerateExpectedViewResultsTask.cmp_result_rows(a, b)),
                                reverse=descending_set)
 
         # filter rows according to query flags
@@ -3511,7 +3982,7 @@ class GenerateExpectedViewResultsTask(Task):
                 start_key = start_key[1:-1]
             if isinstance(start_key, str) and start_key.find('[') == 0:
                 start_key = start_key[1:-1].split(',')
-                start_key = map(lambda x:int(x) if x != 'null' else None, start_key)
+                start_key = [int(x) if x != 'null' else 0 for x in start_key]
         else:
             start_key = expected_rows[0]['key']
             if isinstance(start_key, str) and start_key.find('"') == 0:
@@ -3522,7 +3993,7 @@ class GenerateExpectedViewResultsTask(Task):
                 end_key = end_key[1:-1]
             if isinstance(end_key, str) and end_key.find('[') == 0:
                 end_key = end_key[1:-1].split(',')
-                end_key = map(lambda x:int(x) if x != 'null' else None, end_key)
+                end_key = [int(x) if x != 'null' else None for x in end_key]
         else:
             end_key = expected_rows[-1]['key']
             if isinstance(end_key, str) and end_key.find('"') == 0:
@@ -3542,17 +4013,16 @@ class GenerateExpectedViewResultsTask(Task):
             key_ = query['key']
             if isinstance(key_, str) and key_.find('[') == 0:
                 key_ = key_[1:-1].split(',')
-                key_ = map(lambda x:int(x) if x != 'null' else None, key_)
+                key_ = [int(x) if x != 'null' else None for x in key_]
             start_key, end_key = key_, key_
             expected_rows = [row for row in expected_rows if row['key'] == key_]
-
 
         if descending_set:
             startkey_docid_set, endkey_docid_set = endkey_docid_set, startkey_docid_set
 
         if startkey_docid_set:
             if not startkey_set:
-                self.log.warn("Ignoring startkey_docid filter when startkey is not set")
+                self.log.warning("Ignoring startkey_docid filter when startkey is not set")
             else:
                 do_filter = False
                 if descending_set:
@@ -3569,7 +4039,7 @@ class GenerateExpectedViewResultsTask(Task):
 
         if endkey_docid_set:
             if not endkey_set:
-                self.log.warn("Ignoring endkey_docid filter when endkey is not set")
+                self.log.warning("Ignoring endkey_docid filter when endkey is not set")
             else:
                 do_filter = False
                 if descending_set:
@@ -3584,43 +4054,43 @@ class GenerateExpectedViewResultsTask(Task):
                     expected_rows = \
                         [row for row in expected_rows if row['id'] <= endkey_docid or row['key'] < end_key]
 
-
         if inclusive_end_false:
             if endkey_set and endkey_docid_set:
                 # remove all keys that match endkey
-                expected_rows = [row for row in expected_rows if row['id'] < query['endkey_docid']  or row['key'] < end_key]
+                expected_rows = [row for row in expected_rows if
+                                 row['id'] < query['endkey_docid'] or row['key'] < end_key]
             elif endkey_set:
                 expected_rows = [row for row in expected_rows if row['key'] != end_key]
 
         if self.is_reduced:
             groups = {}
             gr_level = None
-            if not 'group' in query and\
-               not 'group_level' in query:
-               if len(expected_rows) == 0:
-                   expected_rows = []
-                   self.emitted_rows = expected_rows
-                   return
-               if self.view.red_func == '_count':
-                   groups[None] = len(expected_rows)
-               elif self.view.red_func == '_sum':
-                   groups[None] = 0
-                   groups[None] = math.fsum([row['value']
-                                               for row in expected_rows])
-               elif self.view.red_func == '_stats':
-                   groups[None] = {}
-                   values = [row['value'] for row in expected_rows]
-                   groups[None]['count'] = len(expected_rows)
-                   groups[None]['sum'] = math.fsum(values)
-                   groups[None]['max'] = max(values)
-                   groups[None]['min'] = min(values)
-                   groups[None]['sumsqr'] = math.fsum(map(lambda x: x * x, values))
-               elif self.custom_red_fn:
-                   custom_action = re.sub(r'.*return[ +]', '', re.sub(r'.*return[ +]', '', self.view.red_func))
-                   if custom_action.find('String') != -1:
-                       groups[None] = str(len(expected_rows))
-                   elif custom_action.find('-') != -1:
-                       groups[None] = -len(expected_rows)
+            if not 'group' in query and \
+                    not 'group_level' in query:
+                if len(expected_rows) == 0:
+                    expected_rows = []
+                    self.emitted_rows = expected_rows
+                    return
+                if self.view.red_func == '_count':
+                    groups[None] = len(expected_rows)
+                elif self.view.red_func == '_sum':
+                    groups[None] = 0
+                    groups[None] = math.fsum([row['value']
+                                              for row in expected_rows])
+                elif self.view.red_func == '_stats':
+                    groups[None] = {}
+                    values = [row['value'] for row in expected_rows]
+                    groups[None]['count'] = len(expected_rows)
+                    groups[None]['sum'] = math.fsum(values)
+                    groups[None]['max'] = max(values)
+                    groups[None]['min'] = min(values)
+                    groups[None]['sumsqr'] = math.fsum([x * x for x in values])
+                elif self.custom_red_fn:
+                    custom_action = re.sub(r'.*return[ +]', '', re.sub(r'.*return[ +]', '', self.view.red_func))
+                    if custom_action.find('String') != -1:
+                        groups[None] = str(len(expected_rows))
+                    elif custom_action.find('-') != -1:
+                        groups[None] = -len(expected_rows)
             elif 'group' in query and query['group'] == 'true':
                 if not 'group_level' in query:
                     gr_level = len(expected_rows) - 1
@@ -3643,7 +4113,7 @@ class GenerateExpectedViewResultsTask(Task):
                             groups[key]['sumsqr'] = row['value'] ** 2
                     else:
                         if self.view.red_func == '_count':
-                           groups[key] += 1
+                            groups[key] += 1
                         elif self.view.red_func == '_sum':
                             groups[key] += row['value']
                         elif self.view.red_func == '_stats':
@@ -3653,14 +4123,14 @@ class GenerateExpectedViewResultsTask(Task):
                             groups[key]['min'] = min(row['value'], groups[key]['min'])
                             groups[key]['sumsqr'] += row['value'] ** 2
             expected_rows = []
-            for group, value in groups.iteritems():
+            for group, value in groups.items():
                 if isinstance(group, str) and group.find("[") == 0:
                     group = group[1:-1].split(",")
                     group = [int(k) for k in group]
-                expected_rows.append({"key" : group, "value" : value})
+                expected_rows.append({"key": group, "value": value})
             expected_rows = sorted(expected_rows,
-                               cmp=GenerateExpectedViewResultsTask.cmp_result_rows,
-                               reverse=descending_set)
+                                   key=cmp_to_key(lambda a, b: GenerateExpectedViewResultsTask.cmp_result_rows(a, b)),
+                                   reverse=descending_set)
         if 'skip' in query:
             expected_rows = expected_rows[(int(query['skip'])):]
         if 'limit' in query:
@@ -3670,14 +4140,14 @@ class GenerateExpectedViewResultsTask(Task):
 
     @staticmethod
     def cmp_result_rows(x, y):
-        rc = cmp(x['key'], y['key'])
+        rc = len(DeepDiff(x['key'], y['key'], ignore_order=True))
         if rc == 0:
             # sort by id is tie breaker
-            rc = cmp(x['id'], y['id'])
+            rc = len(DeepDiff(x['id'], y['id'], ignore_order=True))
         return rc
 
-class ViewQueryVerificationTask(Task):
 
+class ViewQueryVerificationTask(Task):
     """
         * query with stale=false
         * check for duplicates
@@ -3685,8 +4155,10 @@ class ViewQueryVerificationTask(Task):
             * check memcached
             * check couch
     """
+
     def __init__(self, design_doc_name, view_name, query, expected_rows, server=None,
-                num_verified_docs=20, bucket="default", query_timeout=120, results=None):
+                 num_verified_docs=20, bucket="default", query_timeout=120, results=None,
+                 config=None):
 
         Task.__init__(self, "view_query_verification_task")
         self.server = server
@@ -3720,9 +4192,8 @@ class ViewQueryVerificationTask(Task):
                 self.set_exception(e)
                 self.state = FINISHED
 
-
             msg = "Checking view query results: (%d keys expected) vs (%d keys returned)" % \
-                (len(self.expected_rows), len(self.results['rows']))
+                  (len(self.expected_rows), len(self.results['rows']))
             self.log.info(msg)
 
         self.state = CHECKING
@@ -3730,8 +4201,8 @@ class ViewQueryVerificationTask(Task):
 
     def check(self, task_manager):
         err_infos = []
-        rc_status = {"passed" : False,
-                     "errors" : err_infos}  # array of dicts with keys 'msg' and 'details'
+        rc_status = {"passed": False,
+                     "errors": err_infos}  # array of dicts with keys 'msg' and 'details'
         try:
             # create verification id lists
             expected_ids = [row['id'] for row in self.expected_rows]
@@ -3745,20 +4216,20 @@ class ViewQueryVerificationTask(Task):
 
             # check for errors
             if len(rc_status["errors"]) == 0:
-               rc_status["passed"] = True
+                rc_status["passed"] = True
 
             self.state = FINISHED
             self.set_result(rc_status)
-        except Exception, ex:
+        except Exception as ex:
             self.state = FINISHED
             try:
                 max_example_result = max(100, len(self.results['rows'] - 1))
-                self.log.info("FIRST %s RESULTS for view %s : %s" % (max_example_result , self.view_name,
+                self.log.info("FIRST %s RESULTS for view %s : %s" % (max_example_result, self.view_name,
                                                                      self.results['rows'][max_example_result]))
-            except Exception, inner_ex:
-                 self.log.error(inner_ex)
-            self.set_result({"passed" : False,
-                             "errors" : "ERROR: %s" % ex})
+            except Exception as inner_ex:
+                self.log.error(inner_ex)
+            self.set_result({"passed": False,
+                             "errors": "ERROR: %s" % ex})
 
     def check_for_duplicate_ids(self, expected_ids, couch_ids, err_infos):
 
@@ -3774,8 +4245,8 @@ class ViewQueryVerificationTask(Task):
         if len(extra_id_set) > 0:
             # extra/duplicate id verification
             dupe_rows = [row for row in self.results['rows'] if row['id'] in extra_id_set]
-            err = { "msg" : "duplicate rows found in query results",
-                    "details" : dupe_rows }
+            err = {"msg": "duplicate rows found in query results",
+                   "details": dupe_rows}
             err_infos.append(err)
 
     def check_for_missing_ids(self, expected_ids, couch_ids, err_infos):
@@ -3787,17 +4258,17 @@ class ViewQueryVerificationTask(Task):
             missing_id_errors = self.debug_missing_items(missing_id_set)
 
             if len(missing_id_errors) > 0:
-                err = { "msg" : "missing ids from memcached",
-                        "details" : missing_id_errors}
+                err = {"msg": "missing ids from memcached",
+                       "details": missing_id_errors}
                 err_infos.append(err)
 
     def check_for_extra_ids(self, expected_ids, couch_ids, err_infos):
 
         extra_id_set = set(couch_ids) - set(expected_ids)
         if len(extra_id_set) > 0:
-                err = { "msg" : "extra ids from memcached",
-                        "details" : extra_id_set}
-                err_infos.append(err)
+            err = {"msg": "extra ids from memcached",
+                   "details": extra_id_set}
+            err_infos.append(err)
 
     def check_for_value_corruption(self, err_infos):
 
@@ -3806,10 +4277,9 @@ class ViewQueryVerificationTask(Task):
             doc_integrity_errors = self.include_doc_integrity()
 
             if len(doc_integrity_errors) > 0:
-                err = { "msg" : "missmatch in document values",
-                        "details" : doc_integrity_errors }
+                err = {"msg": "missmatch in document values",
+                       "details": doc_integrity_errors}
                 err_infos.append(err)
-
 
     def debug_missing_items(self, missing_id_set):
         rest = RestConnection(self.server)
@@ -3830,17 +4300,17 @@ class ViewQueryVerificationTask(Task):
                 num_vbuckets = len(rest.get_vbuckets(self.bucket))
                 doc_meta = client.get_doc_metadata(num_vbuckets, doc_id)
 
-                if(doc_meta != None):
+                if (doc_meta != None):
                     if (doc_meta['key_valid'] != 'valid'):
                         msg = "Error expected in results for key with invalid state %s" % doc_meta
                         missing_id_errors.append(msg)
 
                 else:
                     msg = "query doc_id: %s doesn't exist in bucket: %s" % \
-                        (doc_id, self.bucket)
+                          (doc_id, self.bucket)
                     missing_id_errors.append(msg)
 
-            if(len(missing_id_errors) == 0):
+            if (len(missing_id_errors) == 0):
                 msg = "view engine failed to index doc [%s] in query: %s" % (doc_id, self.query)
                 missing_id_errors.append(msg)
 
@@ -3853,8 +4323,8 @@ class ViewQueryVerificationTask(Task):
 
         if 'doc' not in self.results['rows'][0]:
             return doc_integrity_errors
-        exp_verify_set = [row['doc'] for row in\
-            self.results['rows'][:self.num_verified_docs]]
+        exp_verify_set = [row['doc'] for row in \
+                          self.results['rows'][:self.num_verified_docs]]
 
         for view_doc in exp_verify_set:
             doc_id = str(view_doc['_id'])
@@ -3864,16 +4334,17 @@ class ViewQueryVerificationTask(Task):
                 mc_doc = json.loads(mc_item["value"])
 
                 # compare doc content
-                for key in mc_doc.keys():
-                    if(mc_doc[key] != view_doc[key]):
+                for key in list(mc_doc.keys()):
+                    if (mc_doc[key] != view_doc[key]):
                         err_msg = \
                             "error verifying document id %s: retrieved value %s expected %s \n" % \
-                                (doc_id, mc_doc[key], view_doc[key])
+                            (doc_id, mc_doc[key], view_doc[key])
                         doc_integrity_errors.append(err_msg)
             else:
                 doc_integrity_errors.append("doc_id %s could not be retrieved for verification \n" % doc_id)
 
         return doc_integrity_errors
+
 
 class BucketFlushTask(Task):
     def __init__(self, server, bucket="default"):
@@ -3914,8 +4385,8 @@ class BucketFlushTask(Task):
             self.state = FINISHED
             self.set_unexpected_exception(e)
 
-class MonitorDBFragmentationTask(Task):
 
+class MonitorDBFragmentationTask(Task):
     """
         Attempt to monitor fragmentation that is occurring for a given bucket.
 
@@ -3935,7 +4406,7 @@ class MonitorDBFragmentationTask(Task):
     def execute(self, task_manager):
 
         # sanity check of fragmentation value
-        if  self.fragmentation_value < 0 or self.fragmentation_value > 100:
+        if self.fragmentation_value < 0 or self.fragmentation_value > 100:
             err_msg = \
                 "Invalid value for fragmentation %d" % self.fragmentation_value
             self.state = FINISHED
@@ -3960,7 +4431,7 @@ class MonitorDBFragmentationTask(Task):
             else:
                 # try again
                 task_manager.schedule(self, 2)
-        except Exception, ex:
+        except Exception as ex:
             self.state = FINISHED
             self.set_result(False)
             self.set_exception(ex)
@@ -3989,7 +4460,7 @@ class CBRecoveryTask(Task):
             self.shell = RemoteMachineShellConnection(src_server)
             self.info = self.shell.extract_remote_info()
             self.rest = RestConnection(dest_server)
-        except Exception, e:
+        except Exception as e:
             self.log.error(e)
             self.state = FINISHED
             self.set_exception(e)
@@ -4034,7 +4505,7 @@ class CBRecoveryTask(Task):
             self.state = FINISHED
             self.set_exception(e)
 
-    #it was done to keep connection alive
+    # it was done to keep connection alive
     def checkChannel(self):
         try:
             if self.chan.exit_status_ready():
@@ -4061,13 +4532,14 @@ class CBRecoveryTask(Task):
                     self.set_result(True)
             progress = self.rest.get_recovery_progress(self.recovery_task["recoveryStatusURI"])
             if progress == self.progress:
-                self.log.warn("cbrecovery progress was not changed")
+                self.log.warning("cbrecovery progress was not changed")
                 if self.retries > 20:
                     self.shell.disconnect()
                     self.rest.print_UI_logs()
                     self.state = FINISHED
-                    self.log.warn("ns_server_tasks: {0}".format(self.rest.ns_server_tasks()))
-                    self.log.warn("cbrecovery progress: {0}".format(self.rest.get_recovery_progress(self.recovery_task["recoveryStatusURI"])))
+                    self.log.warning("ns_server_tasks: {0}".format(self.rest.ns_server_tasks()))
+                    self.log.warning("cbrecovery progress: {0}".format(
+                        self.rest.get_recovery_progress(self.recovery_task["recoveryStatusURI"])))
                     self.set_exception(CBRecoveryFailedException("cbrecovery hangs"))
                     return
                 self.retries += 1
@@ -4087,7 +4559,7 @@ class CBRecoveryTask(Task):
                 self.shell.disconnect()
                 self.rest.print_UI_logs()
                 self.state = FINISHED
-                self.log.warn("ns_server_tasks: {0}".format(self.rest.ns_server_tasks()))
+                self.log.warning("ns_server_tasks: {0}".format(self.rest.ns_server_tasks()))
                 self.set_exception(CBRecoveryFailedException("cbrecovery was not started"))
                 return
             else:
@@ -4141,15 +4613,13 @@ class CompactBucketTask(Task):
             shell = RemoteMachineShellConnection(s)
             res = shell.execute_cbstats("", "raw", keyname="kvtimings", vbid="")
 
-
             for i in res[0]:
                 # check for lines that look like
                 #    rw_0:compact_131072,262144:        8
                 if 'compact' in i:
                     current_compaction_count[node.ip] += int(i.split(':')[2])
 
-
-        if cmp(current_compaction_count, self.compaction_count) == 1:
+        if len(DeepDiff(current_compaction_count, self.compaction_count)) == 1:
             # compaction count has increased
             self.set_result(True)
             self.state = FINISHED
@@ -4170,6 +4640,7 @@ class CompactBucketTask(Task):
         self.log.info("Disk size is = %d" % total_disk_size)
         return total_disk_size
 
+
 class MonitorViewCompactionTask(ViewCompactionTask):
 
     def __init__(self, server, design_doc_name, bucket="default", with_rebalance=False, frag_value=0):
@@ -4188,12 +4659,13 @@ class MonitorViewCompactionTask(ViewCompactionTask):
             self.disk_size = self._get_disk_size()
             self.log.info("Disk Size Before Compaction {0}".format(self.disk_size))
             if self.precompacted_fragmentation == 0:
-                self.log.warn("%s: There is nothing to compact, fragmentation is 0" % self.design_doc_name)
+                self.log.warning("%s: There is nothing to compact, fragmentation is 0" % self.design_doc_name)
                 self.set_result(False)
                 self.state = FINISHED
             elif self.precompacted_fragmentation < self.fragmentation_value:
-                self.log.info("{0}: Compaction is already done and there is nothing to compact, current fragmentation is lesser {1} {2}".
-                              format(self.design_doc_name, self.precompacted_fragmentation, self.fragmentation_value))
+                self.log.info(
+                    "{0}: Compaction is already done and there is nothing to compact, current fragmentation is lesser {1} {2}".
+                        format(self.design_doc_name, self.precompacted_fragmentation, self.fragmentation_value))
                 self.compaction_revision, self.precompacted_fragmentation = self._get_compaction_details()
                 self.log.info("{0}: stats compaction before triggering it: ({1},{2})".
                               format(self.design_doc_name, self.compaction_revision, self.precompacted_fragmentation))
@@ -4230,19 +4702,21 @@ class MonitorViewCompactionTask(ViewCompactionTask):
                 if new_compaction_revision == self.compaction_revision or new_compaction_revision > self.compaction_revision:
                     self.log.info("{1}: compactor was run, compaction revision was changed on {0}".
                                   format(new_compaction_revision, self.design_doc_name))
-                    self.log.info("%s: fragmentation went from %d to %d" % (self.design_doc_name, self.precompacted_fragmentation, fragmentation))
+                    self.log.info("%s: fragmentation went from %d to %d" % (
+                        self.design_doc_name, self.precompacted_fragmentation, fragmentation))
                 if frag_val_diff > 0:
                     if self._is_compacting():
                         task_manager.schedule(self, 5)
-                    self.log.info("compaction was completed, but fragmentation value {0} is more than before compaction {1}".
-                                  format(fragmentation, self.precompacted_fragmentation))
+                    self.log.info(
+                        "compaction was completed, but fragmentation value {0} is more than before compaction {1}".
+                            format(fragmentation, self.precompacted_fragmentation))
                     self.log.info("Load is still in progress, Need to be checked")
                     self.set_result(self.with_rebalance)
                 else:
                     self.set_result(True)
                 self.state = FINISHED
             else:
-                for i in xrange(10):
+                for i in range(10):
                     time.sleep(3)
                     if self._is_compacting():
                         task_manager.schedule(self, 2)
@@ -4254,13 +4728,15 @@ class MonitorViewCompactionTask(ViewCompactionTask):
                         curr_disk_size = self._get_disk_size()
                         self.log.info("Disk Size went from {0} {1}".format(self.disk_size, curr_disk_size))
                         if new_compaction_revision > self.compaction_revision and self.precompacted_fragmentation > fragmentation:
-                            self.log.warn("the compaction revision was increase and fragmentation value went from {0} {1}".
-                                          format(self.precompacted_fragmentation, fragmentation))
+                            self.log.warning(
+                                "the compaction revision was increase and fragmentation value went from {0} {1}".
+                                    format(self.precompacted_fragmentation, fragmentation))
                             self.set_result(True)
                             self.state = FINISHED
                             return
                         elif new_compaction_revision > self.compaction_revision and self.with_rebalance:
-                            self.log.warn("the compaction revision was increased, but the actual fragmentation value has not changed significantly")
+                            self.log.warning(
+                                "the compaction revision was increased, but the actual fragmentation value has not changed significantly")
                             self.set_result(True)
                             self.state = FINISHED
                             return
@@ -4272,7 +4748,7 @@ class MonitorViewCompactionTask(ViewCompactionTask):
                                format(new_compaction_revision, fragmentation))
                 status, content = self.rest.set_view_info(self.bucket, self.design_doc_name)
                 stats = content["stats"]
-                self.log.warn("general compaction stats:{0}".format(stats))
+                self.log.warning("general compaction stats:{0}".format(stats))
                 self.state = FINISHED
                 self.set_result(False)
                 self.set_exception(Exception("Check system logs, looks like compaction failed to start"))
@@ -4290,6 +4766,7 @@ class MonitorViewCompactionTask(ViewCompactionTask):
         disk_size = sum([content['disk_size'] for content in nodes_ddoc_info])
         return disk_size
 
+
 class MonitorDiskSizeFragmentationTask(Task):
     def __init__(self, server, fragmentation_value=10, bucket="default", get_view_frag=False):
         Task.__init__(self, "monitor_frag_db_task")
@@ -4301,7 +4778,7 @@ class MonitorDiskSizeFragmentationTask(Task):
         self.curr_disk_size = 0
 
     def execute(self, task_manager):
-        if  self.fragmentation_value < 0:
+        if self.fragmentation_value < 0:
             err_msg = \
                 "Invalid value for fragmentation %d" % self.fragmentation_value
             self.state = FINISHED
@@ -4325,10 +4802,11 @@ class MonitorDiskSizeFragmentationTask(Task):
                 task_manager.schedule(self, 5)
             self.log.info("New and Current Disk size is {0} {1}".format(new_disk_size, self.curr_disk_size))
             self.curr_disk_size = new_disk_size
-        except Exception, ex:
+        except Exception as ex:
             self.state = FINISHED
             self.set_result(False)
             self.set_exception(ex)
+
 
 class CancelBucketCompactionTask(Task):
 
@@ -4340,7 +4818,7 @@ class CancelBucketCompactionTask(Task):
         self.statuses = {}
         try:
             self.rest = RestConnection(server)
-        except ServerUnavailableException, e:
+        except ServerUnavailableException as e:
             self.log.error(e)
             self.state = FINISHED
             self.set_exception(e)
@@ -4363,7 +4841,7 @@ class CancelBucketCompactionTask(Task):
             last_status = self.statuses.get(node.id)
             try:
                 rest = RestConnection(node)
-            except ServerUnavailableException, e:
+            except ServerUnavailableException as e:
                 self.log.error(e)
                 self.state = FINISHED
                 self.set_exception(e)
@@ -4390,21 +4868,21 @@ class CancelBucketCompactionTask(Task):
                 self.set_result(False)
                 self.state = FINISHED
 
+
 class EnterpriseBackupTask(Task):
 
-    def __init__(self, cluster_host, backup_host, directory='', name='', resume=False, purge=False,
-                 no_progress_bar=False, cli_command_location='', cb_version=None):
+    def __init__(self, backupset, objstore_provider, resume=False, purge=False, no_progress_bar=False,
+                 cli_command_location='', cb_version=None, num_shards=''):
         Task.__init__(self, "enterprise_backup_task")
-        self.cluster_host = cluster_host
-        self.backup_host = backup_host
-        self.directory = directory
-        self.name = name
+        self.backupset = backupset
+        self.objstore_provider = objstore_provider
         self.resume = resume
         self.purge = purge
         self.no_progress_bar = no_progress_bar
         self.cli_command_location = cli_command_location
         self.cb_version = cb_version
         self.cluster_flag = "--host"
+        self.num_shards = num_shards
         """ from couchbase version 4.6.x, --host flag is not supported """
         if self.cb_version is None:
             raise Exception("Need to pass Couchbase version to run correctly bk/rt ")
@@ -4413,18 +4891,28 @@ class EnterpriseBackupTask(Task):
         self.output = []
         self.error = []
         try:
-            self.remote_client = RemoteMachineShellConnection(self.backup_host)
-        except Exception, e:
+            self.remote_client = RemoteMachineShellConnection(self.backupset.backup_host)
+        except Exception as e:
             self.log.error(e)
             self.state = FINISHED
             self.set_exception(e)
 
     def execute(self, task_manager):
         try:
-            args = "backup --archive {0} --repo {1} {6} http://{2}:{3} --username {4} --password {5}". \
-            format(self.directory, self.name, self.cluster_host.ip,
-                   self.cluster_host.port, self.cluster_host.rest_username,
-                   self.cluster_host.rest_password, self.cluster_flag)
+            args = (
+                f"backup --archive {self.objstore_provider.schema_prefix() + self.backupset.objstore_bucket + '/' if self.objstore_provider else ''}{self.backupset.directory}"
+                f" --repo {self.backupset.name}"
+                f" {self.cluster_flag} http://{self.backupset.cluster_host.ip}:{self.backupset.cluster_host.port}"
+                f" --username {self.backupset.cluster_host.rest_username}"
+                f" --password {self.backupset.cluster_host.rest_password}"
+                f" {self.num_shards}"
+                f"{' --obj-staging-dir ' + self.backupset.objstore_staging_directory if self.objstore_provider else ''}"
+                f"{' --obj-endpoint ' + self.backupset.objstore_endpoint if self.objstore_provider and self.backupset.objstore_endpoint else ''}"
+                f"{' --obj-region ' + self.backupset.objstore_region if self.objstore_provider and self.backupset.objstore_region else ''}"
+                f"{' --obj-access-key-id ' + self.backupset.objstore_access_key_id if self.objstore_provider and self.backupset.objstore_access_key_id else ''}"
+                f"{' --obj-secret-access-key ' + self.backupset.objstore_secret_access_key if self.objstore_provider and self.backupset.objstore_secret_access_key else ''}"
+                f"{' --s3-force-path-style' if self.objstore_provider and self.objstore_provider.schema_prefix() == 's3://' else ''}"
+            )
             if self.resume:
                 args += " --resume"
             if self.purge:
@@ -4434,7 +4922,7 @@ class EnterpriseBackupTask(Task):
             command = "{0}/cbbackupmgr {1}".format(self.cli_command_location, args)
             self.output, self.error = self.remote_client.execute_command(command)
             self.state = CHECKING
-        except Exception, e:
+        except Exception as e:
             self.log.error("Backup cluster failed for unknown reason")
             self.set_exception(e)
             self.state = FINISHED
@@ -4453,16 +4941,13 @@ class EnterpriseBackupTask(Task):
         else:
             task_manager.schedule(self, 10)
 
+
 class EnterpriseRestoreTask(Task):
 
-    def __init__(self, restore_host, backup_host, backups=[], start=0, end=0, directory='', name='',
-                 force_updates=False, no_progress_bar=False, cli_command_location='', cb_version=None):
+    def __init__(self, backupset, objstore_provider, no_progress_bar=False, cli_command_location='', cb_version=None):
         Task.__init__(self, "enterprise_backup_task")
-        self.restore_host = restore_host
-        self.backup_host = backup_host
-        self.directory = directory
-        self.name = name
-        self.force_updates = force_updates
+        self.backupset = backupset
+        self.objstore_provider = objstore_provider
         self.no_progress_bar = no_progress_bar
         self.cli_command_location = cli_command_location
         self.cb_version = cb_version
@@ -4478,8 +4963,8 @@ class EnterpriseRestoreTask(Task):
         self.start = start
         self.end = end
         try:
-            self.remote_client = RemoteMachineShellConnection(self.backup_host)
-        except Exception, e:
+            self.remote_client = RemoteMachineShellConnection(self.backupset.backup_host)
+        except Exception as e:
             self.log.error(e)
             self.state = FINISHED
             self.set_exception(e)
@@ -4494,13 +4979,22 @@ class EnterpriseRestoreTask(Task):
                 backup_end = self.backups[int(self.end) - 1]
             except IndexError:
                 backup_end = "{0}{1}".format(self.backups[-1], self.end)
-            args = "restore --archive {0} --repo {1} {8} http://{2}:{3} --username {4} "\
-                                                " --password {5}  --start {6} --end {7}"\
-                                                        .format(self.directory, self.name,
-                                             self.restore_host.ip, self.restore_host.port,
-                                                          self.restore_host.rest_username,
-                                            self.restore_host.rest_password, backup_start,
-                                                            backup_end, self.cluster_flag)
+
+            args = (
+                f"restore --archive {self.objstore_provider.schema_prefix() + self.backupset.objstore_bucket + '/' if self.objstore_provider else ''}{self.backupset.directory}"
+                f" --repo {self.backupset.name}"
+                f" {self.cluster_flag} http://{self.backupset.restore_cluster_host.ip}:{self.backupset.restore_cluster_host.port}"
+                f" --username {self.backupset.restore_cluster_host.rest_username} " 
+                   f" --password {self.backupset.restore_cluster_host.rest_password}"
+                f" --start {backup_start}"
+                f" --end {backup_end}" 
+                f"{' --obj-staging-dir ' + self.backupset.objstore_staging_directory if self.objstore_provider else ''}"
+                       f"{' --obj-endpoint ' + self.backupset.objstore_endpoint if self.objstore_provider and self.backupset.objstore_endpoint else ''}"
+                f"{' --obj-region ' + self.backupset.objstore_region if self.objstore_provider and self.backupset.objstore_region else ''}"
+                       f"{' --obj-access-key-id ' + self.backupset.objstore_access_key_id if self.objstore_provider and self.backupset.objstore_access_key_id else ''}"
+                       f"{' --obj-secret-access-key ' + self.backupset.objstore_secret_access_key if self.objstore_provider and self.backupset.objstore_secret_access_key else ''}"
+                        f"{' --s3-force-path-style' if self.objstore_provider and self.objstore_provider.schema_prefix() == 's3://' else ''}"
+            )
             if self.no_progress_bar:
                 args += " --no-progress-bar"
             if self.force_updates:
@@ -4508,7 +5002,7 @@ class EnterpriseRestoreTask(Task):
             command = "{0}/cbbackupmgr {1}".format(self.cli_command_location, args)
             self.output, self.error = self.remote_client.execute_command(command)
             self.state = CHECKING
-        except Exception, e:
+        except Exception as e:
             self.log.error("Restore failed for unknown reason")
             self.set_exception(e)
             self.state = FINISHED
@@ -4527,6 +5021,7 @@ class EnterpriseRestoreTask(Task):
         else:
             task_manager.schedule(self, 10)
 
+
 class EnterpriseMergeTask(Task):
 
     def __init__(self, backup_host, backups=[], start=0, end=0, directory='', name='',
@@ -4543,7 +5038,7 @@ class EnterpriseMergeTask(Task):
         self.end = end
         try:
             self.remote_client = RemoteMachineShellConnection(self.backup_host)
-        except Exception, e:
+        except Exception as e:
             self.log.error(e)
             self.state = FINISHED
             self.set_exception(e)
@@ -4559,11 +5054,11 @@ class EnterpriseMergeTask(Task):
             except IndexError:
                 backup_end = "{0}{1}".format(self.backups[-1], self.end)
             args = "merge --archive {0} --repo {1} --start {2} --end {3}".format(self.directory, self.name,
-                                                                             backup_start, backup_end)
+                                                                                 backup_start, backup_end)
             command = "{0}/cbbackupmgr {1}".format(self.cli_command_location, args)
             self.output, self.error = self.remote_client.execute_command(command)
             self.state = CHECKING
-        except Exception, e:
+        except Exception as e:
             self.log.error("Merge failed for unknown reason")
             self.set_exception(e)
             self.state = FINISHED
@@ -4582,6 +5077,7 @@ class EnterpriseMergeTask(Task):
         else:
             task_manager.schedule(self, 10)
 
+
 class EnterpriseCompactTask(Task):
 
     def __init__(self, backup_host, backup_to_compact, backups=[], directory='', name='',
@@ -4597,7 +5093,7 @@ class EnterpriseCompactTask(Task):
         self.backups = backups
         try:
             self.remote_client = RemoteMachineShellConnection(self.backup_host)
-        except Exception, e:
+        except Exception as e:
             self.log.error(e)
             self.state = FINISHED
             self.set_exception(e)
@@ -4605,11 +5101,11 @@ class EnterpriseCompactTask(Task):
     def execute(self, task_manager):
         try:
             args = "compact --archive {0} --repo {1} --backup {2}".format(self.directory, self.name,
-                                                                      self.backups[self.backup_to_compact])
+                                                                          self.backups[self.backup_to_compact])
             command = "{0}/cbbackupmgr {1}".format(self.cli_command_location, args)
             self.output, self.error = self.remote_client.execute_command(command)
             self.state = CHECKING
-        except Exception, e:
+        except Exception as e:
             self.log.error("Compact failed for unknown reason")
             self.set_exception(e)
             self.state = FINISHED
@@ -4628,6 +5124,7 @@ class EnterpriseCompactTask(Task):
         else:
             task_manager.schedule(self, 10)
 
+
 class CBASQueryExecuteTask(Task):
     def __init__(self, server, cbas_endpoint, statement, mode=None, pretty=True):
         Task.__init__(self, "cbas_query_execute_task")
@@ -4643,7 +5140,7 @@ class CBASQueryExecuteTask(Task):
         try:
             rest = RestConnection(self.server)
             self.response = json.loads(rest.execute_statement_on_cbas(self.statement,
-                                           self.mode, self.pretty, 70))
+                                                                      self.mode, self.pretty, 70))
             if self.response:
                 self.state = CHECKING
                 task_manager.schedule(self)
@@ -4734,7 +5231,7 @@ class AutoFailoverNodesFailureTask(Task):
         if rest._rebalance_progress_status() == "running":
             self.rebalance_in_progress = True
         while self.has_next() and not self.done():
-            self.next()
+            next(self)
             if self.pause > 0 and self.pause > self.timeout:
                 self.check(task_manager)
         if self.pause == 0 or 0 < self.pause < self.timeout:
@@ -4827,7 +5324,7 @@ class AutoFailoverNodesFailureTask(Task):
     def has_next(self):
         return self.itr < self.num_servers_to_fail
 
-    def next(self):
+    def __next__(self):
         if self.pause != 0:
             time.sleep(self.pause)
             if self.pause > self.timeout and self.itr != 0:
@@ -4976,7 +5473,7 @@ class AutoFailoverNodesFailureTask(Task):
 
     def _recover_disk(self, node):
         shell = RemoteMachineShellConnection(node)
-        o,r = shell.mount_partition(self.disk_location)
+        o, r = shell.mount_partition(self.disk_location)
         for line in o:
             if self.disk_location in line:
                 self.log.info("Mounted disk at location : {0} on {1}".format(self.disk_location, node.ip))
@@ -5002,7 +5499,7 @@ class AutoFailoverNodesFailureTask(Task):
             self.set_exception(Exception("Could not fill the disk at {0} on {1}".format(self.disk_location, node.ip)))
 
     def _recover_disk_full_failure(self, node):
-        shell =  RemoteMachineShellConnection(node)
+        shell = RemoteMachineShellConnection(node)
         delete_file = "{0}/disk-quota.ext3".format(self.disk_location)
         output, error = shell.execute_command("rm -f {0}".format(delete_file))
         self.log.info(output)
@@ -5173,3 +5670,90 @@ class NodeMonitorsAnalyserTask(Task):
             self.state = EXECUTING
         else:
             raise Exception("Monitors not working correctly")
+
+# Runs java sdk client directly on slave
+class SDKLoadDocumentsTask(Task):
+    def __init__(self, server, bucket, sdk_docloader):
+        Task.__init__(self, "SDKLoadDocumentsTask")
+        self.server = server
+        if isinstance(bucket, Bucket):
+            self.bucket = bucket.name
+        else:
+            self.bucket = bucket
+        self.params = sdk_docloader
+        if self.params.print_sdk_logs == "debug":
+            #stdout + stderr
+            self.redirect = ">/dev/null"
+        else:
+            #stderr
+            self.redirect = "2>/dev/null"
+
+    def execute(self, task_manager):
+        import subprocess
+        command = f"java -jar java_sdk_client/collections/target/javaclient/javaclient.jar " \
+                  f"-i {self.server.ip} -u {self.params.username} -p {self.params.password} -b {self.bucket} " \
+                  f"-s {self.params.scope} -c {self.params.collection} " \
+                  f"-n {self.params.num_ops} -pc {self.params.percent_create} -pu {self.params.percent_update} " \
+                  f"-pd {self.params.percent_delete} -l {self.params.load_pattern} " \
+                  f"-dsn {self.params.start_seq_num} -dpx {self.params.key_prefix} -dt {self.params.json_template} " \
+                  f"-de {self.params.doc_expiry} -ds {self.params.doc_size} -ac {self.params.all_collections} " \
+                  f"-st {self.params.start} -en {self.params.end}"
+
+        if self.params.op_type == "update":
+            arr_fields_to_update = eval(self.params.fields_to_update) if self.params.fields_to_update else ""
+            if len(arr_fields_to_update) > 0:
+                command = command + " -fu "
+                command = command + ",".join(arr_fields_to_update)
+        command = command + f" {self.redirect} "
+        self.log.info(command)
+
+        try:
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, shell=True)
+            out = proc.communicate(timeout=self.params.timeout)
+            if proc.returncode != 0:
+                raise Exception("Exception in java sdk client to {}:{}\n{}".format(self.server.ip, self.bucket, out))
+        except Exception as e:
+            proc.terminate()
+            self.state = FINISHED
+            self.set_exception(e)
+        proc.terminate()
+        self.state = FINISHED
+        self.set_result(True)
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)
+
+# Runs java sdk client on a docker container on slave
+class DockerSDKLoadDocumentsTask(Task):
+    def __init__(self, server, bucket, sdk_docloader, pause_secs, timeout_secs):
+        Task.__init__(self, "SDKLoadDocumentsTask")
+        self.server = server
+        if isinstance(bucket, Bucket):
+            self.bucket = bucket.name
+        else:
+            self.bucket = bucket
+        self.params = sdk_docloader
+        self.pause_secs = pause_secs
+        self.timeout_secs = timeout_secs
+
+        from lib.collection.collections_dataloader import JavaSDKClient
+        self.javasdkclient = JavaSDKClient(self.server, self.bucket, self.params)
+
+    def execute(self, task_manager):
+        try:
+            self.javasdkclient.do_ops()
+            self.state = CHECKING
+            task_manager.schedule(self)
+        except Exception as e:
+            self.state = FINISHED
+            self.set_exception(Exception("Exception while loading data to {}:{}"
+                                         .format(self.server.ip, self.bucket)))
+        finally:
+            self.javasdkclient.cleanup()
+
+    def check(self, task_manager):
+        self.set_result(True)
+        self.state = FINISHED
+        task_manager.schedule(self)

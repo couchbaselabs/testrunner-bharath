@@ -1,6 +1,6 @@
 import json
 from couchbase_helper.document import View
-from hostnamemgmt_base import HostnameBaseTests
+from .hostnamemgmt_base import HostnameBaseTests
 from membase.api.rest_client import RestConnection, RestHelper
 from remote.remote_util import RemoteMachineShellConnection
 import time
@@ -60,5 +60,5 @@ class HostnameMgmtTests(HostnameBaseTests):
                                                             cluster_host=self.master.hostname,
                                                             user="Administrator", password="password",
                                                             options='--bucket=default')
-        self.assertEqual(['SUCCESS: bucket-delete'], [i for i in output if i != ''])
+        self.assertEqual(['SUCCESS: Bucket deleted'], [i for i in output if i != ''])
         remote_client.disconnect()

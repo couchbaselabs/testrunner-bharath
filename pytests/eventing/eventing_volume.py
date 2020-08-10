@@ -1,11 +1,12 @@
 import json
-import logging
 
+from eventing.eventing_constants import HANDLER_CODE_CURL
 from lib.couchbase_helper.tuq_helper import N1QLHelper
 from lib.membase.api.rest_client import RestConnection
 from lib.testconstants import STANDARD_BUCKET_PORT
-from pytests.eventing.eventing_base import EventingBaseTest
 from pytests.eventing.eventing_constants import HANDLER_CODE
+from pytests.eventing.eventing_base import EventingBaseTest
+import logging
 
 log = logging.getLogger()
 
@@ -16,6 +17,8 @@ class EventingVolume(EventingBaseTest):
         # Un-deploy and delete all the functions
         self.undeploy_delete_all_functions()
         self.dst_bucket_name2 = self.input.param('dst_bucket_name2', 'dst_bucket2')
+        self.dst_bucket_name3 = self.input.param('dst_bucket_name3', 'dst_bucket3')
+        self.sbm_bucket= self.input.param('sbm_bucket', 'sbm_bucket')
         self.worker_count = self.input.param('worker_count', 3)
         self.cpp_worker_thread_count = self.input.param('cpp_worker_thread_count', 3)
         self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=2800)
@@ -27,8 +30,10 @@ class EventingVolume(EventingBaseTest):
             bucket_params = self._create_bucket_params(server=self.server, size=self.bucket_size,
                                                        replicas=self.num_replicas)
             bucket_params_meta = self._create_bucket_params(server=self.server, size=self.meta_bucket_size,
-                                                       replicas=self.num_replicas)
+                                                            replicas=self.num_replicas)
             self.cluster.create_standard_bucket(name=self.src_bucket_name, port=STANDARD_BUCKET_PORT + 1,
+                                                bucket_params=bucket_params)
+            self.cluster.create_standard_bucket(name=self.sbm_bucket, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.src_bucket = RestConnection(self.master).get_buckets()
             self.cluster.create_standard_bucket(name=self.dst_bucket_name, port=STANDARD_BUCKET_PORT + 1,
@@ -36,6 +41,8 @@ class EventingVolume(EventingBaseTest):
             self.cluster.create_standard_bucket(name=self.dst_bucket_name1, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.cluster.create_standard_bucket(name=self.dst_bucket_name2, port=STANDARD_BUCKET_PORT + 1,
+                                                bucket_params=bucket_params)
+            self.cluster.create_standard_bucket(name=self.dst_bucket_name3, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.cluster.create_standard_bucket(name=self.metadata_bucket_name, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params_meta)
@@ -109,14 +116,37 @@ class EventingVolume(EventingBaseTest):
         del body3['depcfg']['buckets'][0]
         body3['depcfg']['buckets'].append({"alias": self.dst_bucket_name, "bucket_name": self.dst_bucket_name2})
         self.deploy_function(body3, wait_for_bootstrap=False)
-        body = [body1, body2, body3]
+        body4 = self.create_save_function_body(self.function_name + "_curl_post",
+                                               HANDLER_CODE_CURL.BUCKET_OP_WITH_CURL_POST, worker_count=self.worker_count,
+                                               cpp_worker_thread_count=self.cpp_worker_thread_count)
+        body4['depcfg']['curl'] = []
+        body4['depcfg']['curl'].append(
+            {"hostname": self.hostname, "value": "server", "auth_type": self.auth_type, "username": self.curl_username,
+             "password": self.curl_password, "cookies": self.cookies})
+        del body4['depcfg']['buckets'][0]
+        body4['depcfg']['buckets'].append(
+            {"alias": self.dst_bucket_name, "bucket_name": self.dst_bucket_name3, "access": "rw"})
+        self.deploy_function(body4, wait_for_bootstrap=False)
+        body5 = self.create_save_function_body(self.function_name + "_SBM",
+                                               HANDLER_CODE.BUCKET_OP_SOURCE_DOC_MUTATION,
+                                               worker_count=self.worker_count,
+                                               cpp_worker_thread_count=self.cpp_worker_thread_count)
+        del body5['depcfg']['buckets'][0]
+        body5['depcfg']['buckets'].append(
+            {"alias": self.src_bucket_name, "bucket_name": self.sbm_bucket, "access": "rw"})
+        self.deploy_function(body5, wait_for_bootstrap=False)
+        body = [body1, body2, body3, body4, body5]
         return body
 
     def wait_for_all_boostrap_to_complete(self, functions):
         for function_name in functions:
-            self.wait_for_bootstrap_to_complete(function_name['appname'], iterations=40)
+            try:
+                self.wait_for_handler_state(function_name['appname'], "deployed", iterations=40)
+            except:
+                # Sometimes this API might not return json, its ok move on.
+                pass
 
-    def verify_eventing_results_of_all_functions(self, docs_expected, verify_results=True,  timeout=600):
+    def verify_eventing_results_of_all_functions(self, docs_expected, verify_results=True, timeout=600):
         if verify_results:
             # Verify the results of all the buckets
             self.verify_eventing_results(self.function_name, docs_expected, skip_stats_validation=True, timeout=timeout)
@@ -124,6 +154,12 @@ class EventingVolume(EventingBaseTest):
                                          bucket=self.dst_bucket_name1, timeout=timeout)
             self.verify_eventing_results(self.function_name, docs_expected, skip_stats_validation=True,
                                          bucket=self.dst_bucket_name2, timeout=timeout)
+            self.verify_eventing_results(self.function_name, docs_expected, skip_stats_validation=True,
+                                         bucket=self.dst_bucket_name3, timeout=timeout)
+            if docs_expected == 0:
+                self.verify_source_bucket_mutation(docs_expected, deletes=True, timeout=timeout, bucket=self.sbm_bucket)
+            else:
+                self.verify_source_bucket_mutation(docs_expected, timeout=timeout, bucket=self.sbm_bucket)
         else:
             # Just print the stats after sleeping for 10 mins. Required to get the latest stats.
             self.sleep(timeout)
@@ -138,6 +174,3 @@ class EventingVolume(EventingBaseTest):
                 log.info("Number of docs in {0} bucket actual : {1} expected : {2} ".format(bucket,
                                                                                             stats_dst["curr_items"],
                                                                                             docs_expected))
-
-
-

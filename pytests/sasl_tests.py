@@ -3,7 +3,7 @@ from mc_bin_client import MemcachedClient, MemcachedError
 from membase.api.rest_client import RestConnection
 from remote.remote_util import RemoteMachineShellConnection
 
-AUTH_SUCCESS = ""
+AUTH_SUCCESS = b''
 AUTH_FAILURE = "Auth error"
 
 class SaslTest(BaseTestCase):
@@ -18,7 +18,7 @@ class SaslTest(BaseTestCase):
         tasks = []
         for name in buckets:
             sasl_params = self._create_bucket_params(server=server, size=100, replicas=0)
-            tasks.append(self.cluster.async_create_sasl_bucket(name=name, password=buckets[name],bucket_params=sasl_params))
+            tasks.append(self.cluster.async_create_sasl_bucket(name=name, password=buckets[name], bucket_params=sasl_params))
 
         for task in tasks:
             task.result(self.wait_timeout * 10)
@@ -39,8 +39,9 @@ class SaslTest(BaseTestCase):
                 ret = client.sasl_auth_plain(bucket, password)[2]
             else:
                 self.fail("Invalid auth mechanism {0}".format(self.auth_mech))
-        except MemcachedError, e:
-            ret = e[0].split(' for vbucket')[0]
+        except MemcachedError as e:
+            if "Auth error" in str(e):
+                ret = "Auth error"
         client.close()
         return ret
 
@@ -56,10 +57,10 @@ class SaslTest(BaseTestCase):
         client = MemcachedClient(self.master.ip, node.memcached)
         mechs = list(client.sasl_mechanisms())
         self.log.info("Start check mech types")
-        assert "SCRAM-SHA1" in mechs
-        assert "SCRAM-SHA256" in mechs
-        assert "SCRAM-SHA512" in mechs
-        assert "PLAIN" in mechs
+        assert b"SCRAM-SHA1" in mechs
+        assert b"SCRAM-SHA256" in mechs
+        assert b"SCRAM-SHA512" in mechs
+        assert b"PLAIN" in mechs
         assert len(list(mechs)) == 4
 
     """Tests basic sasl authentication on buckets that exist"""
@@ -150,7 +151,7 @@ class SaslTest(BaseTestCase):
         valid_password = self.input.param("valid_pass", "password")
         if isinstance(valid_password, int):
             valid_password = str(valid_password)
-        valid_password = valid_password.replace('[space]',' ')
+        valid_password = valid_password.replace('[space]', ' ')
         invalid_pass = self.input.param("invalid_pass", [])
         if invalid_pass:
             invalid_pass = invalid_pass.split(";")
@@ -161,7 +162,7 @@ class SaslTest(BaseTestCase):
         for bucket in self.buckets:
             for password in invalid_pass:
                 password = \
-                    password.replace('[space]',' ').replace('[tab]', u'\t').encode('ascii')
+                    password.replace('[space]', ' ').replace('[tab]', '\t').encode('ascii')
                 self.assertTrue(AUTH_FAILURE in self.do_auth(bucket.name, password),
                              "Bucket %s, valid pass %s, shouldn't authentificate with %s"\
                               %(bucket, bucket.saslPassword, password))

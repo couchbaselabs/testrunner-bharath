@@ -175,7 +175,7 @@ class SCPClient(object):
 
         @param remote_path: path to retrieve from server
         @type remote_path: str
-        @param local_path: path in which to recieve files. default cwd
+        @param local_path: path in which to receive files. default cwd
         @type local_path: str
         """
         self.get(remote_path, local_path, recursive=True)
@@ -186,7 +186,7 @@ class SCPClient(object):
 
         @param remote_path: path to retrieve from server
         @type remote_path: str
-        @param local_path: path in which to recieve files. default cwd
+        @param local_path: path in which to receive files. default cwd
         @type local_path: str
         """
         self.get(remote_path, local_path, preserve_times=True)
@@ -197,7 +197,7 @@ class SCPClient(object):
 
         @param remote_path: path to retrieve from server
         @type remote_path: str
-        @param local_path: path in which to recieve files. default cwd
+        @param local_path: path in which to receive files. default cwd
         @type local_path: str
         """
         self.get(remote_path, local_path, recursive=True, preserve_times=True)
@@ -279,7 +279,7 @@ class SCPClient(object):
             raise SCPException('Invalid response from server: ' + msg)
 
     def _recv_all(self):
-        # loop over scp commands, and recive as necessary
+        # loop over scp commands, and receive as necessary
         command = {'C': self._recv_file,
                    'T': self._set_time,
                    'D': self._recv_pushd,
@@ -323,8 +323,8 @@ class SCPClient(object):
 
         try:
             file_hdl = file(path, 'wb')
-        except IOError, e:
-            chan.send('\x01' + e.message)
+        except IOError as e:
+            chan.send('\x01' + str(e))
             chan.close()
             raise
 
@@ -376,8 +376,8 @@ class SCPClient(object):
             self._dirtimes[path] = (self._utime)
             self._utime = None
             self._recv_dir = path
-        except (OSError, SCPException), e:
-            self.channel.send('\x01' + e.message)
+        except (OSError, SCPException) as e:
+            self.channel.send('\x01' + str(e))
             raise
 
     def _recv_popd(self, *cmd):

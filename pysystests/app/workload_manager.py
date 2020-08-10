@@ -1,25 +1,25 @@
-from __future__ import absolute_import
 
-import copy
-import json
-import random
-import re
-import time
-import uuid
-
-from celery import current_task
-from celery.signals import task_postrun
-from celery.utils.log import get_task_logger
-
+from app.celery import celery
+from celery.task.sets import TaskSet
 import app.postcondition_handlers as phandler
 import app.sdk_client_tasks as client
-import testcfg as cfg
-from app.celery import celery
+import json
+import uuid
+import time
+import copy
+import re
+from rabbit_helper import PersistedMQ, RabbitHelper
+from celery import current_task
+from celery import Task
+from cache import ObjCacher, CacheHelper
 from app.query import updateQueryBuilders
 from app.rest_client_tasks import create_rest, http_ping
-from cache import ObjCacher, CacheHelper
+import random
+import testcfg as cfg
+from celery.exceptions import TimeoutError
+from celery.signals import task_postrun
+from celery.utils.log import get_task_logger
 from membase.helper.cluster_helper import ClusterOperationHelper
-from rabbit_helper import PersistedMQ, RabbitHelper
 
 logger = get_task_logger(__name__)
 
@@ -225,7 +225,7 @@ def task_postrun_handler(sender=None, task_id=None, task=None, args=None, kwargs
 #
     if sender == client.mset:
 
-        if isinstance(retval,tuple):
+        if isinstance(retval, tuple):
             isupdate = args[3]
             if isupdate == False:
 
@@ -276,7 +276,7 @@ def queue_op_cycles(workload):
         active_hosts = clusterStatus.get_all_hosts()
 
     # create 30 op cycles
-    for i in xrange(20):
+    for i in range(20):
 
         if workload.cc_queues is not None:
             # override template attribute with workload
@@ -444,7 +444,7 @@ def generate_pending_tasks(task_queue, template, bucketInfo, create_count,
     bucket = bucketInfo['bucket']
     password = bucketInfo['password']
 
-    create_tasks , update_tasks , get_tasks , del_tasks = ([],[],[],[])
+    create_tasks, update_tasks, get_tasks, del_tasks = ([], [], [], [])
     if create_count > 0:
         set_template = copy.deepcopy(template)
         set_template.ttl = 0 # override template level ttl
@@ -763,7 +763,7 @@ def getClusterStat(bucket, stat):
     return val
 
 def replace_magic_vars(str_):
-    ref = re.match(r".*\$(?P<var>\w+)",str_).group('var')
+    ref = re.match(r".*\$(?P<var>\w+)", str_).group('var')
     ref = str(ref.strip())
     value = CacheHelper.getPhaseVar(ref) or 0
     str_  = str_.replace("$"+ref, str(value))
@@ -799,7 +799,7 @@ class ClusterStatus(object):
     def get_random_host(self):
         all_hosts = self.get_all_hosts()
         if len(all_hosts) > 0:
-            return all_hosts[random.randint(0,len(all_hosts) - 1)]
+            return all_hosts[random.randint(0, len(all_hosts) - 1)]
 
     def http_ping_node(self, node = None):
         if node:
@@ -1034,7 +1034,7 @@ class Template(object):
         self.cc_queues = params["cc_queues"]
         self.kv = params["kv"]
         self.size = params.get("size") or ['128']
-        self.size = map(int, self.size)
+        self.size = list(map(int, self.size))
         self.indexed_keys = []
 
         # cache

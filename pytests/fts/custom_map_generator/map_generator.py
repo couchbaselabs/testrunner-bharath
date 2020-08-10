@@ -7,7 +7,7 @@ from TestInput import TestInputSingleton
 EMP_FIELDS = {
     'text': ["name", "dept", "languages_known", "email"],
     'number': ["mutated", "salary"],
-    #'boolean': ["is_manager"],
+    'boolean': ["is_manager"],
     'datetime': ["join_date"],
     'object': ["manages"]  # denote nested fields
 }
@@ -21,10 +21,13 @@ EMP_NESTED_FIELDS = {
     }
 }
 
+# Need to work on double nested field "revision_text_text"
+
 WIKI_FIELDS = {
     'text': ["title", "type"],
     'number': ["mutated"],
-    'object': ["revision", "text", "contributor"]
+    #'object': ["revision", "text", "contributor"]
+    'object': ["revision"]
 }
 
 TOTAL_WIKI_FIELDS = 6
@@ -33,20 +36,20 @@ WIKI_NESTED_FIELDS = {
     'revision': {
         'datetime': ["timestamp"]
     },
-    'text': {
-        'text': ["#text"]
-    },
-    'contributor': {
-        'text': ["username"]
-    }
+    #'text': {
+    #    'text': ["#text"]
+    #},
+    #'contributor': {
+    #    'text': ["username"]
+    #}
 }
 
 FULL_FIELD_NAMES = {
     'reports': 'manages_reports',
     'team_size': 'manages_team_size',
     'timestamp': 'revision_timestamp',
-    '#text': 'revision_text_text',
-    'username': 'revision_contributor_username'
+    #'#text': 'revision_text_text',
+    #'username': 'revision_contributor_username'
 }
 
 CUSTOM_ANALYZER_TEMPLATE = {
@@ -152,33 +155,36 @@ ANALYZERS = ["standard", "simple", "keyword", "en"]
 
 LANG_ANALYZERS = ["ar", "cjk", "fr", "fa", "hi", "it", "pt", "en", "web"]
 
-CHAR_FILTERS = ["html","mapping"]
+CHAR_FILTERS = ["html", "mapping"]
 
-TOKENIZERS = ["letter","single","unicode","web","whitespace","alphanumeric"]
+TOKENIZERS = ["letter", "single", "unicode", "web", "whitespace", "alphanumeric"]
 
-TOKEN_FILTERS = ["apostrophe","elision_fr","to_lower","ngram",
-                 "front_edge_ngram","back_edge_ngram","shingle",
-                 "truncate","stemmer_porter","length","keyword_marker",
-                 "stopwords","cjk_bigram","stemmer_it_light",
-                 "stemmer_fr_light","stemmer_fr_min","stemmer_pt_light"]
+TOKEN_FILTERS = ["apostrophe", "elision_fr", "to_lower", "ngram",
+                 "front_edge_ngram", "back_edge_ngram", "shingle",
+                 "truncate", "stemmer_porter", "length", "keyword_marker",
+                 "stopwords", "cjk_bigram", "stemmer_it_light",
+                 "stemmer_fr_light", "stemmer_fr_min", "stemmer_pt_light"]
 
 class CustomMapGenerator:
     """
     # Generates an FTS and equivalent ES custom map for emp/wiki datasets
     """
-    def __init__(self, seed=0, dataset="emp", num_custom_analyzers=0,multiple_filters=False):
+    def __init__(self, seed=0, dataset="emp", num_custom_analyzers=0,multiple_filters=False,
+                 custom_map_add_non_indexed_fields=True, text_analyzer=None):
         random.seed(seed)
         self.fts_map = {"types": {}}
         self.es_map = {}
         self.num_field_maps = random.randint(1, 10)
         self.queryable_fields = {}
         self.num_custom_analyzers = num_custom_analyzers
+        self.text_analyzer = text_analyzer
+        self.custom_map_add_non_indexed_fields = custom_map_add_non_indexed_fields
         # Holds the list of custom analyzers created by
         # build_custom_analyzer method
         self.custom_analyzers=[]
         self.multiple_filters = multiple_filters
 
-        for n in range(0,self.num_custom_analyzers,1):
+        for n in range(0, self.num_custom_analyzers, 1):
             self.custom_analyzers.append("customAnalyzer"+str(n+1))
 
         if dataset == "emp":
@@ -267,21 +273,23 @@ class CustomMapGenerator:
         if field in FULL_FIELD_NAMES:
             # if nested field, then fully qualify the field name
             field = FULL_FIELD_NAMES[field]
-        if field_type not in self.queryable_fields.keys():
+        if field_type not in list(self.queryable_fields.keys()):
             self.queryable_fields[field_type] = []
         if field not in self.queryable_fields[field_type]:
             self.queryable_fields[field_type].append(field)
 
     def build_custom_map(self, dataset):
-        for x in xrange(0, self.num_field_maps):
+        for x in range(0, self.num_field_maps):
             field, type = self.get_random_field_name_and_type(self.fields)
-            if field not in self.nested_fields.iterkeys():
+            if field not in iter(list(self.nested_fields.keys())):
                 fts_child, es_child = self.get_child_field(field, type)
             else:
-                fts_child, es_child = self.get_child_map(field)
+                fts_child, es_child = self.get_child_map(field, dataset)
             self.fts_map['types'][dataset]['properties'][field] = fts_child
             self.es_map[dataset]['properties'][field] = es_child
-        self.add_non_indexed_field_to_query()
+
+        if self.custom_map_add_non_indexed_fields:
+            self.add_non_indexed_field_to_query()
 
     def add_non_indexed_field_to_query(self):
         """
@@ -295,39 +303,47 @@ class CustomMapGenerator:
                 field, field_type = self.get_random_field_name_and_type(
                     self.fields)
                 if field_type != 'object' and \
-                   field_type not in self.queryable_fields.keys():
-                    print "Adding an extra non-indexed field '%s' to" \
-                          " list of queryable fields" % field
+                   field_type not in list(self.queryable_fields.keys()):
+                    print(("Adding an extra non-indexed field '%s' to" \
+                          " list of queryable fields" % field))
                     self.queryable_fields[field_type] = [field]
                     break
                 if field_type != 'object' and \
                    field not in self.queryable_fields[field_type]:
-                    print "Adding an extra non-indexed field '%s' to" \
-                          " list of queryable fields" % field
+                    print(("Adding an extra non-indexed field '%s' to" \
+                          " list of queryable fields" % field))
                     self.queryable_fields[field_type].append(field)
                     break
             else:
-                print "Unable to add a non-indexed field after %s retries" \
-                      % self.max_fields
+                print(("Unable to add a non-indexed field after %s retries" \
+                      % self.max_fields))
 
-    def get_child_map(self, field):
+    def get_child_map(self, field, dataset):
         """
         Child maps are for nested json structures i.e, any higher level field
         having another nested structure as its value
         """
-        fts_child_map = {}
-        fts_child_map['dynamic'] = False
-        fts_child_map['enabled'] = True
-        fts_child_map['fields'] = []
+        current_prop = self.fts_map['types'][dataset]['properties']
+        if field not in iter(current_prop.keys()):
+            fts_child_map = {}
+            fts_child_map['dynamic'] = False
+            fts_child_map['enabled'] = True
+            fts_child_map['fields'] = []
+            fts_child_map['properties'] = {}
+
+            es_child_map = {}
+            es_child_map['dynamic'] = False
+            es_child_map['enabled'] = True
+            es_child_map['type'] = "object"
+            es_child_map['properties'] = {}
+        else:
+            fts_child_map = self.fts_map['types'][dataset]['properties'][field]
+            es_child_map = self.es_map[dataset]['properties'][field]
+
         field, type = self.get_nested_child_field(field)
         fts_child, es_child = self.get_child_field(field, type)
-        fts_child_map['properties'] = {field: fts_child}
-
-        es_child_map = {}
-        es_child_map['dynamic'] = False
-        es_child_map['enabled'] = True
-        es_child_map['type'] = "object"
-        es_child_map['properties'] = {field: es_child}
+        fts_child_map['properties'][field] = fts_child
+        es_child_map['properties'][field] = es_child
 
         return fts_child_map, es_child_map
 
@@ -361,6 +377,8 @@ class CustomMapGenerator:
         fts_field_map['type'] = field_type
         if self.num_custom_analyzers:
             analyzer = self.get_random_value(self.custom_analyzers)
+        elif self.text_analyzer:
+            analyzer = self.text_analyzer
         else:
             analyzer = self.get_random_value(ANALYZERS)
         if field_type == "text":
@@ -377,6 +395,8 @@ class CustomMapGenerator:
         es_field_map['store'] = False
         #if is_indexed:
         es_field_map['index'] = 'analyzed'
+        if field_type == "boolean":
+            es_field_map['index'] = 'not_analyzed'
         #else:
         #    es_field_map['index'] = 'no'
         if field_type == "text":
@@ -395,20 +415,20 @@ class CustomMapGenerator:
         return fts_field_map, es_field_map
 
     def get_random_field_name_and_type(self, fields):
-        type = self.get_random_value(fields.keys())
+        type = self.get_random_value(list(fields.keys()))
         field = self.get_random_value(fields[type])
         return field, type
 
     def get_nested_child_field(self, nested_field):
-        if nested_field in self.nested_fields.iterkeys():
+        if nested_field in iter(list(self.nested_fields.keys())):
             return self.get_random_field_name_and_type(
                 self.nested_fields[nested_field])
 
     def build_custom_analyzer(self):
         analyzer_map = {}
         if self.multiple_filters:
-            num_token_filters = random.randint(1,min(3,len(TOKEN_FILTERS)))
-            num_char_filters = random.randint(1, min(3,len(CHAR_FILTERS)))
+            num_token_filters = random.randint(1, min(3, len(TOKEN_FILTERS)))
+            num_char_filters = random.randint(1, min(3, len(CHAR_FILTERS)))
         else:
             num_token_filters = 1
             num_char_filters = 1
@@ -419,7 +439,7 @@ class CustomMapGenerator:
             analyzer_map[custom_analyzer]["token_filters"] = []
             analyzer_map[custom_analyzer]["tokenizer"] = ""
 
-            for num in range(0,num_char_filters, 1):
+            for num in range(0, num_char_filters, 1):
                 char_filter = self.get_random_value(CHAR_FILTERS)
                 if not analyzer_map[custom_analyzer]["char_filters"].count(char_filter):
                     analyzer_map[custom_analyzer]["char_filters"].append(char_filter)
@@ -440,4 +460,4 @@ class CustomMapGenerator:
 if __name__ == "__main__":
     import json
     custom_map = CustomMapGenerator(seed=1).get_map()
-    print json.dumps(custom_map, indent=3)
+    print((json.dumps(custom_map, indent=3)))

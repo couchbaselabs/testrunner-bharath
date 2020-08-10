@@ -36,19 +36,18 @@ class MemcapableTestBase(object):
         self.master = self.input.servers[0]
         self.bucket_port = port
         self.bucket_name = bucket_name
+        self.bucket_storage = self.input.param("bucket_storage", 'couchstore')
         ClusterOperationHelper.cleanup_cluster([self.master])
         BucketOperationHelper.delete_all_buckets_or_assert([self.master], self.test)
 
         # Add built-in user
         testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
         RbacBase().create_user_source(testuser, 'builtin', self.master)
-        time.sleep(10)
-
+        
         # Assign user to role
         role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
         RbacBase().add_user_role(role_list, RestConnection(self.master), 'builtin')
-        time.sleep(10)
-
+        
         self._create_default_bucket(unittest)
 
 
@@ -61,10 +60,9 @@ class MemcapableTestBase(object):
             node_ram_ratio = BucketOperationHelper.base_bucket_ratio(TestInputSingleton.input.servers)
             info = rest.get_nodes_self()
             available_ram = info.memoryQuota * node_ram_ratio
-            rest.create_bucket(bucket=name, ramQuotaMB=int(available_ram))
-            ready = BucketOperationHelper.wait_for_memcached(master, name)
+            rest.create_bucket(bucket=name, ramQuotaMB=int(available_ram),
+                               storageBackend=self.bucket_storage)
             BucketOperationHelper.wait_for_vbuckets_ready_state(master, name)
-            unittest.assertTrue(ready, msg="wait_for_memcached failed")
         unittest.assertTrue(helper.bucket_exists(name),
                             msg="unable to create {0} bucket".format(name))
 
@@ -140,6 +138,7 @@ class MemcapableTestBase(object):
         ClusterOperationHelper.cleanup_cluster([self.master])
         BucketOperationHelper.delete_all_buckets_or_assert([self.master], self)
 
+
 class SimpleSetMembaseBucketDefaultPort(unittest.TestCase):
     memcapableTestBase = None
     log = logger.Logger.get_logger()
@@ -152,14 +151,14 @@ class SimpleSetMembaseBucketDefaultPort(unittest.TestCase):
         key_test = 'has_key'
         valuesList = ['0', '000', '4', '678', '6560987', '32456754', '0000000000', '00001000']
         exp_time = 0
-        flagsList = [0, 0000, 00001, 34532, 453456, 0001000, 1100111100, 4294967295]
+        flagsList = [0, 0000, 0o0001, 34532, 453456, 0o001000, 1100111100, 4294967295]
         self.memcapableTestBase.set_test(key_test, exp_time, flagsList, valuesList)
 
     def test_set_neg_int_value_pos_flag_key_never_expired(self):
         key_test = 'has_key'
         valuesList = ['-0', '-000', '-4', '-678', '-6560987', '-32456754', '-0000000000', '-00001000']
         exp_time = 0
-        flagsList = [0, 0000, 00001, 34532, 453456, 0001000, 1100111100, 4294967295]
+        flagsList = [0, 0000, 0o0001, 34532, 453456, 0o001000, 1100111100, 4294967295]
         self.memcapableTestBase.set_test(key_test, exp_time, flagsList, valuesList)
 
     def test_set_pos_float_value_pos_flag_key_never_expired(self):
@@ -167,7 +166,7 @@ class SimpleSetMembaseBucketDefaultPort(unittest.TestCase):
         valuesList = ['0.00', '000.0', '4.6545', '678.87967', '6560987.0', '32456754.090987', '0000000000.0000001',
                       '00001000.008']
         exp_time = 0
-        flagsList = [0, 0000, 00001, 34532, 453456, 0001000, 1100111100, 4294967295]
+        flagsList = [0, 0000, 0o0001, 34532, 453456, 0o001000, 1100111100, 4294967295]
         self.memcapableTestBase.set_test(key_test, exp_time, flagsList, valuesList)
 
     def test_set_neg_float_value_pos_flag_key_never_expired(self):
@@ -175,7 +174,7 @@ class SimpleSetMembaseBucketDefaultPort(unittest.TestCase):
         valuesList = ['-0.00', '-000.0', '-4.6545', '-678.87967', '-6560987.0', '-32456754.090987',
                       '-0000000000.0000001', '-00001000.008']
         exp_time = 0
-        flagsList = [0, 0000, 00001, 34532, 453456, 0001000, 1100111100, 4294967295]
+        flagsList = [0, 0000, 0o0001, 34532, 453456, 0o001000, 1100111100, 4294967295]
         self.memcapableTestBase.set_test(key_test, exp_time, flagsList, valuesList)
 
 
@@ -276,12 +275,12 @@ class GetlTests(unittest.TestCase):
             mc.getl(key, getl_timeout)
         except Exception as ex:
             if getl_timeout < 0:
-                print ex
+                print(ex)
             else:
                 raise
         self.log.info("get key {0} which is locked now".format(key))
         flags_v, cas_v, get_v = mc.get(key)
-        self.assertEquals(get_v, key)
+        self.assertEqual(get_v.decode(), key)
         i = 0
         while i < 40:
             self.log.info("setting key {0} with new value {1}".format(key, '*'))
@@ -289,9 +288,9 @@ class GetlTests(unittest.TestCase):
                 mc.set(key, 0, 0, '*')
                 break
             except Exception as ex:
-                print ex
+                print(ex)
             time.sleep(1)
-            print i
+            print(i)
             i += 1
         if getl_timeout > 30:
             self.log.info("sleep for {0} seconds".format(30))
@@ -309,7 +308,7 @@ class GetlTests(unittest.TestCase):
         mc.set(key, 0, 0, new_value)
         self.log.info("get key {0}".format(key))
         flags_v, cas_v, get_v = mc.get(key)
-        self.assertEquals(get_v, "*")
+        self.assertEqual(get_v.decode(), "*")
 
     def test_getl_minus_one(self):
         self._getl_body("getl_-1", -1, 0)
@@ -356,7 +355,7 @@ class GetlTests(unittest.TestCase):
         mc.getl(key, getl_timeout)
         self.log.info("get key {0} which is locked now".format(key))
         flags_v, cas_v, get_v = mc.get(key)
-        self.assertEquals(get_v, key)
+        self.assertEqual(get_v.decode(), key)
         if getl_timeout > 30:
             self.log.info("sleep for {0} seconds".format(30))
             time.sleep(30)
@@ -378,7 +377,7 @@ class GetlTests(unittest.TestCase):
         mc.set(key, 0, 0, new_value)
         self.log.info("get key {0}".format(key))
         flags_v, cas_v, get_v = mc.get(key)
-        self.assertEquals(get_v, "*")
+        self.assertEqual(get_v.decode(), "*")
 
     def tearDown(self):
         self.memcapableTestBase.tearDown()
@@ -775,7 +774,7 @@ class AppendTests(unittest.TestCase):
                 expected_delta = items * (size + append_iteration_before_delete * append_size * 1.0)
                 msg = "initial mem_used {0}, current mem_used {1} , delta : {2} , expected delta : {3} , increase percentage {4}"
                 self.log.info(
-                    msg.format(initial_mem_used, stats["mem_used"], delta, expected_delta, delta / expected_delta))
+                    msg.format(initial_mem_used, stats["mem_used"], delta, expected_delta, delta // expected_delta))
                 if delta > (1.2 * expected_delta):
                     self.fail("too much memory..")
                 for key in keys:
@@ -929,7 +928,7 @@ class WarmUpMemcachedTest(unittest.TestCase):
                 stats = self.onenodemc.stats()
                 present_count = int(stats["curr_items"])
                 ep_warmup_thread = stats["ep_warmup_thread"]
-                self.log.warn("curr_items {0}, ep_warmup_thread {1}".format(present_count, ep_warmup_thread))
+                self.log.warning("curr_items {0}, ep_warmup_thread {1}".format(present_count, ep_warmup_thread))
                 time.sleep(1)
             else:
                 self.fail("Timed out waiting for warmup")
@@ -1047,10 +1046,10 @@ class MultiGetNegativeTest(unittest.TestCase):
 
         self.log.info("running multiget to get {0} keys".format(howmany))
         gets = client.getMulti(keys)
-        self.log.info("recieved {0} keys".format(len(gets)))
+        self.log.info("received {0} keys".format(len(gets)))
 
         self.log.info(gets)
-        self.assertEquals(len(gets), len(keys))
+        self.assertEqual(len(gets), len(keys))
 
         self.log.info("printing moxi and memcached stats after running multi-get")
         moxi_sys_stats = self._extract_proc_info(shell, moxi_pid)
@@ -1070,7 +1069,7 @@ class MultiGetNegativeTest(unittest.TestCase):
                   'sigignore sigcatch wchan nswap cnswap exit_signal '
                   'processor rt_priority policy delayacct_blkio_ticks '
                   'guest_time cguest_time ').split(' ')
-        d = dict(zip(fields, o[0].split(' ')))
+        d = dict(list(zip(fields, o[0].split(' '))))
         return d
 
 
@@ -1129,7 +1128,7 @@ class MemcachedValueSizeLimitTest(unittest.TestCase):
             self.onenodemc.append(key, value)
             self.fail("memcached did not raise an error")
         except mc_bin_client.MemcachedError as err:
-            self.assertEquals(err.status, 3)
+            self.assertEqual(err.status, 3)
 
 
     def test_prepend_till_20_mb(self):
@@ -1145,12 +1144,12 @@ class MemcachedValueSizeLimitTest(unittest.TestCase):
             self.onenodemc.prepend(key, value)
             self.fail("memcached did not raise an error")
         except mc_bin_client.MemcachedError as err:
-            self.assertEquals(err.status, 3)
+            self.assertEqual(err.status, 3)
 
 #    def test_incr_till_max(self):
 #        initial_value = '0'
 #        max_value = pow(2, 64)
-#        step = max_value / 1024
+#        step = max_value // 1024
 #        self.log.info("step : {0}")
 #        key = str(uuid.uuid4())
 #        self.keys_cleanup.append(key)
@@ -1166,12 +1165,12 @@ class MemcachedValueSizeLimitTest(unittest.TestCase):
 #            self.onenodemc.incr(key, step)
 #            self.fail("memcached did not raise an error")
 #        except mc_bin_client.MemcachedError as err:
-#            self.assertEquals(err.status, 5)
+#            self.assertEqual(err.status, 5)
 #
 #    def test_decr_till_max(self):
 #        initial_value = '1'
 #        max_value = pow(2, 64)
-#        step = max_value / 1024
+#        step = max_value // 1024
 #        key = str(uuid.uuid4())
 #        self.keys_cleanup.append(key)
 #        self.onenodemc.set(key, 0, 0, initial_value)
@@ -1183,4 +1182,4 @@ class MemcachedValueSizeLimitTest(unittest.TestCase):
 #            self.onenodemc.incr(key, step)
 #            self.fail("memcached did not raise an error")
 #        except mc_bin_client.MemcachedError as err:
-#            self.assertEquals(err.status, 5)
+#            self.assertEqual(err.status, 5)

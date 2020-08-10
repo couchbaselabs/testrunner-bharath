@@ -1,32 +1,41 @@
-import json
 import random
-
+import json
 # import sys
 # sys.path.append("/Users/apiravi/testrunner")
-from emp_querables import EmployeeQuerables
-from wiki_queryables import WikiQuerables
+from .emp_querables import EmployeeQuerables
+from .wiki_queryables import WikiQuerables
+import Geohash
+import math
+import random
+import copy
 
 
 class DATASET:
     FIELDS = {'emp': {'str': ["name", "dept", "manages_reports",
-                               "languages_known", "email", "type"],
+                              "languages_known", "email", "type"],
                       'text': ["name", "manages_reports"],
                       'num': ["mutated", "manages_team_size", "salary"],
                       'bool': ["is_manager"],
-                      'date': ["join_date"]
+                      'date': ["join_date"],
+                      'array': ["languages_known", "manages_reports"]
                       },
 
               'wiki': {'str': ["title", "revision_text_text", "type", "revision_contributor_username"],
                        'text': ["title", "revision_text_text"],
                        'num': ["mutated"],
                        'bool': [],
-                       'date': ["revision_timestamp"]}
+                       'date': ["revision_timestamp"],
+                       'array': []}
               }
+    CONSOLIDATED_FIELDS = ["name", "dept", "manages_reports", "languages_known", "email", "mutated",
+                           "manages_team_size", "salary", "is_manager", "join_date", "title", "revision_text_text",
+                           "revision_contributor_username", "mutated", "revision_timestamp"]
+
 
 class QUERY_TYPE:
     VALUES = ["match", "bool", "match_phrase",
               "prefix", "fuzzy", "conjunction", "disjunction"
-              "wildcard", "regexp",  "query_string",
+                                                "wildcard", "regexp", "query_string",
               "numeric_range", "date_range", "term_range",
               "match_all", "match_none"]
 
@@ -37,11 +46,24 @@ class QUERY_TYPE:
                  "prefix", "wildcard", "query_string",
                  "conjunction", "disjunction", "term_range"],
         'str': ["match", "bool", "match_phrase",
-                 "prefix", "wildcard", "query_string",
-                 "conjunction", "disjunction", "term_range"],
+                "prefix", "wildcard", "query_string",
+                "conjunction", "disjunction", "term_range"],
+        'bool': [],
         'num': ["numeric_range"],
         'date': ["date_range"]
     }
+
+    N1QL_QUERY_TYPES = {
+        'text': ["term_equal", "term_range",
+                 "term_like", "term_between", "conjunction_disjunction"],
+        'str': ["term_equal", "term_range",
+                "term_between", "term_like", "conjunction_disjunction"],
+        'num': ["num_equal", "num_range", "num_between"],
+        'date': ["date_equal", "date_range", "date_between"],
+        'bool': ["boolean"],
+        'array': ["array_any"]
+    }
+
 
 class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
 
@@ -60,7 +82,25 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         self.query_types = query_type
         self.dataset = dataset
         self.smart_queries = False
-        if fields:
+        if fields and query_type == ['N1QL_MATCH_PHRASE']:
+            self.fields = {}
+            add_only_match = False
+            self.make_fields_compatible(fields)
+            if 'text' in self.fields.keys():
+                temp_text = self.fields['text']
+                temp_str = self.fields['str']
+                del self.fields['text']
+                del self.fields['str']
+                add_only_match = True
+            self.query_types = self.get_custom_query_types()
+            if add_only_match:
+                self.fields['str'] = temp_str
+                self.fields['text'] = temp_text
+                self.query_types.append("match")
+                self.query_types.append("match_phrase")
+                print("query_types: %s" % self.query_types)
+            self.smart_queries = True
+        elif fields:
             # Smart query generation
             self.fields = {}
             self.make_fields_compatible(fields)
@@ -72,23 +112,23 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         if self.query_types:
             self.construct_queries()
         else:
-            print "No string/number/date fields indexed for smart" \
-                  " query generation "
-
+            print("No string/number/date fields indexed for smart" \
+                  " query generation ")
 
     def construct_fields(self):
         all_fields = {}
         if self.dataset == "emp":
-            all_fields = DATASET.FIELDS['emp']
+            all_fields = copy.deepcopy(DATASET.FIELDS['emp'])
         elif self.dataset == "wiki":
-            all_fields = DATASET.FIELDS['wiki']
-        elif self.dataset == "all":
+            all_fields = copy.deepcopy(DATASET.FIELDS['wiki'])
+        elif self.dataset == "all" or self.dataset == "default":
             fields_set = set()
-            for _, fields in DATASET.FIELDS.iteritems():
+            for _, fields in DATASET.FIELDS.items():
                 fields_set |= set(fields.keys())
             for v in fields_set:
                 all_fields[v] = []
-            for _, fields in DATASET.FIELDS.iteritems():
+            all_dataset = copy.deepcopy(DATASET.FIELDS)
+            for _, fields in all_dataset.items():
                 all_fields['str'] += fields['str']
                 all_fields['date'] += fields['date']
                 all_fields['num'] += fields['num']
@@ -101,7 +141,7 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         Passed field types could be specified as  "num"/"number"/"integer".
         Standardize it to work with RQG
         """
-        for field_type, field_list in fields.iteritems():
+        for field_type, field_list in fields.items():
             if field_type == "str" or field_type == "text":
                 self.fields["str"] = field_list
                 self.fields["text"] = field_list
@@ -109,24 +149,27 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
                 self.fields["num"] = field_list
             if field_type == "datetime":
                 self.fields["date"] = field_list
-        print "Smart queries will be generated on fields: %s" % self.fields
+            if field_type == "boolean":
+                self.fields["bool"] = field_list
+        print("Smart queries will be generated on fields: %s" % self.fields)
 
     def get_custom_query_types(self):
         query_types = []
-        for field_type in self.fields.keys():
+        for field_type in list(self.fields.keys()):
             query_types += QUERY_TYPE.CUSTOM_QUERY_TYPES[field_type]
         return list(set(query_types))
 
     def replace_underscores(self, query):
         replace_dict = {
             "manages_": "manages.",
-            "revision_text_text":  "revision.text.#text",
+            "revision_text_text": "revision.text.`#text`",
             "revision_contributor_username": "revision.contributor.username",
             "revision_contributor_id": "revision.contributor.id",
-            "revision_date": "revision.date"
+            "revision_date": "revision.date",
+            "revision_timestamp": "revision.timestamp"
         }
         query_str = json.dumps(query, ensure_ascii=False)
-        for key, val in replace_dict.iteritems():
+        for key, val in replace_dict.items():
             query_str = query_str.replace(key, val)
         return json.loads(query_str, encoding='utf-8')
 
@@ -258,10 +301,10 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
 
     def construct_prefix_query(self):
         fts_prefix_query = {}
-        es_prefix_query = {'prefix':{}}
+        es_prefix_query = {'prefix': {}}
         fts_match_query, _ = self.construct_match_query()
         prefix_search = fts_match_query["match"][:random.randint(1, 4)]
-        fts_prefix_query["prefix"] =  prefix_search
+        fts_prefix_query["prefix"] = prefix_search
         fts_prefix_query["field"] = fts_match_query["field"]
         es_prefix_query['prefix'][fts_match_query["field"]] = prefix_search
         return fts_prefix_query, es_prefix_query
@@ -317,14 +360,14 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
             fts_numeric_query['inclusive_max'] = True
             es_numeric_query['filtered']['filter']['range'][fieldname]['gte'] = \
                 low
-            es_numeric_query['filtered']['filter']['range'][fieldname]['lte'] =\
+            es_numeric_query['filtered']['filter']['range'][fieldname]['lte'] = \
                 high
         else:
             fts_numeric_query['inclusive_min'] = False
             fts_numeric_query['inclusive_max'] = False
             es_numeric_query['filtered']['filter']['range'][fieldname]['gt'] = \
                 low
-            es_numeric_query['filtered']['filter']['range'][fieldname]['lt'] =\
+            es_numeric_query['filtered']['filter']['range'][fieldname]['lt'] = \
                 high
         return fts_numeric_query, es_numeric_query
 
@@ -336,7 +379,7 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         """
         if not fieldname:
             fieldname = self.get_random_value(self.fields['str'] +
-                                          self.fields['text'])
+                                              self.fields['text'])
         str = eval("self.get_queryable_%s" % fieldname + "()")
         terms = str.split(' ')
         return terms[0]
@@ -393,7 +436,7 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
             if bool(random.getrandbits(1)) and not self.smart_queries:
                 return match_str
             else:
-                return fieldname+':'+ match_str
+                return fieldname + ':' + match_str
         else:
             # numeric range
             operators = ['>', '>=', '<', '<=']
@@ -401,18 +444,18 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
             val = eval("self.get_queryable_%s" % fieldname + "()")
             if bool(random.getrandbits(1)):
                 # upper or lower bound specified
-                end_point = fieldname + ':'+ \
+                end_point = fieldname + ':' + \
                             self.get_random_value(operators) + str(val)
                 return end_point
             else:
                 # both upper and lower bounds specified
                 # +age:>=10 +age:<20
                 high_val = val + random.randint(2, 10000)
-                range_str = fieldname + ':'+ \
-                             self.get_random_value(operators[:1]) + str(val) +\
-                            ' +' +fieldname + ':'+ \
-                             self.get_random_value(operators[2:]) +\
-                             str(high_val)
+                range_str = fieldname + ':' + \
+                            self.get_random_value(operators[:1]) + str(val) + \
+                            ' +' + fieldname + ':' + \
+                            self.get_random_value(operators[2:]) + \
+                            str(high_val)
                 return range_str
 
     def construct_query_string_query(self):
@@ -450,7 +493,6 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
             # if there are no sufficient num or str/text fields passed
             return {}, {}
 
-
     def construct_wildcard_query(self):
         """
         Wildcards supported:
@@ -465,15 +507,15 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         fts_query = {}
         es_query = {"wildcard": {}}
         fieldname = self.get_random_value(self.fields['str'] +
-                                              self.fields['text'])
+                                          self.fields['text'])
         match_str = eval("self.get_queryable_%s" % fieldname + "()")
         if bool(random.getrandbits(1)):
             # '*' query
-            pos = random.randint(0, len(match_str)-1)
+            pos = random.randint(0, len(match_str) - 1)
             match_str = match_str[:pos] + '*'
         else:
             # '?' query
-            pos = random.randint(0, len(match_str)-1)
+            pos = random.randint(0, len(match_str) - 1)
             match_str = match_str.replace(match_str[pos], '?')
 
         fts_query['field'] = fieldname
@@ -514,7 +556,7 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         if bool(random.getrandbits(1)):
             match_str = match_str[1:]
         else:
-            match_str = match_str[:len(match_str)-2]
+            match_str = match_str[:len(match_str) - 2]
 
         fts_query['field'] = fieldname
         fts_query['match'] = match_str
@@ -545,34 +587,248 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
                 "lon": lon,
                 "lat": lat
             },
-            "distance": str(distance)+dist_unit,
+            "distance": str(distance) + dist_unit,
             "field": "geo"
         }
 
-        es_query= {
+        es_query = {
             "query": {
-                "match_all" : {}
+                "match_all": {}
             },
-            "filter" : {
-                "geo_distance" : {
-                     "distance" : str(distance)+dist_unit,
-                     "geo" : {
-                         "lat" : lat,
-                         "lon" : lon
-                     }
+            "filter": {
+                "geo_distance": {
+                    "distance": str(distance) + dist_unit,
+                    "geo": {
+                        "lat": lat,
+                        "lon": lon
+                    }
                 }
             }
         }
 
-        if bool(random.getrandbits(1)):
+        case = random.randint(0, 3)
+
+        # Geo Location as array
+        if case == 1:
             fts_query['location'] = [lon, lat]
             es_query['filter']['geo_distance']['geo'] = [lon, lat]
 
+        # Geo Location as string
+        if case == 2:
+            fts_query['location'] = "{0},{1}".format(lat, lon)
+            es_query['filter']['geo_distance']['geo'] = "{0},{1}".format(lat, lon)
+
+        # Geo Location as Geohash
+        if case == 3:
+            geohash = Geohash.encode(lat, lon, precision=random.randint(3, 8))
+            fts_query['location'] = geohash
+            es_query['filter']['geo_distance']['geo'] = geohash
+
+        # Geo Location as an object of lat and lon if case == 0
         return fts_query, es_query
 
     @staticmethod
+    def generate_polygon(longitude, latitude, ave_radius, irregularity, spikeyness, num_vertices):
+        """Start with the centre of the polygon at latitude, longitude,
+            then creates the polygon by sampling points on a circle around the centre.
+            Random noise is added by varying the angular spacing between sequential points,
+            and by varying the radial distance of each point from the centre.
+
+            Params:
+            latitude, longitude - coordinates of the "centre" of the polygon
+            ave_radius - in px, the average radius of this polygon, this roughly controls how large the polygon is, really only useful for order of magnitude.
+            irregularity - [0,1] indicating how much variance there is in the angular spacing of vertices. [0,1] will map to [0, 2pi/numberOfVerts]
+            spikeyness - [0,1] indicating how much variance there is in each vertex from the circle of radius ave_radius. [0,1] will map to [0, ave_radius]
+            num_vertices - self-explanatory
+
+            Returns a list of vertices, in CCW order.
+            """
+
+        irregularity = FTSESQueryGenerator.clip(irregularity, 0, 1) * 2 * math.pi / num_vertices
+        spikeyness = FTSESQueryGenerator.clip(spikeyness, 0, 1) * ave_radius
+
+        # generate n angle steps
+        angle_steps = []
+        lower = (2 * math.pi / num_vertices) - irregularity
+        upper = (2 * math.pi / num_vertices) + irregularity
+        sum = 0.0
+        for i in range(num_vertices):
+            tmp = random.uniform(lower, upper)
+            angle_steps.append(tmp)
+            sum = sum + tmp
+
+        # normalize the steps so that point 0 and point n+1 are the same
+        k = sum / (2 * math.pi)
+        for i in range(num_vertices):
+            angle_steps[i] = angle_steps[i] / k
+
+        # now generate the points
+        points = []
+        angle = random.uniform(0, 2 * math.pi)
+        for i in range(num_vertices):
+            r_i = FTSESQueryGenerator.clip(random.gauss(ave_radius, spikeyness), 0, 2 * ave_radius)
+            x = latitude + r_i * math.cos(angle)
+            y = longitude + r_i * math.sin(angle)
+            if x > 90: x = (-1 * x) + 90
+            if x < -90: x = abs(x) - 90
+            if y > 180: y = (-1 * y) + 180
+            if y < -180: y = abs(y) - 180
+            points.append((float(x), float(y)))
+
+            angle = angle + angle_steps[i]
+
+        return points
+
+    @staticmethod
+    def clip(x, min1, max1):
+        if min1 > max1:
+            return x
+        elif x < min1:
+            return min1
+        elif x > max1:
+            return max1
+        else:
+            return x
+
+    @staticmethod
+    def get_self_intersect_vertices(verts):
+        mod_verts = []
+        mid_vert = int((len(verts) - 1) / 2)
+
+        mod_verts.append(verts[0])
+        mod_verts.append(verts[mid_vert])
+
+        x = 1
+
+        while (mid_vert + x) < (len(verts) - 1):
+            mod_verts.append(verts[mid_vert + x])
+            mod_verts.append(verts[mid_vert - x])
+            x += 1
+
+        mod_verts.append(verts[len(verts) - 1])
+
+        return mod_verts
+
+    @staticmethod
+    def construct_geo_polygon_query(center=None, polygon_feature="regular", num_vertices=None):
+        """
+        Returns a geo polygon query for Couchbase and Elastic search
+        """
+
+        if polygon_feature == "irregular":
+            irregularity = 0.8
+            spikeyness = 0.5
+        else:
+            irregularity = 0
+            spikeyness = 0
+
+        if polygon_feature == "self-intersect":
+            num_vertices = random.randrange(5, 20, 2)
+
+        ave_radius = random.randint(5, 50)
+
+        if not num_vertices:
+            num_vertices = random.randint(3, 20)
+
+        verts = FTSESQueryGenerator.generate_polygon(center[0], center[1], ave_radius, irregularity,
+                                                     spikeyness, num_vertices)
+
+        if polygon_feature == "self-intersect":
+            verts = FTSESQueryGenerator.get_self_intersect_vertices(verts)
+
+        fts_query = {
+            "polygon_points": [],
+            "field": "geo"
+        }
+
+        es_query = {
+            "query": {
+                "match_all": {}
+            },
+            "filter": {
+                "geo_polygon": {
+                    "geo": {
+                        "points": []
+                    }
+                }
+            }
+        }
+
+        case = random.randint(0, 4)
+        format = None
+
+        # Geo Location as map
+        if case == 0:
+            format = "map"
+            verts_map_list = []
+            for vert in verts:
+                vert_map = {"lat": vert[0], "lon": vert[1]}
+                verts_map_list.append(vert_map)
+
+            fts_query['polygon_points'] = verts_map_list
+            es_query['filter']['geo_polygon']['geo']['points'] = verts_map_list
+
+        # Geo Location as array
+        if case == 1:
+            format = "array"
+            verts_list = []
+            for vert in verts:
+                verts_list.append([vert[1], vert[0]])
+            fts_query['polygon_points'] = verts_list
+            es_query['filter']['geo_polygon']['geo']['points'] = verts_list
+
+        # Geo Location as string
+        if case == 2:
+            format = "string"
+            verts_list = []
+            for vert in verts:
+                verts_list.append(str(vert[0]) + "," + str(vert[1]))
+
+            fts_query['polygon_points'] = verts_list
+            es_query['filter']['geo_polygon']['geo']['points'] = verts_list
+
+        # Geo Location as Geohash
+        if case == 3:
+            format = "Geohash"
+            verts_list = []
+            precision = random.randint(3, 8)
+            for vert in verts:
+                verts_list.append(Geohash.encode(vert[0], vert[1], precision))
+
+            fts_query['polygon_points'] = verts_list
+            es_query['filter']['geo_polygon']['geo']['points'] = verts_list
+
+        # Geo Location as mixed
+        if case == 4:
+            format = "Mixed"
+            verts_list = []
+            for vert in verts:
+                mixed_case = random.randint(0, 3)
+                if mixed_case == 0:
+                    # Geo Location as map
+                    mixed_vert = {"lat": vert[0], "lon": vert[1]}
+                if mixed_case == 1:
+                    # Geo Location as array
+                    mixed_vert = [vert[1], vert[0]]
+                if mixed_case == 2:
+                    # Geo Location as string
+                    mixed_vert = str(vert[0]) + "," + str(vert[1])
+                if mixed_case == 3:
+                    # Geo Location as Geohash
+                    precision = random.randint(3, 8)
+                    mixed_vert = Geohash.encode(vert[0], vert[1], precision)
+
+                verts_list.append(mixed_vert)
+
+            fts_query['polygon_points'] = verts_list
+            es_query['filter']['geo_polygon']['geo']['points'] = verts_list
+
+        # Geo Location as an object of lat and lon if case == 0
+        return fts_query, es_query, ave_radius, num_vertices, format
+
+    @staticmethod
     def construct_geo_bounding_box_query(lon1=None, lat1=None,
-                                     lon2=None, lat2=None):
+                                         lon2=None, lat2=None):
         """
         Returns a geo bounding box query for Couchbase and Elastic search
         """
@@ -598,25 +854,24 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         }
 
         es_query = {
-            "query" : {
-                "match_all" : {}
+            "query": {
+                "match_all": {}
             },
-            "filter" : {
-                "geo_bounding_box" : {
-                    "geo" : {
-                        "top_left" : {
-                            "lat" : lat1,
-                            "lon" : lon1
+            "filter": {
+                "geo_bounding_box": {
+                    "geo": {
+                        "top_left": {
+                            "lat": lat1,
+                            "lon": lon1
                         },
-                        "bottom_right" : {
-                            "lat" : lat2,
-                            "lon" : lon2
+                        "bottom_right": {
+                            "lat": lat2,
+                            "lon": lon2
                         }
                     }
                 }
             }
         }
-
 
         if bool(random.getrandbits(1)):
             fts_query['top_left'] = [lon1, lat1]
@@ -647,7 +902,7 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
             fts, es = self.construct_match_phrase_query()
             fts_compound_query.append(fts)
             es_compound_query.append(es)
-        if bool(random.getrandbits(1))and 'date_range' in self.query_types:
+        if bool(random.getrandbits(1)) and 'date_range' in self.query_types:
             fts, es = self.construct_date_range_query()
             fts_compound_query.append(fts)
             es_compound_query.append(es)
@@ -658,15 +913,438 @@ class FTSESQueryGenerator(EmployeeQuerables, WikiQuerables):
         return fts_compound_query, es_compound_query
 
     def get_queryable_type(self):
-        doc_types = DATASET.FIELDS.keys()
+        doc_types = list(DATASET.FIELDS.keys())
         return self.get_random_value(doc_types)
 
+
+class FTSFlexQueryGenerator(FTSESQueryGenerator):
+
+    def __init__(self, num_queries=1, query_type=None, seed=0, dataset="emp", fields=None):
+        super().__init__(num_queries, query_type=None, fields=None, dataset=dataset)
+        self.queries_to_generate = num_queries
+        self.iterator = 0
+        self.fts_flex_queries = []
+        self.gsi_flex_queries = []
+        self.fts_gsi_flex_queries = []
+        self.gsi_queries = []
+        self.fts_flex_query_template = "select meta().id from default USE INDEX " \
+                                       "({{flex_hint}}) where {0} {1}"
+        self.gsi_query_template = "select meta().id from default where {0} {1}"
+        if fields:
+            # Smart query generation
+            self.fields = {}
+            self.make_fields_compatible(fields)
+            self.check_for_array_fields_remove_type()
+            self.query_types = self.get_custom_n1ql_query_types()
+            self.smart_queries = True
+        else:
+            self.fields = self.construct_fields()
+            self.check_for_array_fields_remove_type()
+            self.query_types = self.get_custom_n1ql_query_types()
+        if self.query_types:
+            self.construct_flex_queries()
+        else:
+            print("No string/number/date fields indexed for smart" \
+                  " query generation ")
+        self.expected_fts_index_field = {}
+
+    def check_for_array_fields_remove_type(self):
+        if 'text' in self.fields.keys():
+            del self.fields['text']
+
+        if "str" in self.fields.keys():
+            self.fields['str'] = list(set(self.fields['str']))
+            temp_fields = copy.deepcopy(self.fields)
+            for text_field in temp_fields['str']:
+                if text_field in DATASET.FIELDS['emp']["array"]:
+                    if "array" not in self.fields.keys():
+                        self.fields["array"] = [text_field]
+                    elif text_field not in self.fields["array"]:
+                        self.fields["array"].append(text_field)
+                    self.fields['str'].remove(text_field)
+
+            if "type" in self.fields['str']:
+                self.fields['str'].remove("type")
+
+        print("Smart queries will be generated on fields: %s" % self.fields)
+
+    def get_custom_n1ql_query_types(self):
+        query_types = []
+        for field_type in list(self.fields.keys()):
+            if self.fields[field_type].__len__() != 0:
+                query_types += QUERY_TYPE.N1QL_QUERY_TYPES[field_type]
+        return list(set(query_types))
+
+    def check_for_dataset_in_predicate(self, predicate, dataset):
+        for k, field_list in DATASET.FIELDS[dataset].items():
+            for field in field_list:
+                if field in predicate:
+                    return True
+        return False
+
+    def construct_flex_num_queries(self):
+            while self.iterator < self.queries_to_generate:
+                fieldname = self.get_random_value(self.query_types)
+                flex_query_predicate_list = eval("self.construct_flex_%s_query()" % fieldname)
+                if not flex_query_predicate_list:
+                    # if there are no queryable fields in a dataset for a
+                    # particular data type
+                    continue
+                for predicate in flex_query_predicate_list:
+                    for type in self.get_type_mapping(predicate):
+                        self.fts_flex_queries.append(self.replace_underscores(self.fts_flex_query_template.format(type, predicate)))
+                        self.gsi_queries.append(self.replace_underscores(self.gsi_query_template.format(type, predicate)))
+                self.iterator += len(flex_query_predicate_list)
+
+    def get_type_mapping(self, predicate):
+        if self.dataset == "default":
+            return [""]
+        if self.dataset == "all":
+            type_map_list = []
+            #commenting due to bug
+            #type_map_list = ['(type = \"emp\" or type = \"wiki\") and ', 'type = \"emp\" or type = \"wiki\" and ']
+            #bug: MB-39517
+            if "mutated" in predicate and not (predicate.count("OR") >= 1):
+                type_map_list.append('(type = "emp" or type = "wiki") and ')
+            if self.check_for_dataset_in_predicate(predicate, "emp") \
+                    and not (predicate.count("OR") >= 1 and self.check_for_dataset_in_predicate(predicate, "wiki")):
+                type_map_list.append('type = "emp" and ')
+
+            if self.check_for_dataset_in_predicate(predicate, "wiki") \
+                    and not (predicate.count("OR") >= 1 and self.check_for_dataset_in_predicate(predicate, "emp")):
+                type_map_list.append('type = "wiki" and ')
+
+            return type_map_list
+        else:
+            return ['type = \"{0}\" and '.format(self.dataset)]
+
+    def construct_flex_queries(self):
+        for fieldname in self.query_types:
+            flex_query_predicate_list = eval("self.construct_flex_%s_query()" % fieldname)
+            if not flex_query_predicate_list:
+                # if there are no queryable fields in a dataset for a
+                # particular data type
+                continue
+            for predicate in flex_query_predicate_list:
+                for type_map in self.get_type_mapping(predicate):
+                    self.fts_flex_queries.append(self.replace_underscores(self.fts_flex_query_template.format(type_map, predicate)))
+                    self.gsi_queries.append(self.replace_underscores(self.gsi_query_template.format(type_map, predicate)))
+
+    def construct_flex_term_range_query(self):
+        flex_query_predicate_list = []
+
+        fieldname = self.get_random_value(self.fields['str'])
+        str1 = eval("self.get_queryable_%s_range" % fieldname + "()")
+        str2 = eval("self.get_queryable_%s_range" % fieldname + "(min=False)")
+
+        flex_query_predicate = "( {0} > \"{1}\" and {0} < \"{2}\")".format(fieldname, str1, str2)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['str'])
+        str1 = eval("self.get_queryable_%s_range" % fieldname + "()")
+        str2 = eval("self.get_queryable_%s_range" % fieldname + "(min=False)")
+
+        flex_query_predicate = "( {0} >= \"{1}\" and {0} <= \"{2}\")".format(fieldname, str1, str2)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['str'])
+        str1 = eval("self.get_queryable_%s_range" % fieldname + "()")
+        str2 = eval("self.get_queryable_%s_range" % fieldname + "(min=False)")
+
+        flex_query_predicate = "( {0} >= \"{1}\" and {0} < \"{2}\")".format(fieldname, str1, str2)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['str'])
+        str1 = eval("self.get_queryable_%s_range" % fieldname + "()")
+        str2 = eval("self.get_queryable_%s_range" % fieldname + "(min=False)")
+
+        flex_query_predicate = "( {0} > \"{1}\" and {0} <= \"{2}\")".format(fieldname, str1, str2)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_term_equal_query(self):
+        flex_query_predicate_list = []
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['str'])
+            match_str = eval("self.get_queryable_%s()" % fieldname)
+            flex_query_predicate = "( {0} = \"{1}\")".format(fieldname, match_str)
+            flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_term_between_query(self):
+        flex_query_predicate_list = []
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['str'])
+            str1 = eval("self.get_queryable_%s_range" % fieldname + "()")
+            str2 = eval("self.get_queryable_%s_range" % fieldname + "(min=False)")
+
+            flex_query_predicate = "( {0} between \"{1}\" and \"{2}\")".format(fieldname, str1, str2)
+            flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_term_like_query(self):
+        flex_query_predicate_list = []
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['str'])
+            match_str = "(text)"
+            meta_list = ['(', '.']
+            # due to bug# MB-38690
+            while any(x in match_str for x in meta_list):
+                match_str = eval("self.get_queryable_%s()" % fieldname)
+                # due to bug# MB-38690
+                if fieldname == "email":
+                    pos = random.randint(1, len(match_str) - 5)
+                else:
+                    pos = random.randint(1, len(match_str) - 1)
+                match_str = match_str[:pos]
+            match_str = match_str + '%'
+            flex_query_predicate = "( {0} like \"{1}\")".format(fieldname, match_str)
+            flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_num_equal_query(self):
+        flex_query_predicate_list = []
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['num'])
+            match_str = eval("self.get_queryable_%s()" % fieldname)
+            flex_query_predicate = "( {0} = {1})".format(fieldname, match_str)
+            flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_num_range_query(self):
+
+        flex_query_predicate_list = []
+
+        fieldname = self.get_random_value(self.fields['num'])
+        low = eval("self.get_queryable_%s" % fieldname + "()")
+        high = low + random.randint(2, 10000)
+
+        flex_query_predicate = "( {0} > {1} and {0} < {2})".format(fieldname, low, high)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['num'])
+        low = eval("self.get_queryable_%s" % fieldname + "()")
+        high = low + random.randint(2, 10000)
+
+        flex_query_predicate = "({0} > {1} and {0} < {2})".format(fieldname, low, high)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['num'])
+        low = eval("self.get_queryable_%s" % fieldname + "()")
+        high = low + random.randint(2, 10000)
+
+        flex_query_predicate = "( {0} >= {1} and {0} <= {2})".format(fieldname, low, high)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['num'])
+        low = eval("self.get_queryable_%s" % fieldname + "()")
+        high = low + random.randint(2, 10000)
+
+        flex_query_predicate = "( {0} >= {1} and {0} < {2})".format(fieldname, low, high)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['num'])
+        low = eval("self.get_queryable_%s" % fieldname + "()")
+        high = low + random.randint(2, 10000)
+
+        flex_query_predicate = "( {0} > {1} and {0} <= {2})".format(fieldname, low, high)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_num_between_query(self):
+        flex_query_predicate_list = []
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['num'])
+            low = eval("self.get_queryable_%s" % fieldname + "()")
+            high = low + random.randint(2, 10000)
+
+            flex_query_predicate = "( {0} between {1} and {2})".format(fieldname, low, high)
+            flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_date_equal_query(self):
+
+        flex_query_predicate_list = []
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['date'])
+            match_str = eval("self.get_queryable_%s" % fieldname + "()")
+            flex_query_predicate = "( {0} = \"{1}\")".format(fieldname, match_str)
+            flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_date_range_query(self):
+
+        flex_query_predicate_list = []
+
+        fieldname = self.get_random_value(self.fields['date'])
+        start = eval("self.get_queryable_%s" % fieldname + "()")
+        end = eval("self.get_queryable_%s" % fieldname + "(now=True)")
+
+        flex_query_predicate = "( {0} > \"{1}\" and {0} < \"{2}\")".format(fieldname, start, end)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['date'])
+        start = eval("self.get_queryable_%s" % fieldname + "()")
+        end = eval("self.get_queryable_%s" % fieldname + "(now=True)")
+
+        flex_query_predicate = "( {0} > \"{1}\" and {0} < \"{2}\")".format(fieldname, start, end)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['date'])
+        start = eval("self.get_queryable_%s" % fieldname + "()")
+        end = eval("self.get_queryable_%s" % fieldname + "(now=True)")
+
+        flex_query_predicate = "( {0} >= \"{1}\" and {0} <= \"{2}\")".format(fieldname, start, end)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['date'])
+        start = eval("self.get_queryable_%s" % fieldname + "()")
+        end = eval("self.get_queryable_%s" % fieldname + "(now=True)")
+
+        flex_query_predicate = "( {0} >= \"{1}\" and {0} < \"{2}\")".format(fieldname, start, end)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        fieldname = self.get_random_value(self.fields['date'])
+        start = eval("self.get_queryable_%s" % fieldname + "()")
+        end = eval("self.get_queryable_%s" % fieldname + "(now=True)")
+
+        flex_query_predicate = "( {0} > \"{1}\" and {0} <= \"{2}\")".format(fieldname, start, end)
+        flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_date_between_query(self):
+        flex_query_predicate_list = []
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['date'])
+            start = eval("self.get_queryable_%s" % fieldname + "()")
+            end = eval("self.get_queryable_%s" % fieldname + "(now=True)")
+
+            flex_query_predicate = "( {0} between \"{1}\" and \"{2}\")".format(fieldname, start, end)
+            flex_query_predicate_list.append(flex_query_predicate)
+
+        return flex_query_predicate_list
+
+    def construct_flex_boolean_query(self):
+        flex_query_predicate_list = []
+        fieldname = self.get_random_value(self.fields['bool'])
+        flex_query_predicate_list.append("{0} = True".format(fieldname))
+        flex_query_predicate_list.append("{0} = False".format(fieldname))
+        # commenting for MB-38815
+        # flex_query_predicate_list.append("{0}".format(fieldname))
+
+        return flex_query_predicate_list
+
+    def construct_flex_array_in_query(self):
+        flex_query_predicate_list = []
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['array'])
+            match_str = self.get_term(fieldname)
+            flex_query_predicate_list.append("\"{0}\" in {1}".format(match_str, fieldname))
+
+        return flex_query_predicate_list
+
+    def construct_flex_array_any_query(self):
+        flex_query_predicate_list = []
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['array'])
+            match_str = self.get_term(fieldname)
+            flex_query_predicate_list.append("( ANY v IN {0} SATISFIES v = \"{1}\" END)".format(fieldname, match_str))
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['array'])
+            match_str = self.get_term(fieldname)
+            pos = random.randint(1, len(match_str) - 1)
+            match_str = match_str[:pos] + '%'
+            flex_query_predicate_list.append("( ANY v IN {0} SATISFIES v like \"{1}\" END)".format(fieldname, match_str))
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['array'])
+            match_str = self.get_term(fieldname)
+            flex_query_predicate_list.append("( SOME v IN {0} SATISFIES v = \"{1}\" END)".format(fieldname, match_str))
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['array'])
+            match_str = self.get_term(fieldname)
+            pos = random.randint(1, len(match_str) - 1)
+            match_str = match_str[:pos] + '%'
+            flex_query_predicate_list.append("( SOME v IN {0} SATISFIES v like \"{1}\" END)".format(fieldname, match_str))
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['array'])
+            match_str = self.get_term(fieldname)
+            flex_query_predicate_list.append("( ANY AND EVERY v IN {0} SATISFIES v = \"{1}\" END)".format(fieldname, match_str))
+
+        for x in range(5):
+            fieldname = self.get_random_value(self.fields['array'])
+            match_str = self.get_term(fieldname)
+            pos = random.randint(1, len(match_str) - 1)
+            match_str = match_str[:pos] + '%'
+            flex_query_predicate_list.append("( ANY AND EVERY v IN {0} SATISFIES v like \"{1}\" END)".format(fieldname, match_str))
+
+        return flex_query_predicate_list
+
+    def construct_flex_conjunction_disjunction_query(self):
+        """
+        Returns an fts and es query with queries to be ANDed
+        """
+        flex_query_predicate_list = []
+        for x in range(10):
+            mixed = bool(random.getrandbits(1))
+            logical_operator = "AND" if bool(random.getrandbits(1)) else "OR"
+            query_predicate = ""
+            num_of_predicates = random.randint(2,5)
+            for x in range(num_of_predicates):
+                fieldname = self.get_random_value(self.query_types)
+                while fieldname is "conjunction_disjunction": fieldname = self.get_random_value(self.query_types)
+                query_predicate_list = eval("self.construct_flex_%s_query()" % fieldname)
+                if query_predicate == "":
+                    query_predicate = self.get_random_value(query_predicate_list)
+                    continue
+                if mixed:
+                    logical_operator = "AND" if bool(random.getrandbits(1)) else "OR"
+                query_predicate = "( " + query_predicate + " " + logical_operator + " " + self.get_random_value(query_predicate_list) + ")"
+                #query_predicate = query_predicate + " " + logical_operator + " " + self.get_random_value(query_predicate_list)
+            flex_query_predicate_list.append(query_predicate)
+        return flex_query_predicate_list
+
+
 if __name__ == "__main__":
-    #query_type=['match_phrase', 'match', 'date_range', 'numeric_range', 'bool',
+    # query_type=['match_phrase', 'match', 'date_range', 'numeric_range', 'bool',
     #              'conjunction', 'disjunction', 'prefix']
-    query_type = ['term_range']
-    query_gen = FTSESQueryGenerator(100, query_type=query_type, dataset='all')
-    for index, query in enumerate(query_gen.fts_queries):
-        print json.dumps(query, ensure_ascii=False, indent=3)
-        print json.dumps(query_gen.es_queries[index], ensure_ascii=False, indent=3)
-        print "------------"
+    # query_type = ['term_range']
+    # query_gen = FTSESQueryGenerator(100, query_type=query_type, dataset='all')
+    # for index, query in enumerate(query_gen.fts_queries):
+    #    print json.dumps(query, ensure_ascii=False, indent=3)
+    #    print json.dumps(query_gen.es_queries[index], ensure_ascii=False, indent=3)
+    #    print "------------"
+
+    # fts_query, es_query = FTSESQueryGenerator.construct_geo_polygon_query([-118.77, 34.243], "regular", None)
+    # print(fts_query)
+    # print(es_query)
+
+    query_gen = FTSFlexQueryGenerator(num_queries=1, query_type="term_range",
+                                      seed=0, dataset="emp",
+                                      fields={})
+    #query_gen.check_for_array_fields(fields={'datetime': ['join_date'], 'text': ['manages_reports', 'email']})
+    print(query_gen.fts_flex_queries)
+    #print(query_gen.gsi_flex_queries)
+
+    #query_gen = FTSFlexQueryGenerator(num_queries=1, query_type=["term_range"],
+    #                                  seed=0, dataset="emp",
+    #                                  fields=None)
+
+    #print(query_gen.fts_flex_queries)
+    #print(query_gen.gsi_flex_queries)

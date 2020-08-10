@@ -49,7 +49,7 @@ if [[ -n $3 ]] && [[ $3 == 0 ]] ; then
 else
     test_params=""
 fi
-# this is specifically added to handle the gsi_type param for 2i integration test
+# this is specifically added to handle the gsi_type param for gsi integration test
 if [ ! -z "$5" -a "$5" != " " ]; then
     extra_test_params=" -p $5"
 fi
@@ -79,7 +79,7 @@ fi
 COUCHBASE_NUM_VBUCKETS=64 python ./cluster_run --nodes=$servers_count &> $wd/cluster_run.log &
 pid=$!
 popd
-python ./testrunner.py $conf -i $ini $test_params $extra_test_params 2>&1 -p makefile=True | tee make_test.log
+python3 ./testrunner.py $conf -i $ini $test_params $extra_test_params 2>&1 -p makefile=True | tee make_test.log
 
 kill $pid
 wait

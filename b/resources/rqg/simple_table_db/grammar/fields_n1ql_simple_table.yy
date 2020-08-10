@@ -2,16 +2,13 @@ query:
  	select ;
 
 select:
-	SELECT select_from FROM BUCKET_NAME WHERE complex_condition ORDER BY field |
-	SELECT select_from FROM BUCKET_NAME WHERE complex_condition  ;
+	SELECT select_from FROM BUCKET_NAME WHERE complex_condition;
 
 create_index:
 	CREATE INDEX INDEX_NAME ON BUCKET_NAME(FIELD_LIST) WHERE complex_condition |
 	CREATE INDEX INDEX_NAME ON BUCKET_NAME(complex_condition) |
 	CREATE INDEX INDEX_NAME ON BUCKET_NAME(USER_FIELD_LIST);
 
-direction:
-	ASC | DESC;
 
 select_from:
 	*  | field_list | DISTINCT(field);
@@ -160,8 +157,8 @@ string_values:
 # BOOLEAN RULES
 
 bool_condition:
-	bool_field |
-	NOT (bool_field) |
+	bool_field=true |
+	NOT (bool_field=true) |
 	bool_equals_condition |
 	bool_not_equals_condition ;
 

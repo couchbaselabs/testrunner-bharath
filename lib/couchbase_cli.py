@@ -2,7 +2,7 @@ from remote.remote_util import RemoteMachineShellConnection
 
 
 class CouchbaseCLI:
-    def __init__(self, server, username, password, cb_version=None):
+    def __init__(self, server, username=None, password=None, cb_version=None):
         self.server = server
         self.hostname = "%s:%s" % (server.ip, server.port)
         self.username = username
@@ -173,12 +173,79 @@ class CouchbaseCLI:
         return stdout, stderr, self._was_success(stdout,
                                                  "Log collection stopped")
 
+    def create_scope(self, bucket="default", scope="scope0"):
+        remote_client = RemoteMachineShellConnection(self.server)
+        options = f" --bucket {str(bucket)} --create-scope {str(scope)}"
+        stdout, stderr = remote_client.execute_couchbase_cli("collection-manage", self.hostname,
+                                                             options)
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout)
+
+    def create_collection(self, bucket="default", scope="scope0", collection="mycollection0"):
+        remote_client = RemoteMachineShellConnection(self.server)
+        options = f" --bucket {str(bucket)} --create-collection {str(scope)}.{str(collection)}"
+        stdout, stderr = remote_client.execute_couchbase_cli("collection-manage", self.hostname,
+                                                             options)
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout)
+
+    def delete_collection(self, bucket="default", scope='_default', collection='_default'):
+        remote_client = RemoteMachineShellConnection(self.server)
+        options = f" --bucket {str(bucket)} --drop-collection {str(scope)}.{str(collection)}"
+        stdout, stderr = remote_client.execute_couchbase_cli("collection-manage", self.hostname,
+                                                             options)
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout)
+
+    # Custom scope should be passed as default scope can not be deleted
+    def delete_scope(self, scope, bucket="default"):
+        remote_client = RemoteMachineShellConnection(self.server)
+        options = f" --bucket {str(bucket)} --drop-scope {str(scope)}"
+        stdout, stderr = remote_client.execute_couchbase_cli("collection-manage", self.hostname,
+                                                             options)
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout)
+
+    def get_bucket_scopes(self, bucket):
+        remote_client = RemoteMachineShellConnection(self.server)
+        options = f" --bucket {str(bucket)} --list-scopes"
+        stdout, stderr = remote_client.execute_couchbase_cli("collection-manage", self.hostname,
+                                                             options)
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout)
+
+    def get_bucket_collections(self, bucket):
+        remote_client = RemoteMachineShellConnection(self.server)
+        options = " --bucket " + str(bucket)
+        options += " --list-collections"
+        stdout, stderr = remote_client.execute_couchbase_cli("collection-manage", self.hostname,
+                                                             options)
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout)
+
+    def get_scope_collections(self, bucket, scope):
+        remote_client = RemoteMachineShellConnection(self.server)
+        options = " --bucket " + str(bucket)
+        options += " --list-collections " + str(scope)
+        stdout, stderr = remote_client.execute_couchbase_cli("collection-manage", self.hostname,
+                                                             options)
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout)
+
+    #Temporarily need to enable DP mode for collections
+    def enable_dp(self):
+        remote_client = RemoteMachineShellConnection(self.server)
+        stdout, stderr = remote_client.execute_couchbase_cli("enable-developer-preview", self.hostname,
+                                                     "--enable", additional_input="yes")
+        remote_client.disconnect()
+        return stdout, stderr, self._was_success(stdout, "Developer mode enabled")
+
     def failover(self, failover_servers, force):
         options = self._get_default_options()
         if failover_servers:
             options += " --server-failover " + str(failover_servers)
         if force:
-            options += " --force"
+            options += " --hard --force"
 
         remote_client = RemoteMachineShellConnection(self.server)
         stdout, stderr = remote_client.couchbase_cli("failover", self.hostname,
@@ -308,7 +375,7 @@ class CouchbaseCLI:
     def setting_audit(self, enabled, log_path, rotate_interval):
         options = self._get_default_options()
         if enabled is not None:
-            options += " --audit-enabled " + str(enabled)
+            options += " --set --audit-enabled " + str(enabled)
         if log_path is not None:
             options += " --audit-log-path " + str(log_path)
         if rotate_interval is not None:
@@ -515,7 +582,7 @@ class CouchbaseCLI:
     def setting_notification(self, enable):
         options = self._get_default_options()
         if enable is not None:
-            options += " --enable-notification " + str(enable)
+            options += " --enable-notifications " + str(enable)
 
         remote_client = RemoteMachineShellConnection(self.server)
         stdout, stderr = remote_client.couchbase_cli("setting-notification",
@@ -606,19 +673,20 @@ class CouchbaseCLI:
                 return False
         return True
 
-    def _was_success(self, stdout, message):
+    def _was_success(self, stdout, message=None):
         """Inspects each line of the command output and checks to see if
         the command succeeded
-
         Options:
         stdout - A list of output lines from stdout
         message - The success message
-
         Returns a boolean indicating whether or not the success message was
         found in the output
         """
-
         for line in stdout:
-            if line == "SUCCESS: " + message:
-                return True
+            if message:
+                if line == "SUCCESS: " + message:
+                    return True
+            else:
+                if line.startswith("SUCCESS:"):
+                    return True
         return False

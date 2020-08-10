@@ -1,13 +1,13 @@
 import copy
 
+from membase.helper.cluster_helper import ClusterOperationHelper
 from couchbase_helper.documentgenerator import BlobGenerator
+from .xdcrnewbasetests import XDCRNewBaseTest
+from .xdcrnewbasetests import NodeHelper
+from .xdcrnewbasetests import Utility, BUCKET_NAME, OPS
+from remote.remote_util import RemoteMachineShellConnection
 from lib.memcached.helper.data_helper import MemcachedClientHelper
 from membase.api.rest_client import RestConnection
-from membase.helper.cluster_helper import ClusterOperationHelper
-from remote.remote_util import RemoteMachineShellConnection
-from xdcrnewbasetests import NodeHelper
-from xdcrnewbasetests import Utility, BUCKET_NAME, OPS
-from xdcrnewbasetests import XDCRNewBaseTest
 
 
 # Assumption that at least 2 nodes on every cluster
@@ -91,7 +91,7 @@ class bidirectional(XDCRNewBaseTest):
         self.sleep(self._wait_timeout)
         NodeHelper.wait_warmup_completed(warmupnodes)
         self.async_perform_update_delete()
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
         self.verify_results()
 
     def load_with_async_ops_with_warmup_master(self):
@@ -105,7 +105,7 @@ class bidirectional(XDCRNewBaseTest):
         self.sleep(self._wait_timeout)
         NodeHelper.wait_warmup_completed(warmupnodes)
         self.async_perform_update_delete()
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
         self.verify_results()
 
     def load_with_async_ops_and_joint_sets_with_warmup(self):
@@ -122,7 +122,7 @@ class bidirectional(XDCRNewBaseTest):
 
         self.sleep(self._wait_timeout)
         self.async_perform_update_delete()
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
 
         NodeHelper.wait_warmup_completed(warmupnodes)
 
@@ -138,7 +138,7 @@ class bidirectional(XDCRNewBaseTest):
 
         self.sleep(self._wait_timeout)
         self.async_perform_update_delete()
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
 
         NodeHelper.wait_warmup_completed(warmupnodes)
 
@@ -152,7 +152,7 @@ class bidirectional(XDCRNewBaseTest):
         if "C2" in self._failover:
             self.dest_cluster.failover_and_rebalance_nodes()
 
-        self.sleep(self._wait_timeout / 6)
+        self.sleep(self._wait_timeout // 6)
         self.perform_update_delete()
         self.sleep(300)
 
@@ -181,7 +181,7 @@ class bidirectional(XDCRNewBaseTest):
         if "C2" in self._failover:
             self.dest_cluster.failover_and_rebalance_master()
 
-        self.sleep(self._wait_timeout / 6)
+        self.sleep(self._wait_timeout // 6)
         self.perform_update_delete()
 
         self.verify_results()
@@ -286,7 +286,7 @@ class bidirectional(XDCRNewBaseTest):
                 for view in views:
                     self.src_cluster.query_view(prefix + ddoc_name, view.name, query)
                     self.dest_cluster.query_view(prefix + ddoc_name, view.name, query)
-                if set([task.state for task in tasks]) != set(["FINISHED"]):
+                if {task.state for task in tasks} != {"FINISHED"}:
                     continue
                 else:
                     if self._wait_for_expiration:
@@ -406,7 +406,7 @@ class bidirectional(XDCRNewBaseTest):
                                                         self.src_master.rest_username,
                                                         self.src_master.rest_password)
                     output, _ = self.shell.execute_command(cmd)
-                self.assertNotEquals(len(output), 0, "Full disk warning not generated as expected in %s" % node.ip)
+                self.assertNotEqual(len(output), 0, "Full disk warning not generated as expected in %s" % node.ip)
                 self.log.info("Full disk warning generated as expected in %s" % node.ip)
 
                 self.shell.delete_files(zip_file)
@@ -484,14 +484,14 @@ class bidirectional(XDCRNewBaseTest):
         self.assertTrue(self.dest_cluster.wait_for_outbound_mutations(),
                         "Mutations in target cluster not replicated to source after rollback")
 
-        count = NodeHelper.check_goxdcr_log(
+        _, count = NodeHelper.check_goxdcr_log(
                         src_nodes[0],
                         "Received rollback from DCP stream",
                         goxdcr_log)
         self.assertGreater(count, 0, "rollback did not happen as expected")
         self.log.info("rollback happened as expected")
 
-        count = NodeHelper.check_goxdcr_log(
+        _, count = NodeHelper.check_goxdcr_log(
                         dest_nodes[0],
                         "Received rollback from DCP stream",
                         goxdcr_log)
@@ -507,8 +507,8 @@ class bidirectional(XDCRNewBaseTest):
         self.setup_xdcr()
         self.sleep(60, "wait before checking logs")
         for node in [self.src_cluster.get_master_node()]+[self.dest_cluster.get_master_node()]:
-            count = NodeHelper.check_goxdcr_log(node,
-                        "HttpAuthMech=ScramSha for remote cluster reference remote_cluster")
+            _, count = NodeHelper.check_goxdcr_log(node,
+                        "HttpAuthMech=ScramSha for remote cluster reference remoteCluster", timeout=60)
             if count <= 0:
                 self.fail("Node {0} does not use SCRAM-SHA authentication".format(node.ip))
             else:
@@ -520,15 +520,15 @@ class bidirectional(XDCRNewBaseTest):
         Start with ordinary replication, then switch to use scram_sha_auth
         Search for success log stmtsS
         """
-        old_count = NodeHelper.check_goxdcr_log(self.src_cluster.get_master_node(),
-                                                "HttpAuthMech=ScramSha for remote cluster reference remote_cluster")
+        _, old_count = NodeHelper.check_goxdcr_log(self.src_cluster.get_master_node(),
+                                                "HttpAuthMech=ScramSha for remote cluster reference remoteCluster", timeout=60)
         self.setup_xdcr()
         # modify remote cluster ref to use scramsha
         for remote_cluster in self.src_cluster.get_remote_clusters()+self.dest_cluster.get_remote_clusters():
             remote_cluster.use_scram_sha_auth()
         self.sleep(60, "wait before checking the logs for using scram-sha")
         for node in [self.src_cluster.get_master_node()]+[self.dest_cluster.get_master_node()]:
-            count = NodeHelper.check_goxdcr_log(node, "HttpAuthMech=ScramSha for remote cluster reference remote_cluster")
+            _, count = NodeHelper.check_goxdcr_log(node, "HttpAuthMech=ScramSha for remote cluster reference remoteCluster", timeout=60)
             if count <= old_count:
                 self.fail("Node {0} does not use SCRAM-SHA authentication".format(node.ip))
             else:

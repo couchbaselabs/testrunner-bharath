@@ -1,12 +1,20 @@
-import socket
+import json
 import time
-import urllib
-
+from threading import Thread, Event
 from basetestcase import BaseTestCase
-from clitest.cli_base import CliBaseTest
+from couchbase_helper.document import DesignDocument, View
+from couchbase_helper.documentgenerator import DocumentGenerator
 from membase.api.rest_client import RestConnection
+from membase.helper.rebalance_helper import RebalanceHelper
+from membase.api.exception import ReadDocumentException
+from membase.api.exception import DesignDocCreationException
+from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
+import subprocess
 from security.auditmain import audit
+from clitest.cli_base import CliBaseTest
+import socket
+import urllib.request, urllib.parse, urllib.error
 
 
 class auditcheckconfig(BaseTestCase):
@@ -69,7 +77,7 @@ class auditcheckconfig(BaseTestCase):
                                     'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", \
                                     "flush_enabled":1, "num_threads":3, \
                                     "ip":self.ipAddress, "port":57457, 'sessionid':'' }
-        rest.create_bucket(expectedResults['name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+        rest.create_bucket(expectedResults['name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
                                     '11211', 'membase', 0, expectedResults['num_threads'], expectedResults['flush_enabled'], 'valueOnly')
         return expectedResults
 
@@ -137,7 +145,7 @@ class auditcheckconfig(BaseTestCase):
                                "descriptors_path":self.changePathWindows(auditIns.getAuditConfigElement('descriptors_path')),
                                "log_path":self.changePathWindows((auditIns.getAuditLogPath())[:-1]), "source":"internal",
                                "user":"couchbase", "rotate_interval":86400, "version":2, 'hostname':self.getHostName(self.master),
-                               "uuid":"64333612"}
+                               "uuid":"111731321"}
             self.checkConfig(self.AUDITCONFIGRELOAD, self.master, expectedResults)
 
     #Test error on setting of Invalid Log file path
@@ -326,7 +334,7 @@ class auditcheckconfig(BaseTestCase):
         intervalSec = self.input.param("intervalSec", None)
         nodes_init = self.input.param("nodes_init", 2)
         auditIns = audit(host=self.master)
-	auditIns.setAuditEnable('true')
+        auditIns.setAuditEnable('true')
         originalInt = auditIns.getAuditRotateInterval()
         auditIns.setAuditRotateInterval(intervalSec)
         firstEventTime = []
@@ -418,7 +426,7 @@ class auditcheckconfig(BaseTestCase):
                                        'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", \
                                         "flush_enabled":False, "num_threads":3, "source":source, \
                                        "user":user, "ip":self.ipAddress, "port":57457, 'sessionid':'' }
-            rest.create_bucket(expectedResults['name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+            rest.create_bucket(expectedResults['name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
                                        '11211', 'membase', 0, expectedResults['num_threads'], expectedResults['flush_enabled'], 'valueOnly')
 
             #Check on Events
@@ -521,7 +529,7 @@ class auditCLITest(CliBaseTest):
                 rest = RestConnection(self.master)
                 self.setupLDAPSettings(rest)
                 #rest.ldapUserRestOperation(True, [[self.ldapUser]], exclude=None)
-                self.set_user_role(rest,self.ldapUser)
+                self.set_user_role(rest, self.ldapUser)
 
     def tearDown(self):
         super(auditCLITest, self).tearDown()
@@ -530,9 +538,9 @@ class auditCLITest(CliBaseTest):
         payload = "name=" + username + "&roles=" + user_role
         content = rest.set_user_roles(user_id=username, payload=payload)
 
-    def setupLDAPSettings (self,rest):
+    def setupLDAPSettings (self, rest):
         api = rest.baseUrl + 'settings/saslauthdAuth'
-        params = urllib.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
+        params = urllib.parse.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
         status, content, header = rest._http_request(api, 'POST', params)
         return status, content, header
 
@@ -556,7 +564,7 @@ class auditCLITest(CliBaseTest):
         tempEnable = auditIns.getAuditStatus()
         try:
             cli_command = 'setting-audit'
-            options = "--audit-enable=0"
+            options = "--set --audit-enabled=0"
             output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
                         options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
             tempEnable = auditIns.getAuditStatus()
@@ -565,7 +573,7 @@ class auditCLITest(CliBaseTest):
                 log_path = audit.WINLOGFILEPATH
             else:
                 log_path = audit.LINLOGFILEPATH
-            options = "--audit-enable=1 --audit-log-path=" + log_path
+            options = "--set --audit-enabled=1 --audit-log-path=" + log_path
             output, error = remote_client.execute_couchbase_cli(cli_command=cli_command, \
                         options=options, cluster_host="localhost", user=self.ldapUser, password=self.ldapPass)
             tempEnable = auditIns.getAuditStatus()

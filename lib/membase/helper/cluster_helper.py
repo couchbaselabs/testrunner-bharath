@@ -1,16 +1,18 @@
-import Queue
-import time
-import traceback
-from threading import Thread
-
-import logger
-import memcacheConstants
-import testconstants
-from mc_bin_client import MemcachedClient
 from membase.api.rest_client import RestConnection, RestHelper
-from membase.helper.rebalance_helper import RebalanceHelper
 from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection
+from mc_bin_client import MemcachedClient, MemcachedError
+from membase.api.exception import ServerAlreadyJoinedException
+from membase.helper.rebalance_helper import RebalanceHelper
+from TestInput import TestInputSingleton
+import memcacheConstants
+
+import logger
+import testconstants
+import time
+import queue
+from threading import Thread
+import traceback
 
 
 class ClusterOperationHelper(object):
@@ -70,22 +72,29 @@ class ClusterOperationHelper(object):
 
     #wait_if_warmup=True is useful in tearDown method for (auto)failover tests
     @staticmethod
-    def wait_for_ns_servers_or_assert(servers, testcase, wait_time=360, wait_if_warmup=False):
+    def wait_for_ns_servers_or_assert(servers, testcase, wait_time=360,
+                                      wait_if_warmup=False, debug=True):
         for server in servers:
             rest = RestConnection(server)
             log = logger.Logger.get_logger()
-            log.info("waiting for ns_server @ {0}:{1}".format(server.ip, server.port))
+            if debug:
+                log.info("waiting for ns_server @ {0}:{1}"
+                         .format(server.ip, server.port))
             if RestHelper(rest).is_ns_server_running(wait_time):
-                log.info("ns_server @ {0}:{1} is running".format(server.ip, server.port))
+                if debug:
+                    log.info("ns_server @ {0}:{1} is running"
+                             .format(server.ip, server.port))
+
             elif wait_if_warmup:
                 # wait when warmup completed
                 buckets = rest.get_buckets()
                 for bucket in buckets:
-                    testcase.assertTrue(ClusterOperationHelper._wait_warmup_completed(testcase, \
+                    testcase.assertTrue(ClusterOperationHelper._wait_warmup_completed(testcase,\
                                 [server], bucket.name, wait_time), "warmup was not completed!")
 
             else:
-                testcase.fail("ns_server {0} is not running in {1} sec".format(server.ip, wait_time))
+                testcase.fail("ns_server {0} is not running in {1} sec"
+                                         .format(server.ip, wait_time))
 
     # returns true if warmup is completed in wait_time sec
     # otherwise return false
@@ -161,7 +170,7 @@ class ClusterOperationHelper(object):
     def persistence_verification(servers, bucket, timeout_in_seconds=1260):
         log = logger.Logger.get_logger()
         verification_threads = []
-        queue = Queue.Queue()
+        queue = queue.Queue()
         rest = RestConnection(servers[0])
         nodes = rest.get_nodes()
         nodes_ip = []
@@ -245,7 +254,7 @@ class ClusterOperationHelper(object):
         nodes = rest.node_statuses()
         master_id = rest.get_nodes_self().id
         for node in nodes:
-            if int(node.port) in xrange(9091, 9991):
+            if int(node.port) in range(9091, 9991):
                 rest.eject_node(node)
                 nodes.remove(node)
 
@@ -257,11 +266,22 @@ class ClusterOperationHelper(object):
                                           ejectedNodes=[node.id for node in nodes if node.id != master_id],
                                           wait_for_rebalance=wait_for_rebalance)
             success_cleaned = []
+            alt_addr = TestInputSingleton.input.param("alt_addr", False)
             for removed in [node for node in nodes if (node.id != master_id)]:
                 removed.rest_password = servers[0].rest_password
                 removed.rest_username = servers[0].rest_username
                 try:
-                    rest = RestConnection(removed)
+                    if alt_addr:
+                        for server in servers:
+                            shell = RemoteMachineShellConnection(server)
+                            internal_IP = shell.get_ip_address()
+                            internal_IP = [x for x in internal_IP if x != "127.0.0.1"]
+                            shell.disconnect()
+                            if internal_IP == removed.ip:
+                                rest = RestConnection(server)
+                                break
+                    else:
+                        rest = RestConnection(removed)
                 except Exception as ex:
                     log.error("can't create rest connection after rebalance out for ejected nodes,\
                         will retry after 10 seconds according to MB-8430: {0} ".format(ex))
@@ -277,17 +297,29 @@ class ClusterOperationHelper(object):
                 if time.time() - start > 10:
                     log.error("'pools' on node {0}:{1} - {2}".format(
                            removed.ip, removed.port, rest.get_pools_info()["pools"]))
-            for node in set([node for node in nodes if (node.id != master_id)]) - set(success_cleaned):
+            for node in {node for node in nodes if (node.id != master_id)} - set(success_cleaned):
                 log.error("node {0}:{1} was not cleaned after removing from cluster".format(
                            removed.ip, removed.port))
                 try:
-                    rest = RestConnection(node)
-                    rest.force_eject_node()
+                    if alt_addr:
+                        for server in servers:
+                            shell = RemoteMachineShellConnection(server)
+                            internal_IP = shell.get_ip_address()
+                            internal_IP = [x for x in internal_IP if x != "127.0.0.1"]
+                            shell.disconnect()
+                            if internal_IP == removed.ip:
+                                rest = RestConnection(server)
+                                break
+                    else:
+                        rest = RestConnection(node)
+                    if not alt_addr:
+                        rest.force_eject_node()
                 except Exception as ex:
                     log.error("force_eject_node {0}:{1} failed: {2}".format(removed.ip, removed.port, ex))
-            if len(set([node for node in nodes if (node.id != master_id)])\
+            if len({node for node in nodes if (node.id != master_id)}\
                     - set(success_cleaned)) != 0:
-                raise Exception("not all ejected nodes were cleaned successfully")
+                if not alt_addr:
+                    raise Exception("not all ejected nodes were cleaned successfully")
 
             log.info("removed all the nodes from cluster associated with {0} ? {1}".format(servers[0], \
                     [(node.id, node.port) for node in nodes if (node.id != master_id)]))
@@ -412,9 +444,10 @@ class ClusterOperationHelper(object):
                 product = "couchbase"
 
             sync_type = sync_threads and "S" or "A"
-
-            command = "sed -i 's/+[A,S] .*/+%s %s \\\/g' /opt/%s/bin/%s-server" % \
-                 (sync_type, num_threads, product, product)
+            command = r"sed -i 's/+[A,S] .*/+[0] [1] \\\/g' /opt/[2]/bin/[2]-server"\
+                .format(sync_type, num_threads, product)
+            # command = "sed -i 's/+[A,S] .*/+%s %s \\\/g' /opt/%s/bin/%s-server" % \
+            #      (sync_type, num_threads, product, product)
             o, r = sh.execute_command(command)
             sh.log_command_output(o, r)
             msg = "modified erlang +%s to %s for server %s"
@@ -434,8 +467,7 @@ class ClusterOperationHelper(object):
             product = "membase"
             if sh.is_couchbase_installed():
                 product = "couchbase"
-            command = "sed -i 's/S\+ 128:128/S %s/' /opt/%s/bin/%s-server"\
-                      % (value, product, product)
+            command = r"sed -i 's/S\+ 128:128/S [0]/' /opt/[1]/bin/[1]-server".format(value, product)
             o, r = sh.execute_command(command)
             sh.log_command_output(o, r)
             log.info("modified erlang +A to %s for server %s"

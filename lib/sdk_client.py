@@ -3,30 +3,29 @@
 Python based SDK client interface
 
 """
-import json
+import crc32
 import time
-
-import couchbase
 from couchbase import FMT_AUTO
+from memcached.helper.old_kvstore import ClientKeyValueStore
 from couchbase.bucket import Bucket as CouchbaseBucket
-from couchbase.cluster import Cluster, PasswordAuthenticator
+from couchbase.cluster import Cluster, ClassicAuthenticator, PasswordAuthenticator
 from couchbase.exceptions import CouchbaseError, BucketNotFoundError, AuthError
+from mc_bin_client import MemcachedError
 from couchbase.n1ql import N1QLQuery, N1QLRequest
 
-import crc32
-from mc_bin_client import MemcachedError
-from memcached.helper.old_kvstore import ClientKeyValueStore
+import couchbase
+import json
 
 
 class SDKClient(object):
     """Python SDK Client Implementation for testrunner - master branch Implementation"""
 
-    def __init__(self, bucket, hosts = ["localhost"] , scheme = "couchbase",
-                 ssl_path = None, uhm_options = None, password=None,
-                 quiet=True, certpath = None, transcoder = None, ipv6=False, compression=True):
+    def __init__(self, bucket, hosts=["localhost"], scheme="couchbase",
+                 ssl_path=None, uhm_options=None, password=None,
+                 quiet=True, certpath=None, transcoder=None, ipv6=False, compression=True):
         self.connection_string = \
-            self._createString(scheme = scheme, bucket = bucket, hosts = hosts,
-                               certpath = certpath, uhm_options = uhm_options, ipv6=ipv6, compression=compression)
+            self._createString(scheme=scheme, bucket=bucket, hosts=hosts,
+                               certpath=certpath, uhm_options=uhm_options, ipv6=ipv6, compression=compression)
         self.bucket = bucket
         self.password = password
         self.quiet = quiet
@@ -35,9 +34,9 @@ class SDKClient(object):
         self._createConn()
         couchbase.set_json_converters(json.dumps, json.loads)
 
-    def _createString(self, scheme ="couchbase", bucket = None, hosts = ["localhost"], certpath = None,
-                      uhm_options = "", ipv6=False, compression=True):
-        connection_string = "{0}://{1}".format(scheme, ", ".join(hosts).replace(" ",""))
+    def _createString(self, scheme="couchbase", bucket=None, hosts=["localhost"], certpath=None,
+                      uhm_options="", ipv6=False, compression=True):
+        connection_string = "{0}://{1}".format(scheme, ", ".join(hosts).replace(" ", ""))
         # if bucket != None:
         #     connection_string = "{0}/{1}".format(connection_string, bucket)
         if uhm_options != None:
@@ -70,7 +69,7 @@ class SDKClient(object):
             cluster.authenticate(PasswordAuthenticator(self.bucket, 'password'))
             self.cb = cluster.open_bucket(self.bucket)
         except BucketNotFoundError:
-             raise
+            raise
         except AuthError:
             # Try using default user created by the tests, if any, in case there is no user with bucket name in the
             # cluster.
@@ -88,39 +87,48 @@ class SDKClient(object):
     def close(self):
         self.cb._close()
 
-    def counter_in(self, key, path, delta, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def counter_in(self, key, path, delta, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0,
+                   collection=None):
         try:
-            return self.cb.counter_in(key, path, delta, create_parents= create_parents, cas= cas, ttl= ttl, persist_to= persist_to, replicate_to= replicate_to)
+            return self.cb.counter_in(key, path, delta, create_parents=create_parents, cas=cas, ttl=ttl,
+                                      persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def arrayappend_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def arrayappend_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0,
+                       collection=None):
         try:
-            return self.cb.arrayappend_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl, persist_to=persist_to, replicate_to=replicate_to)
+            return self.cb.arrayappend_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl,
+                                          persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def arrayprepend_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def arrayprepend_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0,
+                        collection=None):
         try:
-            return self.cb.arrayprepend_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl, persist_to=persist_to, replicate_to=replicate_to)
+            return self.cb.arrayprepend_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl,
+                                           persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def arrayaddunique_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def arrayaddunique_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0,
+                          collection=None):
         try:
-            return self.cb.addunique_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl, persist_to=persist_to, replicate_to=replicate_to)
+            return self.cb.addunique_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl,
+                                        persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def arrayinsert_in(self, key, path, value, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def arrayinsert_in(self, key, path, value, cas=0, ttl=0, persist_to=0, replicate_to=0, collection=None):
         try:
-            return self.cb.arrayinsert_in(key, path, value, cas=cas, ttl=ttl, persist_to=persist_to, replicate_to=replicate_to)
+            return self.cb.arrayinsert_in(key, path, value, cas=cas, ttl=ttl, persist_to=persist_to,
+                                          replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def remove_in(self, key, path,  cas=0, ttl=0):
+    def remove_in(self, key, path, cas=0, ttl=0, collection=None):
         try:
-            self.cb.remove_in(key, path, cas = cas, ttl = ttl)
+            self.cb.remove_in(key, path, cas=cas, ttl=ttl)
         except CouchbaseError as e:
             raise
 
@@ -136,38 +144,43 @@ class SDKClient(object):
         except CouchbaseError as e:
             raise
 
-    def get_in(self, key, path):
+    def get_in(self, key, path, collection=None):
         try:
             result = self.cb.get_in(key, path)
             return self.__translate_get(result)
         except CouchbaseError as e:
             raise
 
-    def exists_in(self, key, path):
+    def exists_in(self, key, path, collection=None):
         try:
             self.cb.exists_in(key, path)
         except CouchbaseError as e:
             raise
 
-    def replace_in(self, key, path, value, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def replace_in(self, key, path, value, cas=0, ttl=0, persist_to=0, replicate_to=0, collection=None):
         try:
-            return self.cb.replace_in(key, path, value, cas=cas, ttl=ttl, persist_to=persist_to, replicate_to=replicate_to)
+            return self.cb.replace_in(key, path, value, cas=cas, ttl=ttl, persist_to=persist_to,
+                                      replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def insert_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def insert_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0,
+                  collection=None):
         try:
-            return self.cb.insert_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl, persist_to=persist_to, replicate_to=replicate_to)
+            return self.cb.insert_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl,
+                                     persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def upsert_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0):
+    def upsert_in(self, key, path, value, create_parents=True, cas=0, ttl=0, persist_to=0, replicate_to=0,
+                  collection=None):
         try:
-            return self.cb.upsert_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl, persist_to=persist_to, replicate_to=replicate_to)
+            return self.cb.upsert_in(key, path, value, create_parents=create_parents, cas=cas, ttl=ttl,
+                                     persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
             raise
 
-    def append(self, key, value, cas=0, format=None, persist_to=0, replicate_to=0):
+    def append(self, key, value, cas=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.append(key, value, cas=cas, format=format, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -177,7 +190,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def append_multi(self, keys, cas=0, format=None, persist_to=0, replicate_to=0):
+    def append_multi(self, keys, cas=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.append_multi(keys, cas=cas, format=format, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -187,7 +200,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def prepend(self, key, value, cas=0, format=None, persist_to=0, replicate_to=0):
+    def prepend(self, key, value, cas=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.prepend(key, value, cas=cas, format=format, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -196,7 +209,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def prepend_multi(self, keys, cas=0, format=None, persist_to=0, replicate_to=0):
+    def prepend_multi(self, keys, cas=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.prepend_multi(keys, cas=cas, format=format, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -206,35 +219,37 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def replace(self, key, value, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0):
+    def replace(self, key, value, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
-           self.cb.replace( key, value, cas=cas, ttl=ttl, format=format,
-                                    persist_to=persist_to, replicate_to=replicate_to)
+            self.cb.replace(key, value, cas=cas, ttl=ttl, format=format,
+                            persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                self.cb.replace( key, value, cas=cas, ttl=ttl, format=format,
-                                    persist_to=persist_to, replicate_to=replicate_to)
+                self.cb.replace(key, value, cas=cas, ttl=ttl, format=format,
+                                persist_to=persist_to, replicate_to=replicate_to)
             except CouchbaseError as e:
                 raise
 
-    def replace_multi(self, keys, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0):
+    def replace_multi(self, keys, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
-            self.cb.replace_multi( keys, cas=cas, ttl=ttl, format=format, persist_to=persist_to, replicate_to=replicate_to)
+            self.cb.replace_multi(keys, cas=cas, ttl=ttl, format=format, persist_to=persist_to,
+                                  replicate_to=replicate_to)
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                self.cb.replace_multi( keys, cas=cas, ttl=ttl, format=format, persist_to=persist_to, replicate_to=replicate_to)
+                self.cb.replace_multi(keys, cas=cas, ttl=ttl, format=format, persist_to=persist_to,
+                                      replicate_to=replicate_to)
             except CouchbaseError as e:
                 raise
 
-    def cas(self, key, value, cas=0, ttl=0, format=None):
-        return self.cb.replace(key, value, cas=cas,format=format)
+    def cas(self, key, value, cas=0, ttl=0, format=None, collection=None):
+        return self.cb.replace(key, value, cas=cas, format=format)
 
-    def delete(self,key, cas=0, quiet=True, persist_to=0, replicate_to=0):
+    def delete(self, key, cas=0, quiet=True, persist_to=0, replicate_to=0, collection=None):
         self.remove(key, cas=cas, quiet=quiet, persist_to=persist_to, replicate_to=replicate_to)
 
-    def remove(self,key, cas=0, quiet=True, persist_to=0, replicate_to=0):
+    def remove(self, key, cas=0, quiet=True, persist_to=0, replicate_to=0, collection=None):
         try:
             return self.cb.remove(key, cas=cas, quiet=quiet, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -244,10 +259,10 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def delete(self, keys, quiet=True, persist_to=0, replicate_to=0):
+    def delete(self, keys, quiet=True, persist_to=0, replicate_to=0, collection=None):
         return self.remove(self, keys, quiet=quiet, persist_to=persist_to, replicate_to=replicate_to)
 
-    def remove_multi(self, keys, quiet=True, persist_to=0, replicate_to=0):
+    def remove_multi(self, keys, quiet=True, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.remove_multi(keys, quiet=quiet, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -257,10 +272,11 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def set(self, key, value, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0):
-        return self.upsert(key, value, cas=cas, ttl=ttl, format=format, persist_to=persist_to, replicate_to=replicate_to)
+    def set(self, key, value, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
+        return self.upsert(key, value, cas=cas, ttl=ttl, format=format, persist_to=persist_to,
+                           replicate_to=replicate_to)
 
-    def upsert(self, key, value, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0):
+    def upsert(self, key, value, cas=0, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             return self.cb.upsert(key, value, cas, ttl, format, persist_to, replicate_to)
         except CouchbaseError as e:
@@ -270,10 +286,10 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def set_multi(self, keys, ttl=0, format=None, persist_to=0, replicate_to=0):
+    def set_multi(self, keys, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
         return self.upsert_multi(keys, ttl=ttl, format=format, persist_to=persist_to, replicate_to=replicate_to)
 
-    def upsert_multi(self, keys, ttl=0, format=None, persist_to=0, replicate_to=0):
+    def upsert_multi(self, keys, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.upsert_multi(keys, ttl=ttl, format=format, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -283,7 +299,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def insert(self, key, value, ttl=0, format=None, persist_to=0, replicate_to=0):
+    def insert(self, key, value, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.insert(key, value, ttl=ttl, format=format, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -293,7 +309,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def insert_multi(self, keys,  ttl=0, format=None, persist_to=0, replicate_to=0):
+    def insert_multi(self, keys, ttl=0, format=None, persist_to=0, replicate_to=0, collection=None):
         try:
             self.cb.insert_multi(keys, ttl=ttl, format=format, persist_to=persist_to, replicate_to=replicate_to)
         except CouchbaseError as e:
@@ -303,7 +319,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def touch(self, key, ttl = 0):
+    def touch(self, key, ttl=0, collection=None):
         try:
             self.cb.touch(key, ttl=ttl)
         except CouchbaseError as e:
@@ -313,7 +329,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def touch_multi(self, keys, ttl = 0):
+    def touch_multi(self, keys, ttl=0, collection=None):
         try:
             self.cb.touch_multi(keys, ttl=ttl)
         except CouchbaseError as e:
@@ -323,19 +339,19 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def decr(self, key, delta=1, initial=None, ttl=0):
+    def decr(self, key, delta=1, initial=None, ttl=0, collection=None):
         self.counter(key, delta=-delta, initial=initial, ttl=ttl)
 
-    def decr_multi(self, keys, delta=1, initial=None, ttl=0):
+    def decr_multi(self, keys, delta=1, initial=None, ttl=0, collection=None):
         self.counter_multi(keys, delta=-delta, initial=initial, ttl=ttl)
 
-    def incr(self, key, delta=1, initial=None, ttl=0):
+    def incr(self, key, delta=1, initial=None, ttl=0, collection=None):
         self.counter(key, delta=delta, initial=initial, ttl=ttl)
 
-    def incr_multi(self, keys, delta=1, initial=None, ttl=0):
+    def incr_multi(self, keys, delta=1, initial=None, ttl=0, collection=None):
         self.counter_multi(keys, delta=delta, initial=initial, ttl=ttl)
 
-    def counter(self, key, delta=1, initial=None, ttl=0):
+    def counter(self, key, delta=1, initial=None, ttl=0, collection=None):
         try:
             self.cb.counter(key, delta=delta, initial=initial, ttl=ttl)
         except CouchbaseError as e:
@@ -344,7 +360,8 @@ class SDKClient(object):
                 self.cb.counter(key, delta=delta, initial=initial, ttl=ttl)
             except CouchbaseError as e:
                 raise
-    def counter_multi(self, keys, delta=1, initial=None, ttl=0):
+
+    def counter_multi(self, keys, delta=1, initial=None, ttl=0, collection=None):
         try:
             self.cb.counter_multi(keys, delta=delta, initial=initial, ttl=ttl)
         except CouchbaseError as e:
@@ -354,7 +371,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def get(self, key, ttl=0, quiet=True, replica=False, no_format=False):
+    def get(self, key, ttl=0, quiet=True, replica=False, no_format=False, collection=None):
         try:
             rv = self.cb.get(key, ttl=ttl, quiet=quiet, replica=replica, no_format=no_format)
             return self.__translate_get(rv)
@@ -366,19 +383,19 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def rget(self, key, replica_index=None, quiet=True):
+    def rget(self, key, replica_index=None, quiet=True, collection=None):
         try:
-            data  = self.rget(key, replica_index=replica_index, quiet=None)
+            data = self.rget(key, replica_index=replica_index, quiet=None)
             return self.__translate_get(data)
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                data  = self.rget(key, replica_index=replica_index, quiet=None)
+                data = self.rget(key, replica_index=replica_index, quiet=None)
                 return self.__translate_get(data)
             except CouchbaseError as e:
                 raise
 
-    def get_multi(self, keys, ttl=0, quiet=True, replica=False, no_format=False):
+    def get_multi(self, keys, ttl=0, quiet=True, replica=False, no_format=False, collection=None):
         try:
             data = self.cb.get_multi(keys, ttl=ttl, quiet=quiet, replica=replica, no_format=no_format)
             return self.__translate_get_multi(data)
@@ -390,7 +407,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def rget_multi(self, key, replica_index=None, quiet=True):
+    def rget_multi(self, key, replica_index=None, quiet=True, collection=None):
         try:
             data = self.cb.rget_multi(key, replica_index=None, quiet=quiet)
             return self.__translate_get_multi(data)
@@ -404,45 +421,46 @@ class SDKClient(object):
 
     def stats(self, keys=None):
         try:
-            stat_map = self.cb.stats(keys = keys)
+            stat_map = self.cb.stats(keys=keys)
             return stat_map
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                return self.cb.stats(keys = keys)
+                return self.cb.stats(keys=keys)
             except CouchbaseError as e:
                 raise
 
     def errors(self, clear_existing=True):
         try:
-            rv = self.cb.errors(clear_existing = clear_existing)
+            rv = self.cb.errors(clear_existing=clear_existing)
             return rv
         except CouchbaseError as e:
             raise
 
-    def observe(self, key, master_only=False):
+    def observe(self, key, master_only=False, collection=None):
         try:
-            return self.cb.observe(key, master_only = master_only)
+            return self.cb.observe(key, master_only=master_only)
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                return self.cb.observe(key, master_only = master_only)
+                return self.cb.observe(key, master_only=master_only)
             except CouchbaseError as e:
                 raise
 
-    def observe_multi(self, keys, master_only=False):
+    def observe_multi(self, keys, master_only=False, collection=None):
         try:
-            data = self.cb.observe_multi(keys, master_only = master_only)
+            data = self.cb.observe_multi(keys, master_only=master_only)
             return self.__translate_observe_multi(data)
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                data = self.cb.observe_multi(keys, master_only = master_only)
+                data = self.cb.observe_multi(keys, master_only=master_only)
                 return self.__translate_observe_multi(data)
             except CouchbaseError as e:
                 raise
 
-    def endure(self, key, persist_to=-1, replicate_to=-1, cas=0, check_removed=False, timeout=5.0, interval=0.010):
+    def endure(self, key, persist_to=-1, replicate_to=-1, cas=0, check_removed=False, timeout=5.0, interval=0.010,
+               collection=None):
         try:
             self.cb.endure(key, persist_to=persist_to, replicate_to=replicate_to,
                            cas=cas, check_removed=check_removed, timeout=timeout, interval=interval)
@@ -450,11 +468,12 @@ class SDKClient(object):
             try:
                 time.sleep(10)
                 self.cb.endure(key, persist_to=persist_to, replicate_to=replicate_to,
-                    cas=cas, check_removed=check_removed, timeout=timeout, interval=interval)
+                               cas=cas, check_removed=check_removed, timeout=timeout, interval=interval)
             except CouchbaseError as e:
                 raise
 
-    def endure_multi(self, keys, persist_to=-1, replicate_to=-1, cas=0, check_removed=False, timeout=5.0, interval=0.010):
+    def endure_multi(self, keys, persist_to=-1, replicate_to=-1, cas=0, check_removed=False, timeout=5.0,
+                     interval=0.010, collection=None):
         try:
             self.cb.endure(keys, persist_to=persist_to, replicate_to=replicate_to,
                            cas=cas, check_removed=check_removed, timeout=timeout, interval=interval)
@@ -462,35 +481,35 @@ class SDKClient(object):
             try:
                 time.sleep(10)
                 self.cb.endure(keys, persist_to=persist_to, replicate_to=replicate_to,
-                           cas=cas, check_removed=check_removed, timeout=timeout, interval=interval)
+                               cas=cas, check_removed=check_removed, timeout=timeout, interval=interval)
             except CouchbaseError as e:
                 raise
 
-    def lock(self, key, ttl=0):
+    def lock(self, key, ttl=0, collection=None):
         try:
-            data = self.cb.lock(key, ttl = ttl)
+            data = self.cb.lock(key, ttl=ttl)
             return self.__translate_get(data)
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                data = self.cb.lock(key, ttl = ttl)
+                data = self.cb.lock(key, ttl=ttl)
                 return self.__translate_get(data)
             except CouchbaseError as e:
                 raise
 
-    def lock_multi(self, keys, ttl=0):
+    def lock_multi(self, keys, ttl=0, collection=None):
         try:
-            data = self.cb.lock_multi(keys, ttl = ttl)
+            data = self.cb.lock_multi(keys, ttl=ttl)
             return self.__translate_get_multi(data)
         except CouchbaseError as e:
             try:
                 time.sleep(10)
-                data = self.cb.lock_multi(keys, ttl = ttl)
+                data = self.cb.lock_multi(keys, ttl=ttl)
                 return self.__translate_get_multi(data)
             except CouchbaseError as e:
                 raise
 
-    def unlock(self, key, ttl=0):
+    def unlock(self, key, ttl=0, collection=None):
         try:
             return self.cb.unlock(key)
         except CouchbaseError as e:
@@ -500,7 +519,7 @@ class SDKClient(object):
             except CouchbaseError as e:
                 raise
 
-    def unlock_multi(self, keys):
+    def unlock_multi(self, keys, collection=None):
         try:
             return self.cb.unlock_multi(keys)
         except CouchbaseError as e:
@@ -526,7 +545,7 @@ class SDKClient(object):
         map = {}
         if data == None:
             return map
-        for key, result in data.items():
+        for key, result in list(data.items()):
             map[key] = [result.flags, result.cas, result.value]
         return map
 
@@ -543,7 +562,7 @@ class SDKClient(object):
         map = {}
         if data == None:
             return map
-        for key, result in data.items():
+        for key, result in list(data.items()):
             map[key] = result.value
         return map
 
@@ -551,7 +570,7 @@ class SDKClient(object):
         map = {}
         if data == None:
             return map
-        for key, result in data.items():
+        for key, result in list(data.items()):
             map[key] = result
         return map
 
@@ -559,14 +578,13 @@ class SDKClient(object):
         return data.rc, data.success, data.errstr, data.key
 
 
-
 class SDKSmartClient(object):
-      def __init__(self, rest, bucket, compression=True, info = None):
+    def __init__(self, rest, bucket, compression=True, info=None):
         self.rest = rest
         if hasattr(bucket, 'name'):
-            self.bucket=bucket.name
+            self.bucket = bucket.name
         else:
-            self.bucket=bucket
+            self.bucket = bucket
 
         if hasattr(bucket, 'saslPassword'):
             self.saslPassword = bucket.saslPassword
@@ -574,64 +592,64 @@ class SDKSmartClient(object):
             bucket_info = rest.get_bucket(bucket)
             self.saslPassword = bucket_info.saslPassword
 
-
         if rest.ip == "127.0.0.1":
-            self.host = "{0}:{1}".format(rest.ip,rest.port)
+            self.host = "{0}:{1}".format(rest.ip, rest.port)
             self.scheme = "http"
         else:
             self.host = rest.ip
             self.scheme = "couchbase"
-        self.client = SDKClient(self.bucket, hosts = [self.host], scheme = self.scheme, password = self.saslPassword,
+        self.client = SDKClient(self.bucket, hosts=[self.host], scheme=self.scheme, password=self.saslPassword,
                                 compression=compression)
 
-      def reset(self, compression=True, rest=None):
-        self.client = SDKClient(self.bucket, hosts = [self.host], scheme = self.scheme, password = self.saslPassword,
+    def reset(self, compression=True, rest=None):
+        self.client = SDKClient(self.bucket, hosts=[self.host], scheme=self.scheme, password=self.saslPassword,
                                 compression=compression)
 
-      def memcached(self, key):
+    def memcached(self, key):
         return self.client
 
-      def set(self, key, exp, flags, value, format = FMT_AUTO):
-        rc =  self.client.set(key, value, ttl = exp, format = format)
+    def set(self, key, exp, flags, value, format=FMT_AUTO, scope=None, collection=None):
+        rc = self.client.set(key, value, ttl=exp, format=format)
 
-      def append(self, key, value, format = FMT_AUTO):
-          return self.client.set(key, value, format = format)
+    def append(self, key, value, format=FMT_AUTO, scope=None, collection=None):
+        return self.client.set(key, value, format=format)
 
-      def observe(self, key):
+    def observe(self, key, collection=None):
         return self.client.observe(key)
 
-      def get(self, key):
+    def get(self, key, scope=None, collection=None):
         return self.client.get(key)
 
-      def getr(self, key, replica_index=0):
-        return self.client.rget(key,replica_index=replica_index)
+    def getr(self, key, replica_index=0, scope=None, collection=None):
+        return self.client.rget(key, replica_index=replica_index)
 
-      def setMulti(self, exp, flags, key_val_dic, pause = None, timeout = 5.0, parallel=None, format = FMT_AUTO):
-          try:
+    def setMulti(self, exp, flags, key_val_dic, pause=None, timeout=5.0, parallel=None, format=FMT_AUTO,
+                 scope=None, collection=None):
+        try:
             self.client.cb.timeout = timeout
-            return self.client.upsert_multi(key_val_dic, ttl = exp, format = format)
-          finally:
+            return self.client.upsert_multi(key_val_dic, ttl=exp, format=format)
+        finally:
             self.client.cb.timeout = self.client.default_timeout
 
-      def getMulti(self, keys_lst, pause = None, timeout_sec = 5.0, parallel=None):
-          try:
-              self.client.cb.timeout = timeout_sec
-              map = self.client.get_multi(keys_lst)
-              return map
-          finally:
-              self.client.cb.timeout = self.client.default_timeout
+    def getMulti(self, keys_lst, pause=None, timeout_sec=5.0, parallel=None, scope=None, collection=None):
+        try:
+            self.client.cb.timeout = timeout_sec
+            map = self.client.get_multi(keys_lst)
+            return map
+        finally:
+            self.client.cb.timeout = self.client.default_timeout
 
+    def getrMulti(self, keys_lst, replica_index=None, pause=None, timeout_sec=5.0, parallel=None, collection=None):
+        try:
+            self.client.cb.timeout = timeout_sec
+            map = self.client.rget_multi(keys_lst, replica_index=replica_index)
+            return map
+        finally:
+            self.client.cb.timeout = self.client.default_timeout
 
-      def getrMulti(self, keys_lst, replica_index= None, pause = None, timeout_sec = 5.0, parallel=None):
-          try:
-              self.client.cb.timeout = timeout_sec
-              map = self.client.rget_multi(keys_lst, replica_index = replica_index)
-              return map
-          finally:
-              self.client.cb.timeout = self.client.default_timeout
+    def delete(self, key, scope=None, collection=None):
+        return self.client.remove(key)
 
-      def delete(self, key):
-          return self.client.remove(key)
 
 class SDKBasedKVStoreAwareSmartClient(SDKSmartClient):
     def __init__(self, rest, bucket, kv_store=None, info=None, store_enabled=True):
@@ -640,7 +658,7 @@ class SDKBasedKVStoreAwareSmartClient(SDKSmartClient):
         self.store_enabled = store_enabled
         self._rlock = threading.Lock()
 
-    def set(self, key, value, ttl=-1):
+    def set(self, key, value, ttl=-1, collection=None):
         self._rlock.acquire()
         try:
             if ttl >= 0:
@@ -665,6 +683,7 @@ class SDKBasedKVStoreAwareSmartClient(SDKSmartClient):
     """
     " retrieve meta data of document from disk
     """
+
     def get_doc_metadata(self, num_vbuckets, key):
         vid = crc32.crc32_hash(key) & (num_vbuckets - 1)
 
@@ -679,8 +698,7 @@ class SDKBasedKVStoreAwareSmartClient(SDKSmartClient):
 
         return metadatastats
 
-
-    def delete(self, key):
+    def delete(self, key, collection=None):
         try:
             self._rlock.acquire()
             opaque, cas, data = self.memcached(key).delete(key)
@@ -691,7 +709,7 @@ class SDKBasedKVStoreAwareSmartClient(SDKSmartClient):
                 raise MemcachedError(7, "Invalid cas value")
         except Exception as e:
             self._rlock.release()
-            raise MemcachedError(7, e.message)
+            raise MemcachedError(7, str(e))
 
     def get_valid_key(self, key):
         return self.get_key_check_status(key, "valid")
@@ -703,7 +721,7 @@ class SDKBasedKVStoreAwareSmartClient(SDKSmartClient):
         return self.get_key_check_status(key, "expired")
 
     def get_all_keys(self):
-        return self.kv_store.keys()
+        return list(self.kv_store.keys())
 
     def get_all_valid_items(self):
         return self.kv_store.valid_items()
@@ -716,7 +734,7 @@ class SDKBasedKVStoreAwareSmartClient(SDKSmartClient):
 
     def get_key_check_status(self, key, status):
         item = self.kv_get(key)
-        if(item is not None  and item["status"] == status):
+        if (item is not None and item["status"] == status):
             return item
         else:
             msg = "key {0} is not valid".format(key)

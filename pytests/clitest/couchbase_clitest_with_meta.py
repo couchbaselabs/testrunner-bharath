@@ -1,7 +1,11 @@
+import copy, json, os, random
+import string, re, time, sys
+
+from ep_mc_bin_client import MemcachedClient, MemcachedError
 from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
-from ep_mc_bin_client import MemcachedClient, MemcachedError
 from membase.api.rest_client import RestConnection
+
 
 
 class CouchbaseCliTestWithMeta(CliBaseTest):
@@ -46,7 +50,7 @@ class CouchbaseCliTestWithMeta(CliBaseTest):
             mc.setWithMeta('test_with_meta', 'value', 0, 0, 0x1234000000000001, 1)
             success_set_exist_item = True
         except MemcachedError as e:
-            print "\nMemcached exception: ", e
+            print("\nMemcached exception: ", e)
             if "#2" not in str(e):
                 self.fail("ep engine failed to check existed key")
                 """error #2 is ErrorKeyEexists"""

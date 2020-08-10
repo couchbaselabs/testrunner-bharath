@@ -1,6 +1,7 @@
 import threading
-from tuq import QueryTests
+from .tuq import QueryTests
 from upgrade.newupgradebasetest import NewUpgradeBaseTest
+from .flex_index_phase1 import FlexIndexTests
 from remote.remote_util import RemoteMachineShellConnection
 from membase.api.rest_client import RestConnection
 from couchbase.cluster import Cluster
@@ -10,8 +11,7 @@ from membase.api.rest_client import RestHelper
 from security.audittest import auditTest
 from security.auditmain import audit
 import socket
-import urllib
-
+import urllib.request, urllib.parse, urllib.error
 
 class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
 
@@ -28,6 +28,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         self.load(self.gens_load, flag=self.item_flag)
         self.bucket_doc_map = {"default": 2016, "standard_bucket0": 2016}
         self.bucket_status_map = {"default": "healthy", "standard_bucket0": "healthy"}
+        self.custom_map = self.input.param("custom_map", False)
+        self.fts_index_type = self.input.param("fts_index_type", None)
 
         # feature specific setup
         if self.feature == "ansi-joins":
@@ -49,9 +51,9 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
             self.user_xattr_data = []
             self.meta_ids = []
         if self.feature == "curl-whitelist":
-            self.google_error_msg = "Errorevaluatingprojection.-cause:URLendpointisn'twhitelisted" \
+            self.google_error_msg = "Errorevaluatingprojection.-cause:URLendpointisntwhitelisted" \
                                     "https://maps.googleapis.com/maps/api/geocode/json."
-            self.jira_error_msg ="Errorevaluatingprojection.-cause:URLendpointisn'twhitelistedhttps://jira.atlassian." \
+            self.jira_error_msg ="Errorevaluatingprojection.-cause:URLendpointisntwhitelistedhttps://jira.atlassian." \
                                  "com/rest/api/latest/issue/JRA-9.PleasemakesuretowhitelisttheURLontheUI."
             self.cbqpath = '%scbq' % self.path + " -e %s:%s -q -u %s -p %s" \
                                                  % (self.master.ip, self.n1ql_port, self.rest.username, self.rest.password)
@@ -64,6 +66,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         self.log.info("==============  QueriesUpgradeTests setup has completed ==============")
 
     def suite_setUp(self):
+
         super(QueriesUpgradeTests, self).suite_setUp()
         self.log.info("==============  QueriesUpgradeTests suite_setup has started ==============")
         self.log.info("==============  QueriesUpgradeTests suite_setup has completed ==============")
@@ -71,6 +74,22 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
     def tearDown(self):
         self.log.info("==============  QueriesUpgradeTests tearDown has started ==============")
         self.upgrade_servers = self.servers
+        if hasattr(self, 'upgrade_versions') and self.initial_version is '2.5.1-1083':
+            self.log.info("checking upgrade version")
+            upgrade_major = self.upgrade_versions[0][0]
+            self.log.info("upgrade major version: " + str(upgrade_major))
+            if int(upgrade_major) == 5:
+                self.log.info("setting intial_version to: 4.6.5-4742")
+                self.initial_version = "4.6.5-4742"
+            elif int(upgrade_major) == 6:
+                self.log.info("setting intial_version to: 5.5.6-4733")
+                self.initial_version = "5.5.6-4733"
+            elif int(upgrade_major) == 7:
+                self.log.info("setting intial_version to: 6.0.3-2895")
+                self.initial_version = "6.0.3-2895"
+            else:
+                self.log.info("upgrade version invalid: " + str(self.upgrade_versions[0]))
+                self.fail()
         self.log.info("==============  QueriesUpgradeTests tearDown has completed ==============")
         super(QueriesUpgradeTests, self).tearDown()
 
@@ -78,47 +97,6 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         self.log.info("==============  QueriesUpgradeTests suite_tearDown has started ==============")
         self.log.info("==============  QueriesUpgradeTests suite_tearDown has completed ==============")
         super(QueriesUpgradeTests, self).suite_tearDown()
-
-    # old test
-    def test_mixed_cluster(self):
-        self._kill_all_processes_cbq()
-        self.assertTrue(len(self.servers) > 1, 'Test needs more than 1 server')
-        method_name = self.input.param('to_run', 'test_all_negative')
-        self._install(self.servers[:2])
-        self.bucket_size = 100
-        self._bucket_creation()
-        self.load(self.gens_load, flag=self.item_flag)
-        upgrade_threads = self._async_update(self.upgrade_versions[0], [self.servers[1]], None, True)
-        for upgrade_thread in upgrade_threads:
-            upgrade_thread.join()
-        self.cluster.rebalance(self.servers[:1], self.servers[1:2], [])
-        self.shell = RemoteMachineShellConnection(self.servers[1])
-        self._kill_all_processes_cbq()
-        self._start_command_line_query(self.servers[1])
-        self.shell.execute_command("ps -aef| grep cbq-engine")
-        self.master = self.servers[1]
-        getattr(self, method_name)()
-        for th in threading.enumerate():
-            th._Thread__stop() if th != threading.current_thread() else None
-
-    # old test
-    def test_upgrade_old(self):
-        self._kill_all_processes_cbq()
-        method_name = self.input.param('to_run', 'test_any')
-        self._install(self.servers[:2])
-        self.bucket_size = 100
-        self._bucket_creation()
-        self.load(self.gens_load, flag=self.item_flag)
-        self.cluster.rebalance(self.servers[:1], self.servers[1:2], [])
-        upgrade_threads = self._async_update(self.upgrade_versions[0], self.servers[:2])
-        for upgrade_thread in upgrade_threads:
-            upgrade_thread.join()
-        self._kill_all_processes_cbq()
-        self._start_command_line_query(self.master)
-        self.create_primary_index_for_3_0_and_greater()
-        getattr(self, method_name)()
-        for th in threading.enumerate():
-            th._Thread__stop() if th != threading.current_thread() else None
 
     def test_upgrade(self):
         """
@@ -159,7 +137,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
 
         if self.upgrade_type == "offline":
             # stop server, upgrade, rebalance
-            self.offline_upgrade(mixed_servers)
+            self.offline_upgrade(self.servers)
+
 
         if self.upgrade_type == "online":
             # rebalance out, upgrade, rebalance in
@@ -197,9 +176,9 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         # upgrade remaining servers
         self.log.info("upgrading remaining servers")
 
-        if self.upgrade_type == "offline":
-            # stop server, upgrade, rebalance in
-            self.offline_upgrade(remaining_servers)
+        #if self.upgrade_type == "offline":
+        #    # stop server, upgrade, rebalance in
+        #    self.offline_upgrade(remaining_servers)
 
         if self.upgrade_type == "online":
             # rebalance out, upgrade, rebalance in
@@ -255,7 +234,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
                 th.join()
             rebalance = self.cluster.async_rebalance(participating_servers,
                                                      [server], [],
-                                                     services=['kv,n1ql,index'])
+                                                     services=['kv,n1ql,index,fts'])
             rebalance.result()
 
     def online_upgrade_with_failover(self, upgrade_servers):
@@ -274,6 +253,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
                 if cluster_node.ip == server.ip:
                     rest.add_back_node(cluster_node.id)
                     rest.set_recovery_type(otpNode=cluster_node.id, recoveryType="full")
+
+
             participating_servers.remove(server)
             self.log.info("participating servers: {0}".format(str(participating_servers)))
             rebalance = self.cluster.async_rebalance(participating_servers, [], [])
@@ -307,6 +288,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
             self.run_backfill_upgrade_test(phase)
         elif feature == "curl-whitelist":
             self.run_curl_whitelist_upgrade_test(phase)
+        elif feature == "flex-index":
+            self.run_flex_index_upgrade_test(phase)
         else:
             self.fail("FAIL: feature {0} not found".format(feature))
 
@@ -319,6 +302,35 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
             self.run_test_basic_join()
         else:
             self.fail("FAIL: (ansi-join) invalid phase: {0}".format(phase))
+
+    def run_flex_index_upgrade_test(self, phase):
+        ft_object = FlexIndexTests()
+        ft_object.init_flex_object(self)
+        flex_query_list = ["select meta().id from default {0} where name = 'employee-6'"]
+        if phase == "pre-upgrade":
+            self.log.info("running pre-upgrade test for flex index")
+            self.create_fts_index(
+                name="default_index", source_name="default", doc_count=2016, index_storage_type=self.fts_index_type)
+        elif phase == "mixed-mode":
+            self.log.info("running mixed-mode test for flex index")
+            failed_to_run_query, not_found_index_in_response, result_mismatch = ft_object.run_query_and_validate(flex_query_list)
+            if failed_to_run_query or result_mismatch:
+                self.fail("Found queries not runnable: {0} "
+                          "or flex query and gsi query results not matching: {1}"
+                          .format(failed_to_run_query, result_mismatch))
+            else:
+                self.log.info("All queries passed")
+        elif phase == "post-upgrade":
+            self.log.info("running post-upgrade test for flex index")
+            failed_to_run_query, not_found_index_in_response, result_mismatch = ft_object.run_query_and_validate(flex_query_list)
+            if failed_to_run_query or not_found_index_in_response or result_mismatch:
+                self.fail("Found queries not runnable: {0} or required index not found in the query resonse: {1} "
+                          "or flex query and gsi query results not matching: {2}"
+                          .format(failed_to_run_query, not_found_index_in_response, result_mismatch))
+            else:
+                self.log.info("All queries passed")
+        else:
+            self.fail("FAIL: (flex index) invalid phase: {0}".format(phase))
 
     def run_xattrs_upgrade_test(self, phase):
         if phase == "pre-upgrade":
@@ -427,11 +439,11 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
 
         url = "'https://jira.atlassian.com/rest/api/latest/issue/JRA-9'"
         query="select curl("+ url +")"
-        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(self.cbqpath, query, '', '', '', '', '')
         actual_curl = self.convert_to_json(curl)
         self.assertTrue(self.jira_error_msg in actual_curl['errors'][0]['msg'],
                         "Error message is %s this is incorrect it should be %s"
-                        % (actual_curl['errors'][0]['msg'],self.jira_error_msg))
+                        % (actual_curl['errors'][0]['msg'], self.jira_error_msg))
 
         curl_output = self.shell.execute_command("%s --get https://maps.googleapis.com/maps/api/geocode/json "
                                                  "-d 'address=santa+cruz&components=country:ES&key=AIzaSyCT6niGCMsgegJkQSYSqpoLZ4_rSO59XQQ'"
@@ -440,7 +452,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         url = "'https://maps.googleapis.com/maps/api/geocode/json'"
         options= "{'get':True,'data': 'address=santa+cruz&components=country:ES&key=AIzaSyCT6niGCMsgegJkQSYSqpoLZ4_rSO59XQQ'}"
         query="select curl("+ url +", %s" % options + ")"
-        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(self.cbqpath, query, '', '', '', '', '')
         actual_curl = self.convert_to_json(curl)
         self.assertEqual(actual_curl['results'][0]['$1'], expected_curl)
 
@@ -450,7 +462,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
 
         url = "'https://jira.atlassian.com/rest/api/latest/issue/JRA-9'"
         query="select curl("+ url +")"
-        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(self.cbqpath, query, '', '', '', '', '')
         actual_curl = self.convert_to_json(curl)
         self.assertTrue(self.jira_error_msg in actual_curl['errors'][0]['msg'],
                         "Error message is %s this is incorrect it should be %s"
@@ -459,7 +471,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         url = "'https://maps.googleapis.com/maps/api/geocode/json'"
         options= "{'get':True,'data': 'address=santa+cruz&components=country:ES&key=AIzaSyCT6niGCMsgegJkQSYSqpoLZ4_rSO59XQQ'}"
         query="select curl("+ url +", %s" % options + ")"
-        curl = self.shell.execute_commands_inside(self.cbqpath,query,'', '', '', '', '')
+        curl = self.shell.execute_commands_inside(self.cbqpath, query, '', '', '', '', '')
         actual_curl = self.convert_to_json(curl)
         self.assertTrue(self.google_error_msg in actual_curl['errors'][0]['msg'],
                         "Error message is %s this is incorrect it should be %s"
@@ -595,7 +607,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
 
     def setupLDAPSettings (self, rest):
         api = rest.baseUrl + 'settings/saslauthdAuth'
-        params = urllib.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
+        params = urllib.parse.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
         status, content, header = rest._http_request(api, 'POST', params)
         return status, content, header
 

@@ -23,13 +23,11 @@ class DrainRateTests(unittest.TestCase):
         # Add built-in user
         testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
         RbacBase().create_user_source(testuser, 'builtin', self.master)
-        time.sleep(10)
 
         # Assign user to role
         role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
         RbacBase().add_user_role(role_list, RestConnection(self.master), 'builtin')
-        time.sleep(10)
-
+        
         self._create_default_bucket()
         self.drained_in_seconds = -1
         self.drained = False
@@ -63,6 +61,7 @@ class DrainRateTests(unittest.TestCase):
 
     def _create_default_bucket(self, replica=1):
         name = "default"
+        self.bucket_storage = self.input.param("bucket_storage", 'couchstore')
         master = self.input.servers[0]
         rest = RestConnection(master)
         helper = RestHelper(RestConnection(master))
@@ -72,7 +71,9 @@ class DrainRateTests(unittest.TestCase):
             available_ram = info.memoryQuota * node_ram_ratio
             if(available_ram < 256):
                 available_ram = 256
-            rest.create_bucket(bucket=name, ramQuotaMB=int(available_ram), replicaNumber=replica)
+            rest.create_bucket(bucket=name, ramQuotaMB=int(available_ram),
+                               replicaNumber=replica,
+                               storageBackend=self.bucket_storage)
             ready = BucketOperationHelper.wait_for_memcached(master, name)
             self.assertTrue(ready, msg="wait_for_memcached failed")
         self.assertTrue(helper.bucket_exists(name),

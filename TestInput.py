@@ -1,11 +1,10 @@
-import ConfigParser
 import getopt
-import os
 import re
-
-import logger
 from builds.build_query import BuildQuery
-
+import logger
+import configparser
+import os
+import collections
 
 #class to parse the inputs either from command line or from a ini file
 #command line supports a subset of
@@ -28,7 +27,9 @@ class TestInput(object):
         self.test_params = {}
         self.tuq_client = {}
         self.elastic = []
+        self.advisor = []
         self.cbas = []
+        self.cbbackupmgr = {}
         #servers , each server can have u,p,port,directory
 
     def param(self, name, *args):
@@ -45,6 +46,27 @@ class TestInput(object):
         else:
             raise Exception("Parameter `{}` must be set "
                             "in the test configuration".format(name))
+
+    def cbbackupmgr_param(self, name, *args):
+        """Returns the config value from the ini whose key matches 'name' and is stored under the 'cbbackupmgr'
+        section heading.
+
+        Args:
+            name (str): The key under which an expected value is stored.
+            args (str): Expects a single parameter which will be used as the default if the requested key is not found.
+
+        Returns:
+            string: The value parsed from the ini file/default value if the given key is not found.
+
+        Raises:
+            Exception: If the given key does not exist in the ini and no default value is provided.
+        """
+        if name in self.cbbackupmgr:
+            return TestInput._parse_param(self.cbbackupmgr[name])
+        if len(args) == 1:
+            return args[0]
+        if self.cbbackupmgr["name"] != "local_bkrs":
+            raise Exception(f"Parameter '{name}' must be set in the test configuration")
 
     @staticmethod
     def _parse_param(value):
@@ -88,6 +110,8 @@ class TestInputServer(object):
         self.es_username = ''
         self.es_password = ''
         self.upgraded = False
+        self.collections_map = {}
+        self.cbbackupmgr = {}
 
     def __str__(self):
         #ip_str = "ip:{0}".format(self.ip)
@@ -122,7 +146,7 @@ class TestInputParser():
     def get_test_input(argv):
         #if file is given use parse_from_file
         #if its from command line
-        (opts, args) = getopt.getopt(argv[1:], 'ht:c:v:s:i:p:l:', [])
+        (opts, args) = getopt.getopt(argv[1:], 'ht:c:v:s:i:p:l:d:e:r:g:m', [])
         #first let's loop over and find out if user has asked for help
         #if it has i
         params = {}
@@ -130,7 +154,7 @@ class TestInputParser():
         ini_file = ''
         for option, argument in opts:
             if option == '-h':
-                print 'usage'
+                print('usage')
                 return
             if option == '-i':
                 has_ini = True
@@ -139,15 +163,15 @@ class TestInputParser():
                 # takes in a string of the form "p1=v1,v2,p2=v3,p3=v4,v5,v6"
                 # converts to a dictionary of the form {"p1":"v1,v2","p2":"v3","p3":"v4,v5,v6"}
                 argument_split = [a.strip() for a in re.split("[,]?([^,=]+)=", argument)[1:]]
-                pairs = dict(zip(argument_split[::2], argument_split[1::2]))
-                for pair in pairs.iteritems():
+                pairs = dict(list(zip(argument_split[::2], argument_split[1::2])))
+                for pair in list(pairs.items()):
                     if pair[0] == "vbuckets":
                         # takes in a string of the form "1-100,140,150-160"
                         # converts to an array with all those values inclusive
                         vbuckets = set()
                         for v in pair[1].split(","):
                             r = v.split("-")
-                            vbuckets.update(range(int(r[0]), int(r[-1]) + 1))
+                            vbuckets.update(list(range(int(r[0]), int(r[-1]) + 1)))
                         params[pair[0]] = sorted(vbuckets)
                     else:
                         argument_list = [a.strip() for a in pair[1].split(",")]
@@ -168,9 +192,9 @@ class TestInputParser():
             input = TestInputParser.parse_from_command_line(argv)
         input.test_params = params
 
-        if "num_clients" not in input.test_params.keys() and input.clients:   # do not override the command line value
+        if "num_clients" not in list(input.test_params.keys()) and input.clients:   # do not override the command line value
             input.test_params["num_clients"] = len(input.clients)
-        if "num_nodes" not in input.test_params.keys() and input.servers:
+        if "num_nodes" not in list(input.test_params.keys()) and input.servers:
             input.test_params["num_nodes"] = len(input.servers)
 
         return input
@@ -180,7 +204,7 @@ class TestInputParser():
         servers = []
         ips = []
         input = TestInput()
-        config = ConfigParser.ConfigParser()
+        config = configparser.ConfigParser()
         config.read(file)
         sections = config.sections()
         global_properties = {}
@@ -196,6 +220,7 @@ class TestInputParser():
         input.dashboard = []
         input.ui_conf = {}
         cbas = []
+        input.cbbackupmgr = {}
         for section in sections:
             result = re.search('^cluster', section)
             if section == 'servers':
@@ -217,9 +242,13 @@ class TestInputParser():
             elif section == 'tuq_client':
                 input.tuq_client = TestInputParser.get_tuq_config(config, section)
             elif section == 'elastic':
-                input.elastic = TestInputParser.get_elastic_config(config, section)
+                input.elastic = TestInputParser.get_elastic_config(config, section, global_properties)
+            elif section == 'advisor':
+                input.advisor = TestInputParser.get_advisor_config(config, section, global_properties)
             elif section == 'cbas':
                 input.cbas = TestInputParser.get_cbas_config(config, section)
+            elif section == 'cbbackupmgr':
+                input.cbbackupmgr = TestInputParser.get_cbbackupmgr_config(config, section)
             elif result is not None:
                 cluster_list = TestInputParser.get_server_ips(config, section)
                 cluster_ips.extend(cluster_list)
@@ -235,7 +264,7 @@ class TestInputParser():
             input.tuq_client['client'] = TestInputParser.get_server_options([input.tuq_client['client'],],
                                                                             input.membase_settings,
                                                                             global_properties)[0]
-        for key, value in clusters.items():
+        for key, value in list(clusters.items()):
             end += value
             input.clusters[key] = servers[start:end]
             start += value
@@ -251,6 +280,9 @@ class TestInputParser():
         for moxi_ip in moxi_ips:
             moxis.append(TestInputParser.get_server(moxi_ip, config))
         input.moxis = TestInputParser.get_server_options(moxis, input.membase_settings, global_properties)
+
+        if 'cbbackupmgr' not in sections:
+            input.cbbackupmgr["name"] = "local_bkrs"
 
         # Setting up 'clients' tag
         input.clients = client_ips
@@ -334,7 +366,7 @@ class TestInputParser():
         return conf
 
     @staticmethod
-    def get_elastic_config(config, section):
+    def get_elastic_config(config, section, global_properties):
         server = TestInputServer()
         options = config.options(section)
         for option in options:
@@ -346,6 +378,38 @@ class TestInputParser():
                 server.es_username = config.get(section, option)
             if option == 'es_password':
                 server.es_password = config.get(section, option)
+            if option == 'username':
+                server.ssh_username = config.get(section, option)
+            if option == 'password':
+                server.ssh_password = config.get(section, option)
+
+        if server.ssh_username == '' and 'username' in global_properties:
+            server.ssh_username = global_properties['username']
+        if server.ssh_password == '' and 'password' in global_properties:
+            server.ssh_password = global_properties['password']
+        return server
+
+    @staticmethod
+    def get_cbbackupmgr_config(config, section):
+        options = {}
+        for option in config.options(section):
+            options[option] = config.get(section, option)
+        return options
+
+    @staticmethod
+    def get_advisor_config(config, section, global_properties):
+        server = TestInputServer()
+        options = config.options(section)
+        for option in options:
+            if option == 'ip':
+                server.ip = config.get(section, option)
+            if option == 'port':
+                server.port = config.get(section, option)
+            if option == 'username':
+                server.rest_username = config.get(section, option)
+            if option == 'password':
+                server.rest_password = config.get(section, option)
+
         return server
 
     @staticmethod
@@ -362,6 +426,21 @@ class TestInputParser():
             if option == 'password':
                 server.password = config.get(section, option)
         return server
+
+    @staticmethod
+    def get_collection_config(collection, config):
+        collection_config = {}
+        for section in config.sections():
+            if section == collection:
+                options = config.options(section)
+                for option in options:
+                    if option == 'bucket':
+                        collection_config['bucket'] = config.get(section, option)
+                    if option == 'scope':
+                        collection_config['scope'] = config.get(section, option)
+                    if option.lower() == 'maxttl':
+                        collection_config['maxTTL'] = config.get(section, option)
+        return collection_config
 
     @staticmethod
     def get_server(ip, config):
@@ -393,6 +472,12 @@ class TestInputParser():
                         server.fts_port = config.get(section, option)
                     if option == 'eventing_port':
                         server.eventing_port = config.get(section, option)
+                    if option == 'collections':
+                        # collections_map = {collection: {bucket:'', scope:'', param:''}}
+                        collections = config.get(section, option).split(',')
+                        for collection in collections:
+                            server.collections_map[collection] = TestInputParser\
+                                .get_collection_config(collection, config)
                 break
                 #get username
                 #get password
@@ -443,7 +528,7 @@ class TestInputParser():
             need_help = False
             for option, argument in opts:
                 if option == "-h":
-                    print 'usage...'
+                    print('usage...')
                     need_help = True
                     break
             if need_help:

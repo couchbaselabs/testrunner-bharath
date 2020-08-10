@@ -1,4 +1,6 @@
-from cbas_base import *
+from .cbas_base import *
+from threading import Thread
+import threading
 
 
 class CBASConcurrentQueryMgtTests(CBASBaseTest):

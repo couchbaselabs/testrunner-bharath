@@ -1,17 +1,24 @@
-from couchbase.bucket import Bucket
-from couchbase.exceptions import NotFoundError
+import zlib
+import json
 
-from couchbase_helper.cluster import Cluster
-from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator
-from membase.api.exception import XDCRCheckpointException
+from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator, SDKDataLoader
+from .xdcrnewbasetests import XDCRNewBaseTest, FloatingServers
+from .xdcrnewbasetests import NodeHelper
 from membase.api.rest_client import RestConnection
-from membase.helper.cluster_helper import ClusterOperationHelper
-from memcached.helper.data_helper import VBucketAwareMemcached
-from remote.remote_util import RemoteMachineShellConnection
-from security.rbac_base import RbacBase
 from testconstants import STANDARD_BUCKET_PORT
-from xdcrnewbasetests import NodeHelper
-from xdcrnewbasetests import XDCRNewBaseTest, FloatingServers
+from remote.remote_util import RemoteMachineShellConnection
+try:
+    from couchbase.exceptions import DocumentNotFoundException
+except:
+    from couchbase.exceptions import NotFoundError as DocumentNotFoundException
+
+from couchbase.bucket import Bucket
+from couchbase_helper.cluster import Cluster
+from membase.helper.cluster_helper import ClusterOperationHelper
+from membase.api.exception import XDCRCheckpointException
+from memcached.helper.data_helper import VBucketAwareMemcached
+from security.rbac_base import RbacBase
+from collection.collections_rest_client import CollectionsRest
 
 
 class Lww(XDCRNewBaseTest):
@@ -21,10 +28,12 @@ class Lww(XDCRNewBaseTest):
         self.cluster = Cluster()
         self.c1_cluster = self.get_cb_cluster_by_name('C1')
         self.c2_cluster = self.get_cb_cluster_by_name('C2')
-
-        self.skip_ntp = self._input.param("skip_ntp", False)
         self.clean_backup = self._input.param("clean_backup", False)
-
+        self.bucketType = self._input.param("bucket_type", "membase")
+        self.evictionPolicy = self._input.param("eviction_policy", "valueOnly")
+        self._scope_num = self._input.param("scope_num", 2)
+        self._collection_num = self._input.param("collection_num", 2)
+        self.skip_ntp = self._input.param("skip_ntp", False)
         if not self.skip_ntp:
             self._enable_ntp_and_sync()
 
@@ -43,24 +52,38 @@ class Lww(XDCRNewBaseTest):
             nodes = self._input.servers
         for node in nodes:
             conn = RemoteMachineShellConnection(node)
-            output, error = conn.execute_command("chkconfig ntpd on")
-            conn.log_command_output(output, error)
-            output, error = conn.execute_command("/etc/init.d/ntpd start")
-            conn.log_command_output(output, error)
-            output, error = conn.execute_command("systemctl start ntpd")
-            conn.log_command_output(output, error)            
-            output, error = conn.execute_command("ntpdate -q " + ntp_server)
-            conn.log_command_output(output, error)
+            os = conn.extract_remote_info().distribution_version.lower()
+            if os == "oel 8":
+                output, error = conn.execute_command("systemctl start chronyd")
+                conn.log_command_output(output, error)
+                output, error = conn.execute_command("systemctl enable chronyd")
+                conn.log_command_output(output, error)
+            else:
+                output, error = conn.execute_command("chkconfig ntpd on")
+                conn.log_command_output(output, error)
+                output, error = conn.execute_command("/etc/init.d/ntpd start")
+                conn.log_command_output(output, error)
+                output, error = conn.execute_command("sudo systemctl start ntpd")
+                conn.log_command_output(output, error)
+                output, error = conn.execute_command("ntpdate -q " + ntp_server)
+                conn.log_command_output(output, error)
 
     def _disable_ntp(self):
         for node in self._input.servers:
             conn = RemoteMachineShellConnection(node)
-            output, error = conn.execute_command("chkconfig ntpd off")
-            conn.log_command_output(output, error)
-            output, error = conn.execute_command("/etc/init.d/ntpd stop")
-            conn.log_command_output(output, error)
-            output, error = conn.execute_command("systemctl stop ntpd")
-            conn.log_command_output(output, error)
+            os = conn.extract_remote_info().distribution_version.lower()
+            if os == "oel 8":
+                output, error = conn.execute_command("systemctl stop chronyd")
+                conn.log_command_output(output, error)
+                output, error = conn.execute_command("systemctl disable chronyd")
+                conn.log_command_output(output, error)
+            else:
+                output, error = conn.execute_command("chkconfig ntpd off")
+                conn.log_command_output(output, error)
+                output, error = conn.execute_command("/etc/init.d/ntpd stop")
+                conn.log_command_output(output, error)
+                output, error = conn.execute_command("sudo systemctl stop ntpd")
+                conn.log_command_output(output, error)
 
     def _offset_wall_clock(self, cluster=None, offset_secs=0, inc=True, offset_drift=-1):
         counter = 1
@@ -92,7 +115,6 @@ class Lww(XDCRNewBaseTest):
                        saslPassword='',
                        replicaNumber=1,
                        proxyPort=11211,
-                       bucketType='membase',
                        replica_index=1,
                        threadsNumber=3,
                        flushEnabled=1,
@@ -100,43 +122,75 @@ class Lww(XDCRNewBaseTest):
                        dst_lww=True,
                        skip_src=False,
                        skip_dst=False):
-        evictionPolicy= self._input.param("eviction_policy", 'valueOnly')
+
         if not skip_src:
             src_rest = RestConnection(self.c1_cluster.get_master_node())
             if src_lww:
                 src_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy,
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy,
                                        lww=True)
+                self.assertTrue(src_rest.is_lww_enabled(bucket), "LWW not enabled on source bucket")
+                self.log.info("LWW enabled on source bucket as expected")
             else:
                 src_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy)
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy)
+                self.assertFalse(src_rest.is_lww_enabled(bucket), "LWW enabled on source bucket")
+                self.log.info("LWW not enabled on source bucket as expected")
             self.c1_cluster.add_bucket(ramQuotaMB=ramQuotaMB, bucket=bucket, authType=authType,
                                        saslPassword=saslPassword, replicaNumber=replicaNumber,
-                                       proxyPort=proxyPort, bucketType=bucketType, evictionPolicy=evictionPolicy)
+                                       proxyPort=proxyPort, bucketType=self.bucketType, evictionPolicy=self.evictionPolicy)
+
         if not skip_dst:
             dst_rest = RestConnection(self.c2_cluster.get_master_node())
             if dst_lww:
                 dst_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy,
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy,
                                        lww=True)
+                self.assertTrue(dst_rest.is_lww_enabled(bucket), "LWW not enabled on dest bucket")
+                self.log.info("LWW enabled on dest bucket as expected")
             else:
                 dst_rest.create_bucket(bucket=bucket, ramQuotaMB=ramQuotaMB, authType=authType, saslPassword=saslPassword,
-                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=bucketType,
-                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=evictionPolicy)
+                                       replicaNumber=replicaNumber, proxyPort=proxyPort, bucketType=self.bucketType,
+                                       replica_index=replica_index, flushEnabled=flushEnabled, evictionPolicy=self.evictionPolicy)
+                self.assertFalse(src_rest.is_lww_enabled(bucket), "LWW enabled on dest bucket")
+                self.log.info("LWW not enabled on dest bucket as expected")
             self.c2_cluster.add_bucket(ramQuotaMB=ramQuotaMB, bucket=bucket, authType=authType,
                                        saslPassword=saslPassword, replicaNumber=replicaNumber,
-                                       proxyPort=proxyPort, bucketType=bucketType, evictionPolicy=evictionPolicy)
+                                       proxyPort=proxyPort, bucketType=self.bucketType, evictionPolicy=self.evictionPolicy)
+
+        self.sleep(10)
+        if self._scope_num or self._collection_num:
+            self._create_collections(self.c1_cluster.get_master_node())
+            self._create_collections(self.c2_cluster.get_master_node())
+
+    def _create_collections(self, node):
+        for bucket in RestConnection(node).get_buckets():
+            CollectionsRest(node).async_create_scope_collection(
+                self._scope_num, self._collection_num, bucket)
+
+
+    def load_cluster_buckets(self, cluster=None):
+        if self._use_java_sdk:
+            gen = SDKDataLoader(self._num_items, percent_create=100, key_prefix="lww-")
+        else:
+            gen = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
+        if cluster:
+            cluster.load_all_buckets_from_generator(gen)
+        else:
+            #Load buckets on both src and target clusters
+            self.c2_cluster.load_all_buckets_from_generator(gen)
+            self.c1_cluster.load_all_buckets_from_generator(gen)
 
     def _get_python_sdk_client(self, ip, bucket, cluster):
         try:
             role_del = [bucket]
             RbacBase().remove_user_role(role_del, RestConnection(cluster.get_master_node()))
-        except Exception, ex:
+        except Exception as ex:
             self.log.info(str(ex))
-            self.assertTrue(str(ex) == '"User was not found."', str(ex))
+            self.assertTrue(str(ex) == str(b'"User was not found."'), str(ex))
 
         testuser = [{'id': bucket, 'name': bucket, 'password': 'password'}]
         RbacBase().create_user_source(testuser, 'builtin', cluster.get_master_node())
@@ -153,19 +207,24 @@ class Lww(XDCRNewBaseTest):
             else:
                 self.fail("Failed to connect to bucket " + bucket + " on " + ip + " using python SDK")
             return cb
-        except Exception, ex:
+        except Exception as ex:
             self.fail(str(ex))
 
     def _upsert(self, conn, doc_id, old_key, new_key, new_val):
-        obj = conn.get(key=doc_id)
+        obj = conn.get(doc_id)
         value = obj.value
+        if isinstance(value, str):
+            value = json.loads(value)
         value[new_key] = value.pop(old_key)
         value[new_key] = new_val
-        conn.upsert(key=doc_id, value=value)
+        conn.upsert(doc_id, value=value)
 
     def _kill_processes(self, crashed_nodes=[]):
-        for node in crashed_nodes:
-            NodeHelper.kill_erlang(node)
+        try:
+            for node in crashed_nodes:
+                NodeHelper.kill_erlang(node)
+        except:
+            self.log.info('Could not kill erlang process on node, continuing..')
 
     def _start_cb_server(self, node):
         shell = RemoteMachineShellConnection(node)
@@ -182,140 +241,63 @@ class Lww(XDCRNewBaseTest):
             if "max_cas" in line:
                 max_cas = line.split()[1]
                 break
-        return long(max_cas)
+        return int(max_cas)
 
-    def _get_vbucket_id(self, node, bucket, key):
-        conn = RemoteMachineShellConnection(node)
-        command = "curl -u cbadminbucket:password -s http://" + node.ip + ":8091/pools/default/buckets/" + bucket + " | /opt/couchbase/bin/tools/vbuckettool - " + key
-        output, error = conn.execute_command(command)
-        conn.log_command_output(output, error)
-        return output[0].split()[5]
+    def _get_vbucket_id(self, key, num_vbuckets=1024):
+        vbucket_id = ((zlib.crc32(key.encode()) >> 16) & 0x7FFF) % num_vbuckets
+        return vbucket_id
+
+    def check_kv_exists_in_doc(self, kv, doc, msg):
+        if isinstance(doc, str):
+            doc = json.loads(doc)
+        self.assertGreaterEqual(doc.items(), kv.items(), msg)
 
     def test_lww_enable(self):
         src_conn = RestConnection(self.c1_cluster.get_master_node())
         dest_conn = RestConnection(self.c2_cluster.get_master_node())
-
         self._create_buckets(bucket='default', ramQuotaMB=100, src_lww=False, dst_lww=False)
-        self.assertFalse(src_conn.is_lww_enabled(), "LWW enabled on source bucket")
-        self.log.info("LWW not enabled on source bucket as expected")
-        self.assertFalse(dest_conn.is_lww_enabled(), "LWW enabled on dest bucket")
-        self.log.info("LWW not enabled on dest bucket as expected")
-
         src_conn.delete_bucket()
         dest_conn.delete_bucket()
-
         self._create_buckets(bucket='default', ramQuotaMB=100)
-        self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on source bucket")
-        self.log.info("LWW enabled on source bucket as expected")
-        self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on dest bucket")
-        self.log.info("LWW enabled on dest bucket as expected")
 
     def test_replication_with_lww_default(self):
         src_conn = RestConnection(self.c1_cluster.get_master_node())
         dest_conn = RestConnection(self.c2_cluster.get_master_node())
-
         self._create_buckets(bucket='default', ramQuotaMB=100)
-        self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on source bucket")
-        self.log.info("LWW enabled on source bucket as expected")
-        self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on dest bucket")
-        self.log.info("LWW enabled on dest bucket as expected")
-
-        self.sleep(10)
-
         self.setup_xdcr()
         self.merge_all_buckets()
         self.c1_cluster.pause_all_replications_by_id()
-
-        gen1 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c2_cluster.load_all_buckets_from_generator(gen1)
-        gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c1_cluster.load_all_buckets_from_generator(gen2)
-
+        self.load_cluster_buckets()
         self.c1_cluster.resume_all_replications_by_id()
-
         self.verify_results()
 
     def test_replication_with_lww_sasl(self):
-        src_conn = RestConnection(self.c1_cluster.get_master_node())
-        dest_conn = RestConnection(self.c2_cluster.get_master_node())
-
         self._create_buckets(bucket='sasl_bucket', ramQuotaMB=100, authType='sasl', saslPassword='password')
-        self.assertTrue(src_conn.is_lww_enabled('sasl_bucket'), "LWW not enabled on source bucket")
-        self.log.info("LWW enabled on source bucket as expected")
-        self.assertTrue(dest_conn.is_lww_enabled('sasl_bucket'), "LWW not enabled on dest bucket")
-        self.log.info("LWW enabled on dest bucket as expected")
-
-        self.sleep(10)
-
         self.setup_xdcr()
         self.merge_all_buckets()
         self.c1_cluster.pause_all_replications_by_id()
-
-        gen1 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c2_cluster.load_all_buckets_from_generator(gen1)
-        gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c1_cluster.load_all_buckets_from_generator(gen2)
-
+        self.load_cluster_buckets()
         self.c1_cluster.resume_all_replications_by_id()
-
         self.verify_results()
 
     def test_replication_with_lww_standard(self):
-        src_conn = RestConnection(self.c1_cluster.get_master_node())
-        dest_conn = RestConnection(self.c2_cluster.get_master_node())
-
         self._create_buckets(bucket='standard_bucket', ramQuotaMB=100, proxyPort=STANDARD_BUCKET_PORT)
-        self.assertTrue(src_conn.is_lww_enabled('standard_bucket'), "LWW not enabled on source bucket")
-        self.log.info("LWW enabled on source bucket as expected")
-        self.assertTrue(dest_conn.is_lww_enabled('standard_bucket'), "LWW not enabled on dest bucket")
-        self.log.info("LWW enabled on dest bucket as expected")
-
-        self.sleep(10)
-
         self.setup_xdcr()
         self.merge_all_buckets()
         self.c1_cluster.pause_all_replications_by_id()
-
-        gen1 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c2_cluster.load_all_buckets_from_generator(gen1)
-        gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c1_cluster.load_all_buckets_from_generator(gen2)
-
+        self.load_cluster_buckets()
         self.c1_cluster.resume_all_replications_by_id()
-
         self.verify_results()
 
     def test_replication_with_lww_and_no_lww(self):
-        src_conn = RestConnection(self.c1_cluster.get_master_node())
-        dest_conn = RestConnection(self.c2_cluster.get_master_node())
-
         self._create_buckets(bucket='lww', ramQuotaMB=100, proxyPort=STANDARD_BUCKET_PORT)
-        self.assertTrue(src_conn.is_lww_enabled(bucket='lww'), "LWW not enabled on source bucket")
-        self.log.info("LWW enabled on source bucket as expected")
-        self.assertTrue(dest_conn.is_lww_enabled(bucket='lww'), "LWW not enabled on dest bucket")
-        self.log.info("LWW enabled on dest bucket as expected")
-
-
         self._create_buckets(bucket='nolww', ramQuotaMB=100, proxyPort=STANDARD_BUCKET_PORT + 1, src_lww=False,
                             dst_lww=False)
-        self.assertFalse(src_conn.is_lww_enabled(bucket='nolww'), "LWW enabled on source bucket")
-        self.log.info("LWW not enabled on source bucket as expected")
-        self.assertFalse(dest_conn.is_lww_enabled(bucket='nolww'), "LWW enabled on dest bucket")
-        self.log.info("LWW not enabled on dest bucket as expected")
-
-        self.sleep(10)
-
         self.setup_xdcr()
         self.merge_all_buckets()
         self.c1_cluster.pause_all_replications_by_id()
-
-        gen1 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c2_cluster.load_all_buckets_from_generator(gen1)
-        gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
-        self.c1_cluster.load_all_buckets_from_generator(gen2)
-
+        self.load_cluster_buckets()
         self.c1_cluster.resume_all_replications_by_id()
-
         self.verify_results()
 
     def test_seq_upd_on_uni_with_src_wins(self):
@@ -323,20 +305,8 @@ class Lww(XDCRNewBaseTest):
         dest_conn = RestConnection(self.c2_cluster.get_master_node())
 
         self._create_buckets(bucket='lww', ramQuotaMB=100, proxyPort=STANDARD_BUCKET_PORT)
-        self.assertTrue(src_conn.is_lww_enabled(bucket='lww'), "LWW not enabled on source bucket")
-        self.log.info("LWW enabled on source bucket as expected")
-        self.assertTrue(dest_conn.is_lww_enabled(bucket='lww'), "LWW not enabled on dest bucket")
-        self.log.info("LWW enabled on dest bucket as expected")
-
         self._create_buckets(bucket='nolww', ramQuotaMB=100, proxyPort=STANDARD_BUCKET_PORT + 1, src_lww=False,
                             dst_lww=False)
-        self.assertFalse(src_conn.is_lww_enabled(bucket='nolww'), "LWW enabled on source bucket")
-        self.log.info("LWW not enabled on source bucket as expected")
-        self.assertFalse(dest_conn.is_lww_enabled(bucket='nolww'), "LWW enabled on dest bucket")
-        self.log.info("LWW not enabled on dest bucket as expected")
-
-        self.sleep(30)
-
         src_lww = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'lww', self.c1_cluster)
         self.sleep(10)
         src_nolww = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'nolww', self.c1_cluster)
@@ -345,20 +315,18 @@ class Lww(XDCRNewBaseTest):
         self.sleep(10)
         dest_nolww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'nolww', self.c2_cluster)
         self.sleep(10)
-
         self.setup_xdcr()
         self.merge_all_buckets()
         self.c1_cluster.pause_all_replications_by_id()
         self.sleep(10)
-
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
         self._upsert(conn=dest_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
         self._upsert(conn=dest_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
 
@@ -366,16 +334,16 @@ class Lww(XDCRNewBaseTest):
         self.sleep(10)
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
         self.log.info("Src doc won using LWW as expected")
 
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
         self.log.info("Target doc won using Rev Id as expected")
 
         self.verify_results(skip_verify_data=['nolww'], skip_verify_revid=['nolww'])
@@ -385,26 +353,12 @@ class Lww(XDCRNewBaseTest):
         dest_conn = RestConnection(self.c2_cluster.get_master_node())
 
         self._create_buckets(bucket='lww', ramQuotaMB=100, proxyPort=STANDARD_BUCKET_PORT)
-        self.assertTrue(src_conn.is_lww_enabled(bucket='lww'), "LWW not enabled on source bucket")
-        self.log.info("LWW enabled on source bucket as expected")
-        self.assertTrue(dest_conn.is_lww_enabled(bucket='lww'), "LWW not enabled on dest bucket")
-        self.log.info("LWW enabled on dest bucket as expected")
-
         self._create_buckets(bucket='nolww', ramQuotaMB=100, proxyPort=STANDARD_BUCKET_PORT + 1, src_lww=False,
                             dst_lww=False)
-        self.assertFalse(src_conn.is_lww_enabled(bucket='nolww'), "LWW enabled on source bucket")
-        self.log.info("LWW not enabled on source bucket as expected")
-        self.assertFalse(dest_conn.is_lww_enabled(bucket='nolww'), "LWW enabled on dest bucket")
-        self.log.info("LWW not enabled on dest bucket as expected")
-
-        self.sleep(10)
-
         self.setup_xdcr()
         self.merge_all_buckets()
         self.c1_cluster.pause_all_replications_by_id()
-
         self.sleep(30)
-
         src_lww = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'lww', self.c1_cluster)
         self.sleep(10)
         src_nolww = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'nolww', self.c1_cluster)
@@ -414,33 +368,33 @@ class Lww(XDCRNewBaseTest):
         dest_nolww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'nolww', self.c2_cluster)
         self.sleep(10)
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
         self._upsert(conn=src_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
         self._upsert(conn=src_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
 
         self.c1_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
         self.log.info("Src doc won using Rev Id as expected")
 
-        self.verify_results(skip_verify_data=['lww','nolww'], skip_verify_revid=['lww'])
+        self.verify_results(skip_verify_data=['lww', 'nolww'], skip_verify_revid=['lww'])
 
     def test_seq_upd_on_bi_with_src_wins(self):
         src_conn = RestConnection(self.c1_cluster.get_master_node())
@@ -477,14 +431,14 @@ class Lww(XDCRNewBaseTest):
         dest_nolww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'nolww', self.c2_cluster)
         self.sleep(10)
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
         self._upsert(conn=dest_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
         self._upsert(conn=dest_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
 
@@ -492,16 +446,16 @@ class Lww(XDCRNewBaseTest):
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
         self.log.info("Src doc won using LWW as expected")
 
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
         self.log.info("Target doc won using Rev Id as expected")
 
         self.verify_results(skip_verify_data=['nolww'])
@@ -541,14 +495,14 @@ class Lww(XDCRNewBaseTest):
         dest_nolww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'nolww', self.c2_cluster)
         self.sleep(10)
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
         self._upsert(conn=src_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
         self._upsert(conn=src_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
 
@@ -556,19 +510,19 @@ class Lww(XDCRNewBaseTest):
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
         self.log.info("Src doc won using Rev Id as expected")
 
-        self.verify_results(skip_verify_data=['lww','nolww'])
+        self.verify_results(skip_verify_data=['lww', 'nolww'])
 
     def test_seq_add_del_on_bi_with_src_wins(self):
         src_conn = RestConnection(self.c1_cluster.get_master_node())
@@ -585,7 +539,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._wait_for_replication_to_catchup()
 
@@ -607,10 +561,10 @@ class Lww(XDCRNewBaseTest):
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
         self.log.info("Source doc won using LWW as expected")
 
         self.verify_results(skip_verify_data=['lww'])
@@ -630,7 +584,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._wait_for_replication_to_catchup()
 
@@ -653,17 +607,17 @@ class Lww(XDCRNewBaseTest):
         self._wait_for_replication_to_catchup()
 
         try:
-            obj = src_lww.get(key='lww-0')
+            obj = src_lww.get('lww-0')
             if obj:
                 self.fail("Doc not deleted in src cluster using LWW")
-        except NotFoundError:
+        except DocumentNotFoundException:
             self.log.info("Doc deleted in src cluster using LWW as expected")
 
         try:
-            obj = dest_lww.get(key='lww-0')
+            obj = dest_lww.get('lww-0')
             if obj:
                 self.fail("Doc not deleted in target cluster using LWW")
-        except NotFoundError:
+        except DocumentNotFoundException:
             self.log.info("Doc deleted in target cluster using LWW as expected")
 
         # TODO - figure out how to verify results in this case
@@ -678,6 +632,8 @@ class Lww(XDCRNewBaseTest):
         self.log.info("LWW enabled on source bucket as expected")
         self.assertFalse(dest_conn.is_lww_enabled(), "LWW enabled on dest bucket")
         self.log.info("LWW not enabled on dest bucket as expected")
+
+        self.sleep(10)
 
         try:
             self.setup_xdcr()
@@ -729,12 +685,12 @@ class Lww(XDCRNewBaseTest):
         dst_def = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'default', self.c2_cluster)
         self.sleep(10)
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
         self._upsert(conn=src_def, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self.sleep(10)
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
         self.sleep(10)
         self._upsert(conn=dst_def, doc_id='lww-0', old_key='key', new_key='key2', new_val='value2')
@@ -744,10 +700,10 @@ class Lww(XDCRNewBaseTest):
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_def.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Doc with greater rev id did not win")
-        obj = dst_def.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Doc with greater rev id did not win")
+        obj = src_def.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Doc with greater rev id did not win")
+        obj = dst_def.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Doc with greater rev id did not win")
         self.log.info("Doc with greater rev id won as expected")
 
         self.verify_results(skip_verify_data=['default'])
@@ -774,7 +730,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.pause_all_replications_by_id()
@@ -791,7 +747,7 @@ class Lww(XDCRNewBaseTest):
         self._upsert(conn=dest_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self._upsert(conn=dest_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
 
-        gen = DocumentGenerator('lww', '{{"key3":"value3"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key3":"value3"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
@@ -800,16 +756,16 @@ class Lww(XDCRNewBaseTest):
         src_lww = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'lww', self.c1_cluster)
         src_nolww = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'nolww', self.c1_cluster)
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
         self.log.info("Src doc won using LWW as expected")
 
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Target doc did not win using Rev Id")
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Target doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
         self.log.info("Target doc won using Rev Id as expected")
 
         self.verify_results(skip_verify_data=['nolww'], skip_verify_revid=['nolww'])
@@ -836,7 +792,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.pause_all_replications_by_id()
@@ -853,7 +809,7 @@ class Lww(XDCRNewBaseTest):
         self._upsert(conn=dest_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self._upsert(conn=dest_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
 
-        gen = DocumentGenerator('lww', '{{"key3":"value3"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key3":"value3"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
@@ -866,16 +822,16 @@ class Lww(XDCRNewBaseTest):
         src_nolww = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'nolww', self.c1_cluster)
         self.sleep(10)
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Src doc did not win using LWW")
         self.log.info("Src doc won using LWW as expected")
 
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Target doc did not win using Rev Id")
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Target doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
         self.log.info("Target doc won using Rev Id as expected")
 
         self.verify_results(skip_verify_data=['nolww'], skip_verify_revid=['nolww'])
@@ -895,7 +851,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._wait_for_replication_to_catchup()
 
@@ -925,10 +881,10 @@ class Lww(XDCRNewBaseTest):
         dest_lww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'lww', self.c2_cluster)
         self.sleep(10)
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
         self.log.info("Source doc won using LWW as expected")
 
         self.verify_results(skip_verify_data=['lww'])
@@ -948,7 +904,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._wait_for_replication_to_catchup()
 
@@ -978,10 +934,10 @@ class Lww(XDCRNewBaseTest):
         dest_lww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'lww', self.c2_cluster)
         self.sleep(10)
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Source doc did not win using LWW")
         self.log.info("Source doc won using LWW as expected")
 
         self.verify_results(skip_verify_data=['lww'])
@@ -1023,10 +979,10 @@ class Lww(XDCRNewBaseTest):
 
         tasks = []
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         tasks += self.c1_cluster.async_load_all_buckets_from_generator(gen)
 
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         tasks += self.c2_cluster.async_load_all_buckets_from_generator(gen)
 
         for task in tasks:
@@ -1052,16 +1008,16 @@ class Lww(XDCRNewBaseTest):
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key4':'value4'}, obj.value, "Target doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key4':'value4'}, obj.value, "Target doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key4':'value4'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key4':'value4'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Src doc did not win using Rev Id")
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key3':'value3'}, obj.value, "Src doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Src doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key3':'value3'}, obj.value, "Src doc did not win using Rev Id")
         self.log.info("Src doc won using Rev Id as expected")
 
         self.verify_results(skip_verify_data=['lww', 'nolww'])
@@ -1116,7 +1072,7 @@ class Lww(XDCRNewBaseTest):
         gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
         self.c1_cluster.async_load_all_buckets_from_generator(gen2)
 
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
 
         NodeHelper.wait_warmup_completed([self.c1_cluster.warmup_node(master=True)])
 
@@ -1144,7 +1100,7 @@ class Lww(XDCRNewBaseTest):
         gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
         self.c1_cluster.async_load_all_buckets_from_generator(gen2)
 
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
 
         conn = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
         conn.stop_couchbase()
@@ -1177,10 +1133,10 @@ class Lww(XDCRNewBaseTest):
         gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
         self.c1_cluster.async_load_all_buckets_from_generator(gen2)
 
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
 
+        self._kill_processes([self.c1_cluster.get_master_node()])
         conn = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
-        conn.kill_erlang()
         conn.start_couchbase()
         self.wait_service_started(self.c1_cluster.get_master_node())
         self.sleep(600, "Slepping so that vBuckets are ready and to avoid \
@@ -1209,12 +1165,12 @@ class Lww(XDCRNewBaseTest):
         gen2 = BlobGenerator("lww-", "lww-", self._value_size, end=self._num_items)
         self.c1_cluster.async_load_all_buckets_from_generator(gen2)
 
-        self.sleep(self._wait_timeout / 2)
+        self.sleep(self._wait_timeout // 2)
 
         conn = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
         conn.pause_memcached()
         conn.unpause_memcached()
-        self.sleep(600,"Wait such that any replication happening should get completed after memcached restart.")
+        self.sleep(600, "Wait such that any replication happening should get completed after memcached restart.")
         self.verify_results()
 
     def test_seq_upd_on_bi_with_target_clock_faster(self):
@@ -1254,30 +1210,30 @@ class Lww(XDCRNewBaseTest):
         dest_nolww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'nolww', self.c2_cluster)
         self.sleep(10)
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
         self._upsert(conn=dest_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self._upsert(conn=dest_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using Rev Id")
         self.log.info("Target doc won using Rev Id as expected")
 
-        self.verify_results(skip_verify_data=['lww','nolww'])
+        self.verify_results(skip_verify_data=['lww', 'nolww'])
 
         conn = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
         conn.stop_couchbase()
@@ -1324,30 +1280,30 @@ class Lww(XDCRNewBaseTest):
         dest_nolww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'nolww', self.c2_cluster)
         self.sleep(10)
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._upsert(conn=src_lww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
         self._upsert(conn=src_nolww, doc_id='lww-0', old_key='key', new_key='key1', new_val='value1')
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using LWW")
         self.log.info("Src doc won using LWW as expected")
 
-        obj = dest_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
-        obj = src_nolww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
+        obj = dest_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
+        obj = src_nolww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Src doc did not win using Rev Id")
         self.log.info("Src doc won using Rev Id as expected")
 
-        self.verify_results(skip_verify_data=['lww','nolww'])
+        self.verify_results(skip_verify_data=['lww', 'nolww'])
 
         conn = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
         conn.stop_couchbase()
@@ -1374,7 +1330,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._wait_for_replication_to_catchup()
 
@@ -1396,17 +1352,17 @@ class Lww(XDCRNewBaseTest):
         self._wait_for_replication_to_catchup()
 
         try:
-            obj = src_lww.get(key='lww-0')
+            obj = src_lww.get('lww-0')
             if obj:
                 self.fail("Doc not deleted in src cluster using LWW")
-        except NotFoundError:
+        except DocumentNotFoundException:
             self.log.info("Doc deleted in src cluster using LWW as expected")
 
         try:
-            obj = dest_lww.get(key='lww-0')
+            obj = dest_lww.get('lww-0')
             if obj:
                 self.fail("Doc not deleted in target cluster using LWW")
-        except NotFoundError:
+        except DocumentNotFoundException:
             self.log.info("Doc deleted in target cluster using LWW as expected")
 
         # TODO - figure out how to verify results in this case
@@ -1437,7 +1393,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._wait_for_replication_to_catchup()
 
@@ -1458,10 +1414,10 @@ class Lww(XDCRNewBaseTest):
         self.c2_cluster.resume_all_replications_by_id()
         self._wait_for_replication_to_catchup()
 
-        obj = src_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
+        obj = src_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
         self.verify_results(skip_verify_data=['lww'])
@@ -1733,23 +1689,23 @@ class Lww(XDCRNewBaseTest):
         self.merge_all_buckets()
         self.c1_cluster.pause_all_replications_by_id()
 
-        zones = src_conn.get_zone_names().keys()
+        zones = list(src_conn.get_zone_names().keys())
         source_zone = zones[0]
         target_zone = "test_lww"
 
         try:
             self.log.info("Current nodes in group {0} : {1}".format(source_zone,
-                                                                    str(src_conn.get_nodes_in_zone(source_zone).keys())))
+                                                                    str(list(src_conn.get_nodes_in_zone(source_zone).keys()))))
             self.log.info("Creating new zone " + target_zone)
             src_conn.add_zone(target_zone)
-            self.log.info("Moving {0} to new zone {1}".format(str(src_conn.get_nodes_in_zone(source_zone).keys()),
+            self.log.info("Moving {0} to new zone {1}".format(str(list(src_conn.get_nodes_in_zone(source_zone).keys())),
                                                               target_zone))
-            src_conn.shuffle_nodes_in_zones(["{0}".format(str(src_conn.get_nodes_in_zone(source_zone).keys()))],
-                                            source_zone,target_zone)
+            src_conn.shuffle_nodes_in_zones(["{0}".format(str(list(src_conn.get_nodes_in_zone(source_zone).keys())))],
+                                            source_zone, target_zone)
 
-            gen = DocumentGenerator('lww-', '{{"age": {0}}}', xrange(100), start=0, end=self._num_items)
+            gen = DocumentGenerator('lww-', '{{"age": {0}}}', list(range(100)), start=0, end=self._num_items)
             self.c2_cluster.load_all_buckets_from_generator(gen)
-            gen = DocumentGenerator('lww-', '{{"age": {0}}}', xrange(100), start=0, end=self._num_items)
+            gen = DocumentGenerator('lww-', '{{"age": {0}}}', list(range(100)), start=0, end=self._num_items)
             self.c1_cluster.load_all_buckets_from_generator(gen)
 
             self.c1_cluster.resume_all_replications_by_id()
@@ -1758,10 +1714,10 @@ class Lww(XDCRNewBaseTest):
         except Exception as e:
             self.log.info(e)
         finally:
-            self.log.info("Moving {0} back to old zone {1}".format(str(src_conn.get_nodes_in_zone(source_zone).keys()),
+            self.log.info("Moving {0} back to old zone {1}".format(str(list(src_conn.get_nodes_in_zone(source_zone).keys())),
                                                                    source_zone))
-            src_conn.shuffle_nodes_in_zones(["{0}".format(str(src_conn.get_nodes_in_zone(source_zone).keys()))],
-                                            target_zone,source_zone)
+            src_conn.shuffle_nodes_in_zones(["{0}".format(str(list(src_conn.get_nodes_in_zone(source_zone).keys())))],
+                                            target_zone, source_zone)
             self.log.info("Deleting new zone " + target_zone)
             src_conn.delete_zone(target_zone)
 
@@ -1981,11 +1937,11 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
+                                proxyPort=11211, replica_index=1, threadsNumber=3,
                                 flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211,
+                                   )
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on source bucket")
         self.log.info("LWW enabled on source bucket as expected")
         self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on dest bucket")
@@ -2096,7 +2052,7 @@ class Lww(XDCRNewBaseTest):
                                                         self.src_master.rest_username,
                                                         self.src_master.rest_password)
                     output, _ = self.shell.execute_command(cmd)
-                self.assertNotEquals(len(output), 0, "Full disk warning not generated as expected in %s" % node.ip)
+                self.assertNotEqual(len(output), 0, "Full disk warning not generated as expected in %s" % node.ip)
                 self.log.info("Full disk warning generated as expected in %s" % node.ip)
 
                 self.shell.delete_files(zip_file)
@@ -2133,7 +2089,7 @@ class Lww(XDCRNewBaseTest):
 
         vb0_node = None
         nodes = self.c1_cluster.get_nodes()
-        ip = VBucketAwareMemcached(src_conn,'default').vBucketMap[0].split(':')[0]
+        ip = VBucketAwareMemcached(src_conn, 'default').vBucketMap[0].split(':')[0]
         for node in nodes:
             if ip == node.ip:
                 vb0_node = node
@@ -2266,11 +2222,10 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
-                                flushEnabled=1, lww=True)
+                              proxyPort=11211, replica_index=1, threadsNumber=3,
+                              flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211)
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on C1 bucket")
         self.log.info("LWW enabled on C1 bucket as expected")
         self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on C2 bucket")
@@ -2287,7 +2242,7 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
         self._wait_for_replication_to_catchup()
 
@@ -2314,12 +2269,12 @@ class Lww(XDCRNewBaseTest):
 
         self._wait_for_replication_to_catchup()
 
-        obj = src_def.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "C3 doc did not win using LWW")
-        obj = dest_def.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "C3 doc did not win using LWW")
-        obj = c3_def.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "C3 doc did not win using LWW")
+        obj = src_def.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "C3 doc did not win using LWW")
+        obj = dest_def.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "C3 doc did not win using LWW")
+        obj = c3_def.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "C3 doc did not win using LWW")
         self.log.info("C3 doc won using LWW as expected")
 
         conn1 = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
@@ -2335,6 +2290,7 @@ class Lww(XDCRNewBaseTest):
         conn1.start_couchbase()
         conn2.start_couchbase()
         conn3.start_couchbase()
+        self._wait_for_replication_to_catchup()
 
     def test_lww_mixed_with_diff_topology_and_clocks_out_of_sync(self):
         self.c3_cluster = self.get_cb_cluster_by_name('C3')
@@ -2345,11 +2301,10 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100, src_lww=True, dst_lww=False)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
-                                flushEnabled=1, lww=True)
+                              proxyPort=11211, replica_index=1, threadsNumber=3,
+                              flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211)
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on C1 bucket")
         self.log.info("LWW enabled on C1 bucket as expected")
         self.assertFalse(dest_conn.is_lww_enabled(), "LWW enabled on C2 bucket")
@@ -2375,11 +2330,10 @@ class Lww(XDCRNewBaseTest):
 
         self._create_buckets(bucket='default', ramQuotaMB=100, src_lww=True, dst_lww=True)
         c3_conn.create_bucket(bucket='default', ramQuotaMB=100, authType='none', saslPassword='', replicaNumber=1,
-                                proxyPort=11211, bucketType='membase', replica_index=1, threadsNumber=3,
-                                flushEnabled=1, lww=True)
+                              proxyPort=11211, replica_index=1, threadsNumber=3,
+                              flushEnabled=1, lww=True)
         self.c3_cluster.add_bucket(ramQuotaMB=100, bucket='default', authType='none',
-                                   saslPassword='', replicaNumber=1, proxyPort=11211, bucketType='membase',
-                                   evictionPolicy='valueOnly')
+                                   saslPassword='', replicaNumber=1, proxyPort=11211)
         self.assertTrue(src_conn.is_lww_enabled(), "LWW not enabled on C1 bucket")
         self.log.info("LWW enabled on C1 bucket as expected")
         self.assertTrue(dest_conn.is_lww_enabled(), "LWW not enabled on C2 bucket")
@@ -2396,11 +2350,11 @@ class Lww(XDCRNewBaseTest):
         self.setup_xdcr()
         self.merge_all_buckets()
 
-        gen1 = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen1 = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen1)
         self._wait_for_replication_to_catchup()
 
-        gen2 = DocumentGenerator('lww', '{{"key":"value"}}', xrange(100), start=0, end=1)
+        gen2 = DocumentGenerator('lww', '{{"key":"value"}}', list(range(100)), start=0, end=1)
         self.c3_cluster.load_all_buckets_from_generator(gen2)
         self._wait_for_replication_to_catchup()
 
@@ -2409,7 +2363,7 @@ class Lww(XDCRNewBaseTest):
 
         self.sleep(30)
 
-        src_def = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'default',self.c1_cluster)
+        src_def = self._get_python_sdk_client(self.c1_cluster.get_master_node().ip, 'default', self.c1_cluster)
         self.sleep(10)
         dest_def = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'default', self.c2_cluster)
         self.sleep(10)
@@ -2424,8 +2378,8 @@ class Lww(XDCRNewBaseTest):
 
         self._wait_for_replication_to_catchup()
 
-        obj = dest_def.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "C3 doc did not win using LWW")
+        obj = dest_def.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "C3 doc did not win using LWW")
 
         conn1 = RemoteMachineShellConnection(self.c1_cluster.get_master_node())
         conn1.stop_couchbase()
@@ -2450,13 +2404,13 @@ class Lww(XDCRNewBaseTest):
 
         self.sleep(10)
 
-        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c1_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_active = self._get_max_cas(node=self.c1_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
-        vbucket_id = self._get_vbucket_id(self._input.servers[1], 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_replica = self._get_max_cas(node=self._input.servers[1], bucket='default', vbucket_id=vbucket_id)
 
         self.log.info("max_cas_active: " + str(max_cas_active))
@@ -2513,13 +2467,13 @@ class Lww(XDCRNewBaseTest):
 
         self.c1_cluster.pause_all_replications_by_id()
 
-        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
@@ -2531,8 +2485,8 @@ class Lww(XDCRNewBaseTest):
         dest_lww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'default', self.c2_cluster)
         self.sleep(10)
 
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
         self.log.info("max_cas_c2_before: " + str(max_cas_c2_before))
@@ -2567,13 +2521,13 @@ class Lww(XDCRNewBaseTest):
 
         self.c1_cluster.pause_all_replications_by_id()
 
-        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
@@ -2583,8 +2537,8 @@ class Lww(XDCRNewBaseTest):
         dest_lww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'default', self.c2_cluster)
         self.sleep(10)
 
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
         self.log.info("Src doc won using LWW as expected")
 
         self.log.info("max_cas_c2_before: " + str(max_cas_c2_before))
@@ -2619,13 +2573,13 @@ class Lww(XDCRNewBaseTest):
 
         self.c1_cluster.pause_all_replications_by_id()
 
-        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
@@ -2637,8 +2591,8 @@ class Lww(XDCRNewBaseTest):
         dest_lww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'default', self.c2_cluster)
         self.sleep(10)
 
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key1':'value1'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
         self.log.info("max_cas_c2_before: " + str(max_cas_c2_before))
@@ -2679,13 +2633,13 @@ class Lww(XDCRNewBaseTest):
 
         self.c1_cluster.pause_all_replications_by_id()
 
-        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         max_cas_c2_before = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
         self.c1_cluster.resume_all_replications_by_id()
@@ -2695,8 +2649,8 @@ class Lww(XDCRNewBaseTest):
         dest_lww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'default', self.c2_cluster)
         self.sleep(10)
 
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Src doc did not win using LWW")
         self.log.info("Src doc won using LWW as expected")
 
         self.log.info("max_cas_c2_before: " + str(max_cas_c2_before))
@@ -2737,18 +2691,18 @@ class Lww(XDCRNewBaseTest):
 
         self.c1_cluster.pause_all_replications_by_id()
 
-        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key1":"value1"}}', list(range(100)), start=0, end=1)
         self.c1_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c1_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         hlc_c1 = self._get_max_cas(node=self.c1_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         self.sleep(timeout=1200)
 
-        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', xrange(100), start=0, end=1)
+        gen = DocumentGenerator('lww', '{{"key2":"value2"}}', list(range(100)), start=0, end=1)
         self.c2_cluster.load_all_buckets_from_generator(gen)
 
-        vbucket_id = self._get_vbucket_id(self.c2_cluster.get_master_node(), 'default', 'lww-0')
+        vbucket_id = self._get_vbucket_id(key='lww-0')
         hlc_c2_1 = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)
 
         self.c1_cluster.resume_all_replications_by_id()
@@ -2756,8 +2710,8 @@ class Lww(XDCRNewBaseTest):
         dest_lww = self._get_python_sdk_client(self.c2_cluster.get_master_node().ip, 'default', self.c2_cluster)
         self.sleep(10)
 
-        obj = dest_lww.get(key='lww-0')
-        self.assertDictContainsSubset({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
+        obj = dest_lww.get('lww-0')
+        self.check_kv_exists_in_doc({'key2':'value2'}, obj.value, "Target doc did not win using LWW")
         self.log.info("Target doc won using LWW as expected")
 
         hlc_c2_2 = self._get_max_cas(node=self.c2_cluster.get_master_node(), bucket='default', vbucket_id=vbucket_id)

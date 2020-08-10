@@ -2,8 +2,11 @@ import json
 import logging
 import random
 import datetime
-import os
+import os, sys
+import socket
+
 from TestInput import TestInputSingleton
+from couchbase_helper.tuq_helper import N1QLHelper
 from lib.couchbase_helper.documentgenerator import BlobGenerator
 from lib.couchbase_helper.stats_tools import StatsCommon
 from lib.couchbase_helper.tuq_generators import JsonGenerator
@@ -17,8 +20,15 @@ from pytests.query_tests_helper import QueryHelperTests
 log = logging.getLogger()
 
 
-class EventingBaseTest(QueryHelperTests, BaseTestCase):
+class EventingBaseTest(QueryHelperTests):
     panic_count = 0
+    ## added to ignore error
+    def suite_setUp(self):
+        pass
+
+    def suite_tearDown(self):
+        pass
+
 
     def setUp(self):
         if self._testMethodDoc:
@@ -31,12 +41,14 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
         self.master = self.servers[0]
         self.server = self.master
         self.restServer = self.get_nodes_from_services_map(service_type="eventing")
-        self.rest = RestConnection(self.restServer)
-        self.log.info(
-            "Setting the min possible memory quota so that adding mode nodes to the cluster wouldn't be a problem.")
-        self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=330)
-        self.rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=INDEX_QUOTA)
-        # self.rest.set_service_memoryQuota(service='eventingMemoryQuota', memoryQuota=EVENTING_QUOTA)
+        if self.restServer:
+            self.rest = RestConnection(self.restServer)
+            self.rest.set_indexer_storage_mode()
+            self.log.info(
+                "Setting the min possible memory quota so that adding mode nodes to the cluster wouldn't be a problem.")
+            self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=330)
+            self.rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=INDEX_QUOTA)
+            self.rest.set_service_memoryQuota(service='eventingMemoryQuota', memoryQuota=EVENTING_QUOTA)
         self.src_bucket_name = self.input.param('src_bucket_name', 'src_bucket')
         self.eventing_log_level = self.input.param('eventing_log_level', 'INFO')
         self.dst_bucket_name = self.input.param('dst_bucket_name', 'dst_bucket')
@@ -46,26 +58,73 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
         self.docs_per_day = self.input.param("doc-per-day", 1)
         self.use_memory_manager = self.input.param('use_memory_manager', True)
         self.print_eventing_handler_code_in_logs = self.input.param('print_eventing_handler_code_in_logs', True)
-        random.seed(datetime.time)
+        random.seed(datetime.datetime.now())
         function_name = "Function_{0}_{1}".format(random.randint(1, 1000000000), self._testMethodName)
         # See MB-28447, From now function name can only be max of 100 chars
         self.function_name = function_name[0:90]
+        self.timer_storage_chan_size = self.input.param('timer_storage_chan_size', 10000)
+        self.dcp_gen_chan_size = self.input.param('dcp_gen_chan_size', 10000)
+        self.is_sbm=self.input.param('source_bucket_mutation',False)
+        self.n1ql_node = self.get_nodes_from_services_map(service_type="n1ql")
+        self.n1ql_helper = N1QLHelper(shell=self.shell, max_verify=self.max_verify, buckets=self.buckets,
+                                      item_flag=self.item_flag, n1ql_port=self.n1ql_port,
+                                      full_docs_list=self.full_docs_list, log=self.log, input=self.input,
+                                      master=self.master, use_rest=True)
+        self.pause_resume = self.input.param('pause_resume', False)
+        self.pause_resume_number = self.input.param('pause_resume_number', 1)
+        self.is_curl=self.input.param('curl',False)
+        self.hostname = self.input.param('host', 'https://postman-echo.com/')
+        self.curl_username = self.input.param('curl_user', None)
+        self.curl_password = self.input.param('curl_password', None)
+        self.auth_type = self.input.param('auth_type', 'no-auth')
+        self.bearer_key=self.input.param('bearer_key',None)
+        self.url = self.input.param('path', None)
+        self.cookies = self.input.param('cookies',False)
+        self.bearer_key = self.input.param('bearer_key','')
+        if self.hostname=='local':
+            ##self.insall_dependencies()
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            self.hostname= "http://"+ip+":1080/"
+            self.log.info("local ip address:{}".format(self.hostname))
+            self.setup_curl()
+        self.skip_metabucket_check=False
+        self.cancel_timer=self.input.param('cancel_timer', False)
+        self.is_expired=self.input.param('is_expired', False)
+        self.print_app_log=self.input.param('print_app_log', False)
+        self.print_go_routine=self.input.param('print_go_routine', False)
 
     def tearDown(self):
         # catch panics and print it in the test log
         self.check_eventing_logs_for_panic()
+        rest = RestConnection(self.master)
+        buckets = rest.get_buckets()
+        for bucket in buckets:
+            stats = rest.get_bucket_stats(bucket)
+            self.log.info("Bucket {} DGM is {}".format(bucket,stats["vb_active_resident_items_ratio"]))
+        self.hostname = self.input.param('host', 'https://postman-echo.com/')
+        if self.hostname == 'local':
+            self.teardown_curl()
+        # check metadata bucke is empty
+        if len(buckets) > 0 and not self.skip_metabucket_check:
+            stats_meta = rest.get_bucket_stats("metadata")
+            self.log.info("number of documents in metadata bucket {}".format(stats_meta["curr_items"]))
+            if stats_meta["curr_items"] != 0:
+                raise Exception("metdata bucket is not empty at the end of test")
         super(EventingBaseTest, self).tearDown()
 
     def create_save_function_body(self, appname, appcode, description="Sample Description",
                                   checkpoint_interval=20000, cleanup_timers=False,
-                                  dcp_stream_boundary="everything", deployment_status=True,
+                                  dcp_stream_boundary="everything", deployment_status=False,
                                   # rbacpass="password", rbacrole="admin", rbacuser="cbadminbucket",
                                   skip_timer_threshold=86400,
                                   sock_batch_size=1, tick_duration=5000, timer_processing_tick_interval=500,
-                                  timer_worker_pool_size=3, worker_count=3, processing_status=True,
-                                  cpp_worker_thread_count=1, multi_dst_bucket=False, execution_timeout=60,
-                                  data_chan_size=10000, worker_queue_cap=100000, deadline_timeout=62
-                                  ):
+                                  timer_worker_pool_size=3, worker_count=3, processing_status=False ,
+                                  cpp_worker_thread_count=1, multi_dst_bucket=False, execution_timeout=20,
+                                  data_chan_size=10000, worker_queue_cap=100000, deadline_timeout=62,
+                                  language_compatibility='6.5.0',hostpath=None,validate_ssl=False):
         body = {}
         body['appname'] = appname
         script_dir = os.path.dirname(__file__)
@@ -75,7 +134,7 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
         fh.close()
         body['depcfg'] = {}
         body['depcfg']['buckets'] = []
-        body['depcfg']['buckets'].append({"alias": self.dst_bucket_name, "bucket_name": self.dst_bucket_name})
+        body['depcfg']['buckets'].append({"alias": "dst_bucket", "bucket_name": self.dst_bucket_name,"access": "rw"})
         if multi_dst_bucket:
             body['depcfg']['buckets'].append({"alias": self.dst_bucket_name1, "bucket_name": self.dst_bucket_name1})
         body['depcfg']['metadata_bucket'] = self.metadata_bucket_name
@@ -108,82 +167,103 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
         if execution_timeout != 3:
             deadline_timeout = execution_timeout + 1
         body['settings']['deadline_timeout'] = deadline_timeout
+        body['settings']['timer_storage_chan_size'] = self.timer_storage_chan_size
+        body['settings']['dcp_gen_chan_size'] = self.dcp_gen_chan_size
+        if self.is_sbm:
+            del body['depcfg']['buckets'][0]
+            body['depcfg']['buckets'].append({"alias": "src_bucket", "bucket_name": self.src_bucket_name,"access": "rw"})
+        body['depcfg']['curl'] = []
+        if self.is_curl:
+            if hostpath != None:
+                body['depcfg']['curl'].append({"hostname": self.hostname+hostpath, "value": "server", "auth_type": self.auth_type,
+                                               "username": self.curl_username, "password": self.curl_password,
+                                               "allow_cookies": self.cookies,"validate_ssl_certificate": validate_ssl})
+            else:
+                body['depcfg']['curl'].append(
+                    {"hostname": self.hostname, "value": "server", "auth_type": self.auth_type,
+                     "username": self.curl_username, "password": self.curl_password, "allow_cookies": self.cookies,"validate_ssl_certificate": validate_ssl})
+            if self.auth_type=="bearer":
+                body['depcfg']['curl'][0]['bearer_key']=self.bearer_key
+        body['settings']['language_compatibility']=language_compatibility
+        content1 = self.rest.create_function(body['appname'], body)
+        self.log.info("saving function {}".format(content1))
         return body
 
-    def wait_for_bootstrap_to_complete(self, name, iterations=20):
+    def wait_for_bootstrap_to_complete(self, name, iterations=120):
         result = self.rest.get_deployed_eventing_apps()
         count = 0
         while name not in result and count < iterations:
-            self.sleep(30, message="Waiting for eventing node to come out of bootstrap state...")
+            self.sleep(5, message="Waiting for eventing node to come out of bootstrap state...")
             count += 1
             result = self.rest.get_deployed_eventing_apps()
         if count == iterations:
             raise Exception(
                 'Eventing took lot of time to come out of bootstrap state or did not successfully bootstrap')
 
-    def wait_for_undeployment(self, name, iterations=20):
-        result = self.rest.get_deployed_eventing_apps()
+    def wait_for_undeployment(self, name, iterations=120):
+        self.sleep(5, message="Waiting for undeployment of function...")
+        result = self.rest.get_running_eventing_apps()
         count = 0
         while name in result and count < iterations:
-            self.sleep(30, message="Waiting for undeployment of function...")
+            self.sleep(5, message="Waiting for undeployment of function...")
             count += 1
-            result = self.rest.get_deployed_eventing_apps()
+            result = self.rest.get_running_eventing_apps()
         if count == iterations:
-            raise Exception(
-                'Eventing took lot of time to undeploy')
+            raise Exception('Eventing took lot of time to undeploy')
 
     def verify_eventing_results(self, name, expected_dcp_mutations, doc_timer_events=False, on_delete=False,
-                                skip_stats_validation=False, bucket=None, timeout=600):
+                                skip_stats_validation=False, bucket=None, timeout=600,expected_duplicate=False):
         # This resets the rest server as the previously used rest server might be out of cluster due to rebalance
         num_nodes = self.refresh_rest_server()
         eventing_nodes = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
         if bucket is None:
             bucket=self.dst_bucket_name
+        if self.is_sbm:
+            bucket=self.src_bucket_name
         if not skip_stats_validation:
-            # we can't rely on DCP_MUTATION stats when doc timers events are set.
+            # we can't rely on dcp_mutation stats when doc timers events are set.
             # TODO : add this back when getEventProcessingStats works reliably for doc timer events as well
             if not doc_timer_events:
                 count = 0
-                if num_nodes <= 1:
-                    stats = self.rest.get_event_processing_stats(name)
-                else:
-                    stats = self.rest.get_aggregate_event_processing_stats(name)
-                if on_delete:
-                    mutation_type = "DCP_DELETION"
-                else:
-                    mutation_type = "DCP_MUTATION"
-                actual_dcp_mutations = stats[mutation_type]
-                # This is required when binary data is involved where DCP_MUTATION will have process DCP_MUTATIONS
+                actual_dcp_mutations = self.getActualMutations(num_nodes, name, on_delete)
+
+                # This is required when binary data is involved where dcp_mutation will have process DCP_MUTATIONS
                 # but ignore it
                 # wait for eventing node to process dcp mutations
-                log.info("Number of {0} processed till now : {1}".format(mutation_type, actual_dcp_mutations))
+                log.info("Number of (is Deleted: {0}) processed till now : {1}".format(on_delete, actual_dcp_mutations))
                 while actual_dcp_mutations != expected_dcp_mutations and count < 20:
                     self.sleep(timeout/20, message="Waiting for eventing to process all dcp mutations...")
                     count += 1
-                    if num_nodes <= 1:
-                        stats = self.rest.get_event_processing_stats(name)
-                    else:
-                        stats = self.rest.get_aggregate_event_processing_stats(name)
-                    actual_dcp_mutations = stats[mutation_type]
-                    log.info("Number of {0} processed till now : {1}".format(mutation_type, actual_dcp_mutations))
+                    actual_dcp_mutations = self.getActualMutations(num_nodes, name, on_delete)
+                    log.info("Number of onDelete? {0} processed till now : {1}".format(on_delete, actual_dcp_mutations))
                 if count == 20:
                     raise Exception(
-                        "Eventing has not processed all the {0}. Current : {1} Expected : {2}".format(mutation_type,
-                                                                                                      actual_dcp_mutations,
-                                                                                                      expected_dcp_mutations
-                                                                                                      ))
+                        "Eventing has not processed all the isDeleted: {0}. Current : {1}   Expected : {2}".format(on_delete,
+                                                                                                  actual_dcp_mutations,
+                                                                                                  expected_dcp_mutations
+                                                                                                  ))
         # wait for bucket operations to complete and verify it went through successfully
         count = 0
         stats_dst = self.rest.get_bucket_stats(bucket)
         while stats_dst["curr_items"] != expected_dcp_mutations and count < 20:
-            message = "Waiting for handler code to complete bucket operations... Current : {0} Expected : {1}".\
-                      format(stats_dst["curr_items"], expected_dcp_mutations)
-            self.sleep(timeout/20, message=message)
-            count += 1
+            message = "Waiting for handler code {2} to complete bucket operations... Current : {0} Expected : {1}".\
+                      format(stats_dst["curr_items"], expected_dcp_mutations, name)
+            self.sleep(timeout//20, message=message)
+            curr_items=stats_dst["curr_items"]
             stats_dst = self.rest.get_bucket_stats(bucket)
+            if curr_items == stats_dst["curr_items"]:
+                count += 1
+            else:
+                count=0
+        try:
+            stats_src = self.rest.get_bucket_stats(self.src_bucket_name)
+            log.info("Documents in source bucket : {}".format(stats_src["curr_items"]))
+        except :
+            pass
         if stats_dst["curr_items"] != expected_dcp_mutations:
             total_dcp_backlog = 0
             timers_in_past = 0
+            lcb = {}
             # TODO : Use the following stats in a meaningful way going forward. Just printing them for debugging.
             for eventing_node in eventing_nodes:
                 rest_conn = RestConnection(eventing_node)
@@ -191,18 +271,46 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
                 total_dcp_backlog += out[0]["events_remaining"]["dcp_backlog"]
                 if "TIMERS_IN_PAST" in out[0]["event_processing_stats"]:
                     timers_in_past += out[0]["event_processing_stats"]["TIMERS_IN_PAST"]
+                total_lcb_exceptions= out[0]["lcb_exception_stats"]
+                host=eventing_node.ip
+                lcb[host]=total_lcb_exceptions
                 full_out = rest_conn.get_all_eventing_stats(seqs_processed=True)
                 log.info("Stats for Node {0} is \n{1} ".format(eventing_node.ip, json.dumps(out, sort_keys=True,
                                                                                           indent=4)))
                 log.debug("Full Stats for Node {0} is \n{1} ".format(eventing_node.ip, json.dumps(full_out,
                                                                                                 sort_keys=True,
                                                                                                 indent=4)))
-            raise Exception(
-                "Bucket operations from handler code took lot of time to complete or didn't go through. Current : {0} "
-                "Expected : {1}  dcp_backlog : {2}  TIMERS_IN_PAST : {3}".format(stats_dst["curr_items"],
-                                                                                 expected_dcp_mutations,
+            self.print_document_count_via_index(bucket)
+            self.print_timer_alarm_context()
+            if stats_dst["curr_items"] < expected_dcp_mutations:
+                self.skip_metabucket_check=True
+                if self.print_app_log:
+                    self.print_app_logs(name)
+                raise Exception(
+                    "missing data in destination bucket. Current : {0} "
+                    "Expected : {1}  dcp_backlog : {2}  TIMERS_IN_PAST : {3} lcb_exceptions : {4}".format(stats_dst["curr_items"],
+                                                                                     expected_dcp_mutations,
                                                                                  total_dcp_backlog,
-                                                                                 timers_in_past))
+                                                                                 timers_in_past,lcb))
+            elif stats_dst["curr_items"] > expected_dcp_mutations and not expected_duplicate:
+                self.skip_metabucket_check = True
+                if self.print_app_log:
+                    self.print_app_logs(name)
+                raise Exception(
+                    "duplicated data in destination bucket which is not expected. Current : {0} "
+                    "Expected : {1}  dcp_backlog : {2}  TIMERS_IN_PAST : {3} lcb_exceptions : {4}".format(stats_dst["curr_items"],
+                                                                                     expected_dcp_mutations,
+                                                                                 total_dcp_backlog,
+                                                                                 timers_in_past,lcb))
+            elif stats_dst["curr_items"] > expected_dcp_mutations and expected_duplicate:
+                self.log.info(
+                    "duplicated data in destination bucket which is expected. Current : {0} "
+                    "Expected : {1}  dcp_backlog : {2}  TIMERS_IN_PAST : {3} lcb_exceptions : {4}".format(stats_dst["curr_items"],
+                                                                                     expected_dcp_mutations,
+                                                                                 total_dcp_backlog,
+                                                                                 timers_in_past,lcb))
+        log.info("Final docs count... Current : {0} Expected : {1}".
+                 format(stats_dst["curr_items"], expected_dcp_mutations))
         # TODO : Use the following stats in a meaningful way going forward. Just printing them for debugging.
         # print all stats from all eventing nodes
         # These are the stats that will be used by ns_server and UI
@@ -215,39 +323,35 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
             log.debug("Full Stats for Node {0} is \n{1} ".format(eventing_node.ip, json.dumps(full_out, sort_keys=True,
                                                                                             indent=4)))
 
+    def getActualMutations(self, num_nodes, name, on_delete):
+        actual_dcp_mutations = 0
+        if num_nodes <= 1:
+            stats = self.rest.get_event_processing_stats(name)
+        else:
+            stats = self.rest.get_aggregate_event_processing_stats(name)
+
+        if on_delete:
+            if "dcp_deletion" in stats:
+                actual_dcp_mutations = stats["dcp_deletion"]
+            if "dcp_expiration" in stats:
+                actual_dcp_mutations += stats["dcp_expiration"]
+        else:
+            actual_dcp_mutations = stats["dcp_mutation"]
+        return actual_dcp_mutations
+
     def eventing_stats(self):
-        self.sleep(30)
+        self.sleep(5)
         content=self.rest.get_all_eventing_stats()
         js=json.loads(content)
         log.info("execution stats: {0}".format(js))
-        # for j in js:
-        #     print j["function_name"]
-        #     print j["execution_stats"]["on_update_success"]
-        #     print j["failure_stats"]["n1ql_op_exception_count"]
+        return  js
 
-    def deploy_function(self, body, deployment_fail=False, wait_for_bootstrap=True):
-        body['settings']['deployment_status'] = True
-        body['settings']['processing_status'] = True
-        # # save the function so that it appears in UI
-        # content = self.rest.save_function(body['appname'], body)
-        # # deploy the function
-        # log.info("Deploying the following handler code")
-        # log.info("\n{0}".format(body['appcode']))
-        # content1 = self.rest.deploy_function(body['appname'], body)
-        # log.info("deploy Application : {0}".format(content1))
-        # if deployment_fail:
-        #     res = json.loads(content1)
-        #     if not res["compile_success"]:
-        #         return
-        #     else:
-        #         raise Exception("Deployment is expected to be failed but no message of failure")
-        # if wait_for_bootstrap:
-        #     # wait for the function to come out of bootstrap state
-        #     self.wait_for_bootstrap_to_complete(body['appname'])
+    def deploy_function(self, body, deployment_fail=False, wait_for_bootstrap=True,pause_resume=False,pause_resume_number=1,
+                        deployment_status=True,processing_status=True):
         if self.print_eventing_handler_code_in_logs:
-            log.info("Deploying the following handler code : {0}".format(body['appname']))
+            log.info("Deploying the following handler code : {0} with \nbindings: {1} and \nsettings: {2}".format(body['appname'], body['depcfg'] , body['settings']))
             log.info("\n{0}".format(body['appcode']))
-        content1 = self.rest.create_function(body['appname'], body)
+        content1 = self.rest.lifecycle_operation(body['appname'], "deploy")
         log.info("deploy Application : {0}".format(content1))
         if deployment_fail:
             res = json.loads(content1)
@@ -257,54 +361,41 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
                 raise Exception("Deployment is expected to be failed but no message of failure")
         if wait_for_bootstrap:
             # wait for the function to come out of bootstrap state
-            self.wait_for_bootstrap_to_complete(body['appname'])
+            self.wait_for_handler_state(body['appname'], "deployed")
+        if pause_resume and pause_resume_number > 0:
+            self.pause_resume_n(body, pause_resume_number)
+
 
     def undeploy_and_delete_function(self, body):
+        if self.print_app_log:
+            self.print_app_logs(body['appname'])
         self.undeploy_function(body)
-        self.sleep(5)
         self.delete_function(body)
 
     def undeploy_function(self, body):
-        # body['settings']['deployment_status'] = False
-        # body['settings']['processing_status'] = False
-        # # save the function so that it disappears from UI
-        # content = self.rest.save_function(body['appname'], body)
-        # # undeploy the function
-        # content1 = self.rest.set_settings_for_function(body['appname'], body['settings'])
-        # log.info("Undeploy Application : {0}".format(content1))
-        # return content, content1
-        content = self.rest.undeploy_function(body['appname'])
+        self.refresh_rest_server()
+        content = self.rest.lifecycle_operation(body['appname'],"undeploy")
         log.info("Undeploy Application : {0}".format(body['appname']))
-        self.wait_for_undeployment(body['appname'])
+        self.wait_for_handler_state(body['appname'], "undeployed")
         return content
 
     def delete_function(self, body):
-        # delete the function from the UI and backend
-        # content = self.rest.delete_function_from_temp_store(body['appname'])
-        # content1 = self.rest.delete_function(body['appname'])
-        # log.info("Delete Application : {0}".format(body['appname']))
-        # return content, content1
         content1 = self.rest.delete_single_function(body['appname'])
         log.info("Delete Application : {0}".format(body['appname']))
         return content1
 
-    def pause_function(self, body):
-        body['settings']['deployment_status'] = True
-        body['settings']['processing_status'] = False
-        # save the function so that it is visible in UI
-        content = self.rest.save_function(body['appname'], body)
-        # undeploy the function
-        content1 = self.rest.set_settings_for_function(body['appname'], body['settings'])
-        log.info("Pause Application : {0}".format(content1))
+    def pause_function(self, body,wait_for_pause=True):
+        self.refresh_rest_server()
+        self.rest.lifecycle_operation(body['appname'], "pause")
+        log.info("Pause Application : {0}".format(body['appname']))
+        if wait_for_pause:
+            self.wait_for_handler_state(body['appname'], "paused")
 
-    def resume_function(self, body):
-        body['settings']['deployment_status'] = True
-        body['settings']['processing_status'] = True
-        # save the function so that it is visible in UI
-        content = self.rest.save_function(body['appname'], body)
-        # undeploy the function
-        content1 = self.rest.set_settings_for_function(body['appname'], body['settings'])
-        log.info("Resume Application : {0}".format(content1))
+    def resume_function(self, body,wait_for_resume=True):
+        content1 = self.rest.lifecycle_operation(body['appname'], "resume")
+        log.info("Resume Application : {0}".format(body['appname']))
+        if wait_for_resume:
+            self.wait_for_handler_state(body['appname'], "deployed")
 
     def refresh_rest_server(self):
         eventing_nodes_list = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
@@ -373,7 +464,7 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
                          eventing_node.ip, core_dump_count))
             shell.disconnect()
 
-    def print_execution_and_failure_stats(self,name):
+    def print_execution_and_failure_stats(self, name):
         out_event_execution = self.rest.get_event_execution_stats(name)
         log.info("Event execution stats : {0}".format(out_event_execution))
         out_event_failure = self.rest.get_event_failure_stats(name)
@@ -404,7 +495,7 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
 
     def bucket_stat(self, key, bucket):
         stats = StatsCommon.get_stats([self.master], bucket, "", key)
-        val = stats.values()[0]
+        val = list(stats.values())[0]
         if val.isdigit():
             val = int(val)
         return val
@@ -449,7 +540,7 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
         remote_client.reboot_node()
         remote_client.disconnect()
         # wait for restart and warmup on all node
-        self.sleep(self.wait_timeout * 5)
+        self.sleep(self.wait_timeout * 2)
         # disable firewall on these nodes
         self.stop_firewall_on_node(server)
         # wait till node is ready after warmup
@@ -457,12 +548,12 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
 
     def undeploy_delete_all_functions(self):
         content=self.rest.get_deployed_eventing_apps()
-        res = content.keys()
+        res = list(content.keys())
         log.info("all keys {}".format(res))
         for a in res:
             self.rest.undeploy_function(a)
         for a in res:
-            self.wait_for_undeployment(a)
+            self.wait_for_handler_state(a, "undeployed")
         self.rest.delete_all_function()
 
     def change_time_zone(self,server,timezone="UTC"):
@@ -489,10 +580,272 @@ class EventingBaseTest(QueryHelperTests, BaseTestCase):
                                                                                       indent=4)))
 
     def print_go_routine_dump_from_all_eventing_nodes(self):
+        if self.print_go_routine:
+            eventing_nodes = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
+            for eventing_node in eventing_nodes:
+                rest_conn = RestConnection(eventing_node)
+                out = rest_conn.get_eventing_go_routine_dumps()
+                log.info("Go routine dumps for Node {0} is \n{1} ======================================================"
+                         "============================================================================================="
+                         "\n\n".format(eventing_node.ip, out))
+
+    def verify_source_bucket_mutation(self,doc_count,deletes=False,timeout=600,bucket=None):
+        if bucket == None:
+            bucket=self.src_bucket_name
+        # query = "create primary index on {}".format(self.src_bucket_name)
+        # self.n1ql_helper.run_cbq_query(query=query, server=self.n1ql_node)
+        num_nodes = self.refresh_rest_server()
         eventing_nodes = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
+        count=0
+        result=0
+        while count <= 20 and doc_count != result:
+            self.sleep(timeout // 20, message="Waiting for eventing to process all dcp mutations...")
+            if deletes:
+                    query="select raw(count(*)) from {} where doc_deleted = 1".format(bucket)
+            else:
+                query="select raw(count(*)) from {} where updated_field = 1".format(bucket)
+            result_set=self.n1ql_helper.run_cbq_query(query=query, server=self.n1ql_node)
+            result=result_set["results"][0]
+            if deletes:
+                self.log.info("deleted docs:{}  expected doc: {}".format(result, doc_count))
+            else:
+                self.log.info("updated docs:{}  expected doc: {}".format(result, doc_count))
+            count=count+1
+
+        if count > 20 and doc_count != result:
+            total_dcp_backlog = 0
+            timers_in_past = 0
+            lcb = {}
+            # TODO : Use the following stats in a meaningful way going forward. Just printing them for debugging.
+            for eventing_node in eventing_nodes:
+                rest_conn = RestConnection(eventing_node)
+                out = rest_conn.get_all_eventing_stats()
+                total_dcp_backlog += out[0]["events_remaining"]["dcp_backlog"]
+                if "TIMERS_IN_PAST" in out[0]["event_processing_stats"]:
+                    timers_in_past += out[0]["event_processing_stats"]["TIMERS_IN_PAST"]
+                total_lcb_exceptions = out[0]["lcb_exception_stats"]
+                host = eventing_node.ip
+                lcb[host] = total_lcb_exceptions
+                full_out = rest_conn.get_all_eventing_stats(seqs_processed=True)
+                log.info(
+                    "Stats for Node {0} is \n{1} ".format(eventing_node.ip, json.dumps(out, sort_keys=True, indent=4)))
+                log.debug("Full Stats for Node {0} is \n{1} ".format(eventing_node.ip,
+                                                                     json.dumps(full_out, sort_keys=True, indent=4)))
+            raise Exception("Eventing has not processed all the mutation in expected time, docs:{}  expected doc: {}".format(result, doc_count))
+
+    def pause_resume_n(self, body, num):
+        for i in range(num):
+            self.pause_function(body)
+            self.sleep(30)
+            self.resume_function(body)
+
+
+    def wait_for_handler_state(self, name,status,iterations=120):
+        self.sleep(5, message="Waiting for {} to {}...".format(name, status))
+        result = self.rest.get_composite_eventing_status()
+        count = 0
+        composite_status = None
+        while composite_status != status and count < iterations:
+            self.sleep(5, "Waiting for {} to {}...".format(name, status))
+            result = self.rest.get_composite_eventing_status()
+            for i in range(len(result['apps'])):
+                if result['apps'][i]['name'] == name:
+                    composite_status = result['apps'][i]['composite_status']
+            count+=1
+        if count == iterations:
+            raise Exception('Eventing took lot of time for handler {} to {}'.format(name, status))
+
+    def setup_curl(self,):
+        o=os.system('python3 scripts/curl_setup.py start')
+        self.log.info("=== started docker container =======".format(o))
+        self.sleep(5)
+        if o!=0:
+            self.log.info("script result {}".format(o))
+            raise Exception("unable to start docker")
+        o=os.system('python3 scripts/curl_setup.py setup')
+        self.log.info("=== setup done =======")
+        if o!=0:
+            self.log.info("script result {}".format(o))
+            raise Exception("curl setup fail")
+
+    def teardown_curl(self):
+        o = os.system('python3 scripts/curl_setup.py stop')
+        self.log.info("=== stopping docker container =======")
+
+    def insall_dependencies(self):
+        try:
+            import docker
+        except ImportError as e:
+            o = os.system("python3 scripts/install_docker.py docker")
+            self.log.info("docker installation done: {}".format(o))
+            self.sleep(5)
+            try:
+                import docker
+            except ImportError as e:
+                raise Exception("docker installation fails with {}".format(o))
+
+    def load_sample_buckets(self, server, bucketName):
+        from lib.remote.remote_util import RemoteMachineShellConnection
+        shell = RemoteMachineShellConnection(server)
+        shell.execute_command("""curl -v -u Administrator:password \
+                             -X POST http://{0}:8091/sampleBuckets/install \
+                          -d '["{1}"]'""".format(server.ip, bucketName))
+        shell.disconnect()
+        self.sleep(5)
+
+    def check_eventing_rebalance(self):
+        status=self.rest.get_eventing_rebalance_status()
+        self.log.info("Eventing rebalance status: {}".format(status))
+        if status=="true":
+            return True
+        else:
+            return False
+
+    def auto_retry_setup(self):
+        self.sleep_time = self.input.param("sleep_time", 15)
+        self.enabled = self.input.param("enabled", True)
+        self.afterTimePeriod = self.input.param("afterTimePeriod", 150)
+        self.maxAttempts = self.input.param("maxAttempts", 1)
+        self.log.info("Changing the retry rebalance settings ....")
+        self.change_retry_rebalance_settings(enabled=self.enabled, afterTimePeriod=self.afterTimePeriod,
+                                             maxAttempts=self.maxAttempts)
+
+    def change_retry_rebalance_settings(self, enabled=True,
+                                        afterTimePeriod=300, maxAttempts=1):
+        # build the body
+        body = dict()
+        if enabled:
+            body["enabled"] = "true"
+        else:
+            body["enabled"] = "false"
+        body["afterTimePeriod"] = afterTimePeriod
+        body["maxAttempts"] = maxAttempts
+        rest = RestConnection(self.master)
+        rest.set_retry_rebalance_settings(body)
+        result = rest.get_retry_rebalance_settings()
+        self.log.info("Retry Rebalance settings changed to : {0}"
+                      .format(json.loads(result)))
+
+    def handler_status_map(self):
+        m={}
+        result=self.rest.get_composite_eventing_status()
+        try:
+            for i in range(len(result['apps'])):
+                m[result['apps'][i]['name']] = result['apps'][i]['composite_status']
+            return m
+        except TypeError as e:
+            self.log.info("no handler is available")
+
+    def deploy_handler_by_name(self,name,wait_for_bootstrap=True):
+        self.rest.deploy_function_by_name(name)
+        if wait_for_bootstrap:
+            self.wait_for_handler_state(name, "deployed")
+
+    def pause_handler_by_name(self,name,wait_for_pause=True):
+        self.rest.pause_function_by_name(name)
+        if wait_for_pause:
+            self.wait_for_handler_state(name, "paused")
+
+    def check_word_count_eventing_log(self,function_name,word,expected_count,return_count_only=False):
+        eventing_nodes = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
+        array_of_counts = []
+        command = "cat /opt/couchbase/var/lib/couchbase/data/@eventing/"+ function_name +"* | grep -a \""+word+"\" | wc -l"
+        for eventing_node in eventing_nodes:
+            shell = RemoteMachineShellConnection(eventing_node)
+            count, error = shell.execute_non_sudo_command(command)
+            self.log.info("count : {} and error : {} ".format(count,error))
+            if isinstance(count, list):
+                count = int(count[0])
+            else:
+                count = int(count)
+            log.info("Node : {0} , word count on : {1}".format(eventing_node.ip, count))
+            array_of_counts.append(count)
+        count_of_all_words = sum(array_of_counts)
+        log.info("Total count: {}".format(count_of_all_words))
+        if return_count_only:
+            return True, count_of_all_words
+        if count_of_all_words == expected_count:
+            return True, count_of_all_words
+        return False, count_of_all_words
+
+    def check_number_of_files(self):
+        eventing_nodes = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
+        array_of_counts = []
+        command = "cd /opt/couchbase/var/lib/couchbase/data/@eventing;ls | wc -l"
+        for eventing_node in eventing_nodes:
+            shell = RemoteMachineShellConnection(eventing_node)
+            count, error = shell.execute_non_sudo_command(command)
+            self.log.info("count : {} and error : {} ".format(count, error))
+            if isinstance(count, list):
+                count = int(count[0])
+            else:
+                count = int(count)
+            log.info("Node : {0} , word count on : {1}".format(eventing_node.ip, count))
+            array_of_counts.append(count)
+        count_of_all_files = sum(array_of_counts)
+        log.info("Total count: {}".format(count_of_all_files))
+        return count_of_all_files
+
+    def drop_data_to_bucket_from_eventing(self,server):
+        shell = RemoteMachineShellConnection(server)
+        shell.info = shell.extract_remote_info()
+        if shell.info.type.lower() == "windows":
+            raise Exception("Should not run on windows")
+        o, r = shell.execute_command("/sbin/iptables -A OUTPUT -p tcp --dport 11210 -j DROP")
+        shell.log_command_output(o, r)
+        # o, r = shell.execute_command("/sbin/iptables -A INPUT -p tcp --dport 11210 -j DROP")
+        # shell.log_command_output(o, r)
+        log.info("enabled firewall on {0}".format(server))
+        o, r = shell.execute_command("/sbin/iptables --list")
+        shell.log_command_output(o, r)
+        shell.disconnect()
+
+    def reset_firewall(self,server):
+        shell = RemoteMachineShellConnection(server)
+        shell.info = shell.extract_remote_info()
+        o, r = shell.execute_command("/sbin/iptables --flush")
+        shell.log_command_output(o, r)
+        shell.disconnect()
+
+    def get_stats_value(self,name,expression):
+        eventing_nodes = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
+        total_count=0
         for eventing_node in eventing_nodes:
             rest_conn = RestConnection(eventing_node)
-            out = rest_conn.get_eventing_go_routine_dumps()
-            log.info("Go routine dumps for Node {0} is \n{1} ======================================================"
-                     "============================================================================================="
-                     "\n\n".format(eventing_node.ip, out))
+            stats = rest_conn.get_all_eventing_stats()
+            keys=expression.split(".")
+            for stat in stats:
+                if stat["function_name"] == name:
+                    total_count=total_count + stat[keys[0]][keys[1]]
+        return total_count
+
+    def print_app_logs(self,name):
+        content = self.rest.get_app_logs(name)
+        self.log.info("================== {} ============================================================".format(name))
+        self.log.info(content)
+        self.log.info("================== App logs end ===============================================================")
+
+    def print_timer_alarm_context(self):
+        alarm_query="select RAW count(0) from metadata where meta().id like 'eventing:%:al%'"
+        context_query="select RAW count(0) from metadata where meta().id like 'eventing:%:cx%'"
+        alarm = self.n1ql_helper.run_cbq_query(query=alarm_query, server=self.n1ql_node)
+        self.log.info("================== alarm documents in metadata ================================================")
+        self.log.info(alarm)
+        self.log.info("===============================================================================================")
+        context = self.n1ql_helper.run_cbq_query(query=context_query, server=self.n1ql_node)
+        self.log.info("================== context documents in metadata  =============================================")
+        self.log.info(context)
+        self.log.info("===============================================================================================")
+
+    def print_document_count_via_index(self,bucket):
+        query="select RAW count(*) from "+bucket
+        result_set = self.n1ql_helper.run_cbq_query(query=query, server=self.n1ql_node)
+        self.log.info("================== number of doc in {} via index ===========================".format(bucket))
+        self.log.info(result_set['results'])
+        self.log.info("===============================================================================================")
+
+
+
+
+
+

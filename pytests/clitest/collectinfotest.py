@@ -1,14 +1,14 @@
-import os
+import subprocess, time, os
 from subprocess import call
 from threading import Thread
-
 from clitest.cli_base import CliBaseTest
-from couchbase_helper.document import View
+from remote.remote_util import RemoteMachineHelper,\
+                               RemoteMachineShellConnection
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection, RestHelper
-from remote.remote_util import RemoteMachineHelper, \
-    RemoteMachineShellConnection
 from testconstants import LOG_FILE_NAMES
+
+from couchbase_helper.document import View
 
 LOG_FILE_NAME_LIST = ["couchbase.log", "diag.log", "ddocs.log", "ini.log", "syslog.tar.gz",
                       "ns_server.couchdb.log", "ns_server.debug.log", "ns_server.babysitter.log",
@@ -28,7 +28,6 @@ class CollectinfoTests(CliBaseTest):
         self.expire_time = self.input.param("expire_time", 5)
         self.value_size = self.input.param("value_size", 256)
         self.node_down = self.input.param("node_down", False)
-        self.collect_all_option = self.input.param("collect-all-option", False)
         if self.doc_ops is not None:
             self.doc_ops = self.doc_ops.split(";")
 
@@ -47,12 +46,12 @@ class CollectinfoTests(CliBaseTest):
         gen_load = BlobGenerator('nosql', 'nosql-', self.value_size,
                                                   end=self.num_items)
         gen_update = BlobGenerator('nosql', 'nosql-', self.value_size,
-                                          end=(self.num_items / 2 - 1))
+                                          end=(self.num_items // 2 - 1))
         gen_expire = BlobGenerator('nosql', 'nosql-', self.value_size,
-                                             start=self.num_items / 2,
-                                             end=(self.num_items * 3 / 4 - 1))
+                                             start=self.num_items // 2,
+                                             end=(self.num_items * 3 // 4 - 1))
         gen_delete = BlobGenerator('nosql', 'nosql-', self.value_size,
-                                                 start=self.num_items * 3 / 4,
+                                                 start=self.num_items * 3 // 4,
                                                           end=self.num_items)
         self._load_all_buckets(self.master, gen_load, "create", 0)
 
@@ -180,7 +179,7 @@ class CollectinfoTests(CliBaseTest):
                     raise Exception("unable to list the files. Check ls command output for help")
                 missing_logs = False
                 nodes_services = RestConnection(self.master).get_nodes_services()
-                for node, services in nodes_services.iteritems():
+                for node, services in list(nodes_services.items()):
                     for service in services:
                         if service.encode("ascii") == "fts" and \
                                      self.master.ip in node and \
@@ -234,8 +233,10 @@ class CollectinfoTests(CliBaseTest):
                 for output_line in output:
                     output_line = output_line.split()
                     file_size = int(output_line[0])
+                    if "dist_cfg" in output_line[1]:
+                        continue
                     if self.debug_logs:
-                        print "File size: ", file_size
+                        print(("File size: ", file_size))
                     if file_size == 0:
                         if "kv_trace" in output_line[1] and self.node_down:
                             continue
@@ -277,7 +278,7 @@ class CollectinfoTests(CliBaseTest):
         try:
             self.cluster.query_view(self.master, self.default_design_doc_name, self.view_name, query,
                                 expected_num_items, 'default', timeout=self.wait_timeout)
-        except Exception, ex:
+        except Exception as ex:
             if not self.generate_map_reduce_error:
                 raise ex
         self.shell.execute_cbcollect_info("%s.zip" % (self.log_filename))
@@ -297,25 +298,16 @@ class CollectinfoTests(CliBaseTest):
         self.shell.delete_files("%s.zip" % (self.log_filename))
         self.log.info("Delete old logs directory")
         self.shell.delete_files("cbcollect_info*")
-        options = ""
-        if self.collect_all_option:
-            options = "--multi-node-diag"
-            self.log.info("Run collect log with --multi-node-diag option")
-        output, error = self.shell.execute_cbcollect_info("%s.zip %s"\
-                                                       % (self.log_filename, options))
+        output, error = self.shell.execute_cbcollect_info("%s.zip "\
+                                                       % (self.log_filename))
         if output:
             if self.debug_logs:
-                    self.shell.log_command_output(output, error)
+                self.shell.log_command_output(output, error)
             for line in output:
-                if "--multi-node-diag" in options:
-                    if "noLogs=1&oneNode=1" in line:
+                if "noLogs=1" in line:
+                    if "oneNode=1" not in line:
                         self.log.error("Error line: %s" % line)
-                        self.fail("cbcollect got diag only from 1 node")
-                if not options:
-                    if "noLogs=1" in line:
-                        if "oneNode=1" not in line:
-                            self.log.error("Error line: %s" % line)
-                            self.fail("cbcollect did not set to collect diag only at 1 node ")
+                        self.fail("cbcollect did not set to collect diag only at 1 node ")
         self.verify_results(self, self.log_filename)
 
     def test_cbcollectinfo_memory_usuage(self):
@@ -331,14 +323,9 @@ class CollectinfoTests(CliBaseTest):
         self.shell.delete_files("%s.zip" % (self.log_filename))
         self.log.info("Delete old logs directory")
         self.shell.delete_files("cbcollect_info*")
-        options = ""
-        if self.collect_all_option:
-            options = "--multi-node-diag"
-            self.log.info("Run collect log with --multi-node-diag option")
-
         collect_threads = []
         col_thread = Thread(target=self.shell.execute_cbcollect_info,
-                                        args=("%s.zip" % (self.log_filename), options))
+                                        args=("%s.zip" % (self.log_filename)))
         collect_threads.append(col_thread)
         col_thread.start()
         monitor_mem_thread = Thread(target=self._monitor_collect_log_mem_process)

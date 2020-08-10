@@ -1,28 +1,46 @@
-import socket
-import urllib
-
-import logger
-import testconstants
+import json
+import time
+from threading import Thread, Event
 from basetestcase import BaseTestCase
+from couchbase_helper.document import DesignDocument, View
+from couchbase_helper.documentgenerator import DocumentGenerator
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
+from membase.helper.rebalance_helper import RebalanceHelper
+from membase.api.exception import ReadDocumentException
+from membase.api.exception import DesignDocCreationException
+from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
+import testconstants
+from testconstants import LINUX_COUCHBASE_BIN_PATH
+from testconstants import WIN_COUCHBASE_BIN_PATH_RAW
+from testconstants import MAC_COUCHBASE_BIN_PATH
+from random import randint
+from datetime import datetime
+import subprocess
+import logger
+import urllib.request, urllib.parse, urllib.error
 from security.auditmain import audit
-
+from security.ldaptest import ldaptest
+import socket
 log = logger.Logger.get_logger()
+from ep_mc_bin_client import MemcachedClient
 
 
 class auditTest(BaseTestCase):
 
     def setUp(self):
         super(auditTest, self).setUp()
-        self.ipAddress = self.getLocalIPAddress()
+        try:
+            self.ipAddress = self.getLocalIPAddress()
+        except Exception as ex:
+            self.ipAddress = '127.0.0.1'
         self.eventID = self.input.param('id', None)
-	auditTemp = audit(host=self.master)
-	currentState = auditTemp.getAuditStatus()
-	self.log.info ("Current status of audit on ip - {0} is {1}".format(self.master.ip, currentState))
-	if not currentState:
-	    self.log.info ("Enabling Audit ")
+        auditTemp = audit(host=self.master)
+        currentState = auditTemp.getAuditStatus()
+        self.log.info("Current status of audit on ip - {0} is {1}".format(self.master.ip, currentState))
+        if not currentState:
+            self.log.info("Enabling Audit ")
             auditTemp.setAuditEnable('true')
             self.sleep(30)
         rest = RestConnection(self.master)
@@ -42,15 +60,19 @@ class auditTest(BaseTestCase):
         return ipAddress
         '''
 
-    def setupLDAPSettings (self,rest):
+    def getLocalIPV6Address(self):
+        result = socket.getaddrinfo(socket.gethostname(), 0, socket.AF_INET6)
+        return result[0][4][0]
+
+    def setupLDAPSettings (self, rest):
         api = rest.baseUrl + 'settings/saslauthdAuth'
-        params = urllib.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
+        params = urllib.parse.urlencode({"enabled":'true',"admins":[],"roAdmins":[]})
         status, content, header = rest._http_request(api, 'POST', params)
         return status, content, header
 
     def set_user_role(self,rest,username,user_role='admin'):
         payload = "name=" + username + "&roles=" + user_role
-        content =  rest.set_user_roles(user_id=username,payload=payload)
+        content = rest.set_user_roles(user_id=username, payload=payload)
 
     #Wrapper around auditmain
     def checkConfig(self, eventID, host, expectedResults, n1ql_audit=False):
@@ -62,8 +84,8 @@ class auditTest(BaseTestCase):
     #Check to make sure the audit code DOES NOT appear in the logs (for audit n1ql filtering)
     def checkFilter(self, eventID, host):
         Audit = audit(eventID=eventID, host=host)
-        exists, entry = Audit.validateEmpty()
-        self.assertTrue(exists, "There was an audit entry found. Audits for the code %s should not be logged. Here is the entry: %s" % (eventID, entry))
+        not_exists, entry = Audit.validateEmpty()
+        self.assertTrue(not_exists, "There was an audit entry found. Audits for the code %s should not be logged. Here is the entry: %s" % (eventID, entry))
 
 
     #Tests to check for bucket events
@@ -73,6 +95,9 @@ class auditTest(BaseTestCase):
         source = 'ns_server'
         rest = RestConnection(self.master)
 
+        if "ip6" in self.master.ip or self.master.ip.startswith("["):
+            self.ipAddress = self.getLocalIPV6Address()
+
         if (ops in ['create']):
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':104857600, 'num_replicas':1,
                                'replica_index':False, 'eviction_policy':'value_only', 'type':'membase', \
@@ -80,39 +105,60 @@ class auditTest(BaseTestCase):
                                 "flush_enabled":False, "num_threads":3, "source":source, \
                                "user":user, "ip":self.ipAddress, "port":57457, 'sessionid':'', 'conflict_resolution_type':'seqno', \
                                'storage_mode':'couchstore','max_ttl':400,'compression_mode':'passive'}
-            rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                               '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly', maxTTL=expectedResults['max_ttl'])
+            rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+                               '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly', maxTTL=expectedResults['max_ttl'],
+                               storageBackend=self.bucket_storage)
 
         elif (ops in ['update']):
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':209715200, 'num_replicas':1, 'replica_index':False, 'eviction_policy':'value_only', 'type':'membase', \
                                'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", "flush_enabled":'true', "num_threads":3, "source":source, \
                                "user":user, "ip":self.ipAddress, "port":57457 , 'sessionid':'','storage_mode':'couchstore', 'max_ttl':400}
-            rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], '11211', 'membase', \
-                               0, expectedResults['num_threads'], 0 , 'valueOnly', maxTTL=expectedResults['max_ttl'])
+            rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], '11211', 'membase', \
+                               0, expectedResults['num_threads'], 0, 'valueOnly', maxTTL=expectedResults['max_ttl'],
+                               storageBackend=self.bucket_storage)
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':104857600, 'num_replicas':1, 'replica_index':True, 'eviction_policy':'value_only', 'type':'membase', \
                                'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", "flush_enabled":True, "num_threads":3, "source":source, \
                                "user":user, "ip":self.ipAddress, "port":57457,'storage_mode':'couchstore', 'max_ttl':200}
-            rest.change_bucket_props(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+            rest.change_bucket_props(expectedResults['bucket_name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
                                      '11211', 1, 1, maxTTL=expectedResults['max_ttl'])
 
         elif (ops in ['delete']):
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':104857600, 'num_replicas':1, 'replica_index':True, 'eviction_policy':'value_only', 'type':'membase', \
                                'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", "flush_enabled":False, "num_threads":3, "source":source, \
                                "user":user, "ip":self.ipAddress, "port":57457}
-            rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                               '11211', 'membase', 1, expectedResults['num_threads'], 0 , 'valueOnly')
+            rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+                               '11211', 'membase', 1, expectedResults['num_threads'], 0, 'valueOnly',
+                               storageBackend=self.bucket_storage)
             rest.delete_bucket(expectedResults['bucket_name'])
 
         elif (ops in ['flush']):
             expectedResults = {'bucket_name':'TestBucket', 'ram_quota':100, 'num_replicas':1, 'replica_index':True, 'eviction_policy':'value_only', 'type':'membase', \
-			    'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", "flush_enabled":True, "num_threads":3, "source":source, \
+           'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", "flush_enabled":True, "num_threads":3, "source":source, \
                                "user":user, "ip":self.ipAddress, "port":57457,'storage_mode':'couchstore'}
             rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'], expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                               '11211', 'membase', 1, expectedResults['num_threads'], 1, 'valueOnly')
+                               '11211', 'membase', 1, expectedResults['num_threads'], 1, 'valueOnly',
+                               storageBackend=self.bucket_storage)
             self.sleep(10)
             rest.flush_bucket(expectedResults['bucket_name'])
 
         self.checkConfig(self.eventID, self.master, expectedResults)
+
+    def test_bucket_select_audit(self):
+        # security.audittest.auditTest.test_bucket_select_audit,default_bucket=false,id=20492
+        rest = RestConnection(self.master)
+        rest.create_bucket(bucket='TestBucket', ramQuotaMB=100,
+                           storageBackend=self.bucket_storage)
+        time.sleep(30)
+        mc = MemcachedClient(self.master.ip, 11210)
+        mc.sasl_auth_plain(self.master.rest_username, self.master.rest_password)
+        mc.bucket_select('TestBucket')
+
+        expectedResults = {"bucket":"TestBucket","description":"The specified bucket was selected","id":self.eventID,"name":"select bucket" \
+                           ,"peername":"127.0.0.1:46539","real_userid":{"domain":"memcached","user":"@ns_server"},"sockname":"127.0.0.1:11209"}
+        Audit = audit(eventID=self.eventID, host=self.master)
+        actualEvent = Audit.returnEvent(self.eventID)
+        Audit.validateData(actualEvent, expectedResults)
+
 
 
     def test_clusterOps(self):
@@ -123,8 +169,8 @@ class auditTest(BaseTestCase):
 
         if (ops in ['addNodeKV']):
             self.cluster.rebalance(self.servers, servs_inout, [])
-            print servs_inout
-            print servs_inout[0].ip
+            print(servs_inout)
+            print(servs_inout[0].ip)
             expectedResults = {"services":['kv'], 'port':8091, 'hostname':servs_inout[0].ip,
                                'groupUUID':"0", 'node':'ns_1@' + servs_inout[0].ip, 'source':source,
                                'user':self.master.rest_username, "ip":self.ipAddress, "remote:port":57457}
@@ -184,7 +230,7 @@ class auditTest(BaseTestCase):
             type = self.input.param('type', None)
             self.cluster.failover(self.servers, servs_inout)
             self.cluster.rebalance(self.servers, [], [])
-            expectedResults = {'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457, 'type':type, 'nodes':'ns_1@' + servs_inout[0].ip}
+            expectedResults = {'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457, 'type':type, 'nodes':'[ns_1@' + servs_inout[0].ip + ']'}
 
         if (ops == 'nodeRecovery'):
             expectedResults = {'node':'ns_1@' + servs_inout[0].ip, 'type':'delta', 'source':source, 'user':self.master.rest_username, "ip":self.ipAddress, "port":57457}
@@ -213,7 +259,7 @@ class auditTest(BaseTestCase):
             #Get a REST Command for loading sample
 
         elif (ops == 'enableAutoFailover'):
-            expectedResults = {'max_nodes':1, "timeout":120, 'source':source, "user":user, 'ip':self.ipAddress, 'port':12345}
+            expectedResults = {'max_nodes':1, "timeout":120, 'source':source, "user":user, 'ip':self.ipAddress, 'port':12345,'failover_server_group':False}
             rest.update_autofailover_settings(True, expectedResults['timeout'])
 
         elif (ops == 'disableAutoFailover'):
@@ -266,23 +312,23 @@ class auditTest(BaseTestCase):
                                      viewFragmntThreshold=10)
 
         elif (ops == 'modifyCompactionSettingsTime'):
-            expectedResults = {"parallel_db_and_view_compaction":False,
-                               "database_fragmentation_threshold:percentage":50,
-                               "database_fragmentation_threshold:size":10,
-                               "view_fragmentation_threshold:percentage":50,
-                               "view_fragmentation_threshold:size":10,
-                               "allowed_time_period:abort_outside":True,
-                               "allowed_time_period:to_minute":15,
-                               "allowed_time_period:from_minute":12,
-                               "allowed_time_period:to_hour":1,
-                               "allowed_time_period:from_hour":1,
-                               "purge_interval":3,
-                               "source":"ns_server",
-                               "user":"Administrator",
-                               'source':source,
-                               "user":user,
-                               'ip':self.ipAddress,
-                               'port':1234,
+            expectedResults = {"parallel_db_and_view_compaction": False,
+                               "database_fragmentation_threshold:percentage": 50,
+                               "database_fragmentation_threshold:size": 10,
+                               "view_fragmentation_threshold:percentage": 50,
+                               "view_fragmentation_threshold:size": 10,
+                               "allowed_time_period:abort_outside": True,
+                               "allowed_time_period:to_minute": 15,
+                               "allowed_time_period:from_minute": 12,
+                               "allowed_time_period:to_hour": 1,
+                               "allowed_time_period:from_hour": 1,
+                               "purge_interval": 3,
+                               "source": "ns_server",
+                               "user": "Administrator",
+                               'source': source,
+                               "user": user,
+                               'ip': self.ipAddress,
+                               'port': 1234,
                                }
             rest.set_auto_compaction(dbFragmentThresholdPercentage=50,
                                      viewFragmntThresholdPercentage=50,
@@ -359,14 +405,14 @@ class auditTest(BaseTestCase):
         source = 'ns_server'
         user = self.master.rest_username
         rest = RestConnection(self.master)
-	shell = RemoteMachineShellConnection(self.master)
-	os_type = shell.extract_remote_info().distribution_type
-	if (os_type == 'Windows'):
-            currentPath = "c:/Program Files/Couchbase/Server/var/lib/couchbase/data"
-            newPath = "C:/tmp"
+        shell = RemoteMachineShellConnection(self.master)
+        os_type = shell.extract_remote_info().distribution_type
+        if (os_type == 'Windows'):
+          currentPath = "c:/Program Files/Couchbase/Server/var/lib/couchbase/data"
+          newPath = "C:/tmp"
         else:
-	    currentPath = '/opt/couchbase/var/lib/couchbase/data'
-	    newPath = "/tmp"
+          currentPath = '/opt/couchbase/var/lib/couchbase/data'
+          newPath = "/tmp"
 
         if (ops == 'indexPath'):
             try:
@@ -419,7 +465,7 @@ class auditTest(BaseTestCase):
         #User must be pre-created in LDAP in advance
         elif (ops in ['ldapLogin']):
             rest = RestConnection(self.master)
-            self.set_user_role(rest,username)
+            self.set_user_role(rest, username)
             status, content = rest.validateLogin(username, password, True, getContent=True)
             sessionID = (((status['set-cookie']).split("="))[1]).split(";")[0]
             expectedResults = {'source':'external', 'user':username, 'password':password, 'roles':roles, 'ip':self.ipAddress, "port":123456, 'sessionid':sessionID}
@@ -430,8 +476,8 @@ class auditTest(BaseTestCase):
     def test_checkCreateBucketCluster(self):
         ops = self.input.param("ops", None)
         source = 'ns_server'
-	#auditTemp = audit(host=self.master)
-	#auditTemp.setAuditEnable('true')
+        #auditTemp = audit(host=self.master)
+        #auditTemp.setAuditEnable('true')
         for server in self.servers:
             user = server.rest_username
             rest = RestConnection(server)
@@ -441,8 +487,9 @@ class auditTest(BaseTestCase):
                                    'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", \
                                     "flush_enabled":False, "num_threads":3, "source":source, \
                                    "user":user, "ip":self.ipAddress, "port":57457, 'sessionid':'', 'conflict_resolution_type':'seqno'}
-                rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                                   '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly')
+                rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+                                   '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly',
+                                   storageBackend=self.bucket_storage)
                 self.log.info ("value of server is {0}".format(server))
                 self.checkConfig(self.eventID, server, expectedResults)
 
@@ -450,13 +497,13 @@ class auditTest(BaseTestCase):
         ops = self.input.param("ops", None)
         nodesOut = self.input.param("nodes_out", 1)
         source = 'ns_server'
-	user = self.master.rest_username
+        user = self.master.rest_username
 
         firstNode = self.servers[0]
         secondNode = self.servers[1]
         auditFirstNode = audit(host=firstNode)
         auditFirstNode.setAuditEnable('true')
-	auditSecondNode = audit(host=secondNode)
+        auditSecondNode = audit(host=secondNode)
 
         origState = auditFirstNode.getAuditStatus()
         origLogPath = auditFirstNode.getAuditLogPath()
@@ -475,8 +522,9 @@ class auditTest(BaseTestCase):
                                 'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", \
                                 "flush_enabled":False, "num_threads":3, "source":source, \
                                 "user":user, "ip":self.ipAddress, "port":57457, 'sessionid':'', 'conflict_resolution_type':'seqno'}
-            restFirstNode.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                                '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly')
+            restFirstNode.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+                                '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly',
+                                storageBackend=self.bucket_storage)
 
             self.checkConfig(self.eventID, firstNode, expectedResults)
 
@@ -495,8 +543,9 @@ class auditTest(BaseTestCase):
                                    'auth_type':'sasl', "autocompaction":'false', "purge_interval":"undefined", \
                                     "flush_enabled":False, "num_threads":3, "source":source, \
                                    "user":user, "ip":self.ipAddress, "port":57457, 'sessionid':'', 'conflict_resolution_type':'seqno'}
-                rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] / 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
-                                   '11211', 'membase', 0, expectedResults['num_threads'], 0 , 'valueOnly')
+                rest.create_bucket(expectedResults['bucket_name'], expectedResults['ram_quota'] // 1048576, expectedResults['auth_type'], 'password', expectedResults['num_replicas'], \
+                                   '11211', 'membase', 0, expectedResults['num_threads'], 0, 'valueOnly',
+                                   storageBackend=self.bucket_storage)
 
                 self.checkConfig(self.eventID, server, expectedResults)
 
@@ -599,36 +648,36 @@ class auditTest(BaseTestCase):
 
 
     def test_internalSettingsXDCR(self):
-        ops = self.input.param("ops",None)
-        value = self.input.param("value",None)
+        ops = self.input.param("ops", None)
+        value = self.input.param("value", None)
         rest = RestConnection(self.master)
         user = self.master.rest_username
         source = 'ns_server'
-        input = self.input.param("input",None)
+        input = self.input.param("input", None)
 
         replications = rest.get_replications()
         for repl in replications:
             src_bucket = repl.get_src_bucket()
             dst_bucket = repl.get_dst_bucket()
-            rest.set_xdcr_param(src_bucket.name, dst_bucket.name, input,value)
+            rest.set_xdcr_param(src_bucket.name, dst_bucket.name, input, value)
         expectedResults = {"user":user, "local_cluster_name":self.master.ip+":8091", ops:value,
                                "source":source}
 
-        self.checkConfig(self.eventID,self.master,expectedResults)
+        self.checkConfig(self.eventID, self.master, expectedResults)
 
     def test_internalSettingLocal(self):
-        ops = self.input.param("ops",None)
+        ops = self.input.param("ops", None)
         if ":" in ops:
-            ops = ops.replace(":",",")
+            ops = ops.replace(":", ",")
             ops = '{' + ops + '}'
-        value = self.input.param("value",None)
+        value = self.input.param("value", None)
         rest = RestConnection(self.master)
         user = self.master.rest_username
         source = 'ns_server'
-        input = self.input.param("input",None)
+        input = self.input.param("input", None)
 
 
-        rest.set_internalSetting(input,value)
+        rest.set_internalSetting(input, value)
         expectedResults = {"user":user, ops:value,"source":source,"ip":self.ipAddress, "port":57457}
 
-        self.checkConfig(self.eventID,self.master,expectedResults)
+        self.checkConfig(self.eventID, self.master, expectedResults)

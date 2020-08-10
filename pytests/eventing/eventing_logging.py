@@ -1,11 +1,16 @@
-import logging
-
-from lib.membase.api.rest_client import RestConnection
-from lib.testconstants import STANDARD_BUCKET_PORT
-from logredaction.log_redaction_base import LogRedactionBase
 from pytests.eventing.eventing_base import EventingBaseTest
-from pytests.eventing.eventing_constants import HANDLER_CODE
+from logredaction.log_redaction_base import LogRedactionBase
 from pytests.security.auditmain import audit
+from lib.testconstants import STANDARD_BUCKET_PORT
+import logging
+import copy
+import json
+from lib.couchbase_helper.tuq_helper import N1QLHelper
+from lib.membase.api.rest_client import RestConnection
+from lib.remote.remote_util import RemoteMachineShellConnection
+from lib.testconstants import STANDARD_BUCKET_PORT
+from lib.memcached.helper.data_helper import MemcachedClientHelper
+from pytests.eventing.eventing_constants import HANDLER_CODE
 
 log = logging.getLogger()
 
@@ -13,6 +18,7 @@ log = logging.getLogger()
 class EventingLogging(EventingBaseTest, LogRedactionBase):
     def setUp(self):
         super(EventingLogging, self).setUp()
+        self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=1200)
         if self.create_functions_buckets:
             self.bucket_size = 100
             log.info(self.bucket_size)
@@ -55,7 +61,7 @@ class EventingLogging(EventingBaseTest, LogRedactionBase):
         # Wait for eventing to catch up with all the create mutations and verify results
         self.verify_eventing_results(self.function_name, self.docs_per_day * 2016)
         self.undeploy_and_delete_function(body)
-        expected_results_undeploy = {"real_userid:source": "builtin", "real_userid:user": "@eventing-cbauth",
+        expected_results_undeploy = {"real_userid:source": "builtin", "real_userid:user": "Administrator",
                                      "context": self.function_name, "id": 32779, "name": "Set Settings",
                                      "description": "Save settings for a given app"}
         expected_results_delete_draft = {"real_userid:source": "builtin", "real_userid:user": "Administrator",
@@ -87,7 +93,10 @@ class EventingLogging(EventingBaseTest, LogRedactionBase):
         self.set_redaction_level()
         self.start_logs_collection()
         result = self.monitor_logs_collection()
+        self.log.info("cb collect result: {}".format(result))
         node = "ns_1@"+eventing_node.ip
+        if result["perNode"][node]["path"] == "failed":
+            raise Exception("log collection failed")
         logs_path = result["perNode"][node]["path"]
         redactFileName = logs_path.split('/')[-1]
         nonredactFileName = logs_path.split('/')[-1].replace('-redacted', '')
@@ -103,5 +112,23 @@ class EventingLogging(EventingBaseTest, LogRedactionBase):
                                   redactFileName=redactFileName,
                                   nonredactFileName=nonredactFileName,
                                   logFileName="ns_server.eventing.log")
+
+
+    def test_log_rotation(self):
+        self.load_sample_buckets(self.server, "travel-sample")
+        self.src_bucket_name="travel-sample"
+        body = self.create_save_function_body(self.function_name, "handler_code/logger.js")
+        body['settings']['app_log_max_size']=3768300
+        # deploy a function without any alias
+        self.deploy_function(body)
+        self.verify_eventing_results(self.function_name, 31591)
+        number=self.check_number_of_files()
+        if number ==1:
+            raise Exception("Files not rotated")
+        matched, count=self.check_word_count_eventing_log(self.function_name,"docId:",31591)
+        self.skip_metabucket_check = True
+        if not matched:
+            raise Exception("Not all data logged in file")
+
 
 

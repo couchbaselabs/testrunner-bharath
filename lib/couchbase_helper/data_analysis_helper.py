@@ -1,11 +1,11 @@
-import os
+import os, time, datetime
 import os.path
 import uuid
-
-from membase.api.rest_client import RestConnection
-from memcached.helper.data_helper import MemcachedClientHelper
+import json
 from remote.remote_util import RemoteMachineShellConnection
-
+from lib.mc_bin_client import MemcachedClient
+from memcached.helper.data_helper import MemcachedClientHelper
+from membase.api.rest_client import RestConnection
 # constants used in this file only
 DELETED_ITEMS_FAILURE_ANALYSIS_FORMAT="\n1) Failure :: Deleted Items :: Expected {0}, Actual {1}"
 DELETED_ITEMS_SUCCESS_ANALYSIS_FORMAT="\n1) Success :: Deleted Items "
@@ -31,7 +31,7 @@ class DataAnalysisResultAnalyzer:
         output=""
         summary=""
         logic=True
-        for bucket in result.keys():
+        for bucket in list(result.keys()):
             summary+="\n ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
             output+="\n ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
             output+="\n Analyzing for Bucket {0}".format(bucket)
@@ -63,12 +63,12 @@ class DataAnalysisResultAnalyzer:
         output=""
         summary=""
         logic=True
-        for bucket in result.keys():
+        for bucket in list(result.keys()):
             output+="\n ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
             summary+="\n ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
             output+="\n Analyzing for Bucket {0}".format(bucket)
             summary+="\n Analyzing for Bucket {0}".format(bucket)
-            for node in result[bucket].keys():
+            for node in list(result[bucket].keys()):
                 output+="\n ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
                 output+="\n Analyzing for Bucket {0}, node {1}".format(bucket,node)
                 summary+="\n Analyzing for Bucket {0}, node {1}".format(bucket,node)
@@ -109,7 +109,7 @@ class DataAnalysisResultAnalyzer:
             output+=failureoutputformat.format(actual,lresult)
 
         if result != None and type == UPDATED_ITEMS:
-            for key in result.keys():
+            for key in list(result.keys()):
                 output+="\n {0} : {1} ".format(key,result[key])
         else:
             for values in result:
@@ -133,7 +133,7 @@ class DataAnalyzer(object):
             Map per Bucket information of data: total, max per vbucket, min  per vbucket, mean, std
         """
         Result = {}
-        for bucket in sourceMap.keys():
+        for bucket in list(sourceMap.keys()):
             info = sourceMap[bucket]
             Result[bucket] = self.find_data_distribution(info)
         return Result
@@ -163,7 +163,7 @@ class DataAnalyzer(object):
                This output is for bucket -> vbucket level
         """
         Result = {}
-        for bucket in sourceMap.keys():
+        for bucket in list(sourceMap.keys()):
             info1 = sourceMap[bucket]
             info2 = targetMap[bucket]
             Result[bucket] = self.compare_data_maps(info1,info2,headerInfo,"key")
@@ -195,10 +195,10 @@ class DataAnalyzer(object):
                 This output is for bucket -> node -> vbucket level
         """
         Result = {}
-        for bucket in sourceMap.keys():
+        for bucket in list(sourceMap.keys()):
             Result[bucket] = {}
-        for bucket in sourceMap.keys():
-            for node in sourceMap[bucket].keys():
+        for bucket in list(sourceMap.keys()):
+            for node in list(sourceMap[bucket].keys()):
                 info1 = sourceMap[bucket][node]
                 info2 = targetMap[bucket][node]
                 Result[bucket][node] = self.compare_data_maps(info1,info2,headerInfo,"key")
@@ -229,7 +229,7 @@ class DataAnalyzer(object):
                This output is for bucket -> vbucket level
         """
         Result = {}
-        for bucket in bucketmap1.keys():
+        for bucket in list(bucketmap1.keys()):
             info1 = bucketmap1[bucket]
             info2 = bucketmap2[bucket]
             Result[bucket] = self.compare_maps(info1,info2,mainKey,comparisonMap)
@@ -261,12 +261,12 @@ class DataAnalyzer(object):
                 This output is for bucket -> node -> vbucket level
         """
         Result = {}
-        for bucket in bucketmap1.keys():
+        for bucket in list(bucketmap1.keys()):
             map1 = bucketmap1[bucket]
             map2 = bucketmap2[bucket]
             NodeResult = {}
             if map1 !=  None:
-                for node in map1.keys():
+                for node in list(map1.keys()):
                     info1 = map1[node]
                     info2 = map2[node]
                     NodeResult[node] = self.compare_maps(info1,info2,mainKey,comparisonMap)
@@ -283,14 +283,14 @@ class DataAnalyzer(object):
             data2 = info2[key]
             isNotEqual = False
             reason = {}
-            if len(data1.keys()) == len(data2.keys()):
-                for vkey in data1.keys():
-                    if comparisonMap != None and vkey in comparisonMap.keys():
+            if len(list(data1.keys())) == len(list(data2.keys())):
+                for vkey in list(data1.keys()):
+                    if comparisonMap != None and vkey in list(comparisonMap.keys()):
                         self.compare_values(data1[vkey],data2[vkey],vkey,reason,comparisonMap[vkey])
                     elif data1[vkey] !=  data2[vkey]:
                         reason[vkey] = "Expected {0} :: Actual {1}".format(data1[vkey],data2[vkey])
             else:
-                reason["number of key mismatch"] = "Key Mismatch :: Expected keys {0} \n Actual keys {1}".format(data1.keys(),data2.keys())
+                reason["number of key mismatch"] = "Key Mismatch :: Expected keys {0} \n Actual keys {1}".format(list(data1.keys()),list(data2.keys()))
             if len(reason) > 0:
                 updatedItemsMap[key] = reason
         comparisonResult = {DELETED_ITEMS:deletedItemsList,ADD_ITEMS:addedItemsList,UPDATED_ITEMS:updatedItemsMap}
@@ -300,16 +300,16 @@ class DataAnalyzer(object):
     def find_data_distribution(self,info):
         """ Method to extract data distribution from map info """
         distribution_map = {}
-        for key in info.keys():
+        for key in list(info.keys()):
             data = info[key].split(",")
             vbucket = data[len(data) - 1]
-            if vbucket in distribution_map.keys():
+            if vbucket in list(distribution_map.keys()):
                 distribution_map[vbucket] += 1
             else:
                 distribution_map[vbucket] = 1
         array  =  []
         total  = 0
-        for key in distribution_map.keys():
+        for key in list(distribution_map.keys()):
             array.append(distribution_map[key])
         max_val  =  max(array)
         min_val =  min(array)
@@ -324,14 +324,14 @@ class DataAnalyzer(object):
     def compare_analyze_active_replica_vb_nums(self, active_map, replica_map):
         active_maps = {}
         replica_maps = {}
-        for bucket in active_map.keys():
+        for bucket in list(active_map.keys()):
             active_maps[bucket] = self.analyze_vb_nums(active_map[bucket])
             replica_maps[bucket] = self.analyze_vb_nums(replica_map[bucket])
         return active_maps,replica_maps
 
     def analyze_vb_nums(self, map):
         array = []
-        for machine in map.keys():
+        for machine in list(map.keys()):
             array.append(map[machine])
         total = sum(array)
         max_val = max(array)
@@ -355,7 +355,7 @@ class DataAnalyzer(object):
             reason = {}
             if len(data1) == len(data2):
                 for i in range(len(data1)):
-                    if comparisonMap != None and headerInfo[i] in comparisonMap.keys():
+                    if comparisonMap != None and headerInfo[i] in list(comparisonMap.keys()):
                         self.compare_values(data1[i],data2[i],fields[i],reason,comparisonMap[headerInfo[i]])
                     elif data1[i] !=  data2[i]:
                         reason[fields[i]] = "Expected {0} :: Actual {1}".format(data1[i],data2[i])
@@ -404,7 +404,7 @@ class DataAnalyzer(object):
         if type == "int":
             return int(val)
         elif type == "long":
-            return long(val)
+            return int(val)
         elif type == "float":
             return float(val)
         elif type == "string":
@@ -413,7 +413,9 @@ class DataAnalyzer(object):
 class DataCollector(object):
     """ Helper Class to collect stats and data from clusters """
 
-    def collect_data(self,servers,buckets,userId="Administrator",password="password", data_path = None, perNode = True, getReplica = False, mode = "memory"):
+    def collect_data(self, servers, buckets, userId="Administrator", password="password",
+                                             data_path = None, perNode = True,
+                                             getReplica = False, mode = "memory"):
         """
             Method to extract all data information from memory or disk using cbtransfer
             The output is organized like { bucket :{ node { document-key : list of values }}}
@@ -445,12 +447,23 @@ class DataCollector(object):
             headerInfo = []
             bucketMap = {}
             if  server.ip == "127.0.0.1":
-                headerInfo,bucketMap = self.get_local_data_map_using_cbtransfer(server,buckets, data_path=data_path, userId=userId,password=password, getReplica = getReplica, mode = mode)
+                headerInfo,bucketMap = self.get_local_data_map_using_cbtransfer(server,
+                                                      buckets,
+                                                      data_path=data_path,
+                                                      userId=userId,
+                                                      password=password,
+                                                      getReplica = getReplica,
+                                                      mode = mode)
             else:
                 remote_client = RemoteMachineShellConnection(server)
-                headerInfo,bucketMap = remote_client.get_data_map_using_cbtransfer(buckets, data_path=data_path, userId=userId,password=password, getReplica = getReplica, mode = mode)
+                headerInfo,bucketMap = remote_client.get_data_map_using_cbtransfer(buckets,
+                                                         data_path=data_path,
+                                                         userId=userId,
+                                                         password=password,
+                                                         getReplica = getReplica,
+                                                         mode = mode)
                 remote_client.disconnect()
-            for bucket in bucketMap.keys():
+            for bucket in list(bucketMap.keys()):
                 newMap = self.translateDataFromCSVToMap(0,bucketMap[bucket])
                 if perNode:
                     completeMap[bucket][server.ip] = newMap
@@ -458,7 +471,10 @@ class DataCollector(object):
                     completeMap[bucket].update(newMap)
         return headerInfo,completeMap
 
-    def collect_vbucket_stats(self,buckets,servers,collect_vbucket = True,collect_vbucket_seqno = True,collect_vbucket_details = True,perNode = True):
+    def collect_vbucket_stats(self, buckets, servers, collect_vbucket = True,
+                                                      collect_vbucket_seqno = True,
+                                                      collect_vbucket_details = True,
+                                                      perNode = True):
         """
             Method to extract the vbuckets stats given by cbstats tool
 
@@ -476,10 +492,12 @@ class DataCollector(object):
             The output can be in two formats
 
             if we are doing per node data collection
-            Vbucket Information :: {bucket { node : [vbucket_seqno {key:value} U vbucket_details {key:value} U vbucket {key:value}]}}
+            Vbucket Information :: {bucket { node : [vbucket_seqno {key:value}
+                         U vbucket_details {key:value} U vbucket {key:value}]}}
 
             if we are not doing per node data collection
-            Vbucket Information :: {bucket : [vbucket_seqno {key:value} U vbucket_details {key:value} U vbucket {key:value}]}
+            Vbucket Information :: {bucket : [vbucket_seqno {key:value}
+                          U vbucket_details {key:value} U vbucket {key:value}]}
         """
         bucketMap = {}
         vbucket = []
@@ -524,33 +542,32 @@ class DataCollector(object):
             if not collecting per node :: {bucket : [{key:value}]}
             if collecting per node :: {bucket : {node:[{key:value}]}}
         """
-        bucketMap = {}
+        bucketMap = dict()
         for bucket in buckets:
-            bucketMap[bucket.name] = {}
-        for bucket in buckets:
-            dataMap = {}
+            bucketMap[bucket.name] = dict()
+            dataMap = dict()
             for server in servers:
                 client = MemcachedClientHelper.direct_client(server, bucket)
                 stats = client.stats('failovers')
-                map_data = {}
-                num_map ={}
-                for o in stats.keys():
+                map_data = dict()
+                num_map = dict()
+                for o in list(stats.keys()):
                     tokens = o.split(":")
                     vb = tokens[0]
                     key = tokens[1]
                     value = stats[o].split()
-                    num = -1
-                    if len(tokens)  ==  3:
+                    num = 99999
+                    if len(tokens) == 3:
                         vb = tokens[0]
                         num = int(tokens[1])
                         key = tokens[2]
-                    if vb in map_data.keys() and (num == num_map[vb] or num > num_map[vb]):
+                    if vb in list(map_data.keys()) and (num == num_map[vb] or num < num_map[vb]):
                         map_data[vb][key] = value[0]
                         num_map[vb] = num
-                    elif vb in map_data.keys() and key == "num_entries":
+                    elif vb in list(map_data.keys()) and key == "num_entries":
                         map_data[vb][key] = value[0]
-                    elif vb not in map_data.keys():
-                        m = {}
+                    elif vb not in list(map_data.keys()):
+                        m = dict()
                         m[key] = value[0]
                         map_data[vb] = m
                         num_map[vb] = num
@@ -584,7 +601,7 @@ class DataCollector(object):
             for server in servers:
                 client = MemcachedClientHelper.direct_client(server, bucket)
                 stats = client.stats('')
-                for key in stats.keys():
+                for key in list(stats.keys()):
                     if key == 'vb_active_num':
                         active_map_data[server.ip] = int(stats[key])
                     if key == 'vb_replica_num':
@@ -593,7 +610,9 @@ class DataCollector(object):
             replica_bucketMap[bucket.name] = replica_map_data
         return active_bucketMap,replica_bucketMap
 
-    def collect_compare_dcp_stats(self,buckets,servers,perNode = True, stat_name = 'unacked_bytes', compare_value = 0,  flow_control_buffer_size = 20971520, filter_list = []):
+    def collect_compare_dcp_stats(self, buckets, servers, perNode = True,
+                                  stat_name = 'unacked_bytes', compare_value = 0,
+                                  flow_control_buffer_size = 20971520, filter_list = []):
         """
             Method to extract the failovers stats given by cbstats tool
 
@@ -619,7 +638,7 @@ class DataCollector(object):
                 client = MemcachedClientHelper.direct_client(server, bucket)
                 stats = client.stats('dcp')
                 map_data = {}
-                for key in stats.keys():
+                for key in list(stats.keys()):
                     filter = False
                     if stat_name in key:
                         for filter_key in filter_list:
@@ -635,7 +654,8 @@ class DataCollector(object):
                                     bucketMap[bucket] = False
         return bucketMap
 
-    def collect_dcp_stats(self, buckets, servers, stat_names = [], extra_key_condition = "replication"):
+    def collect_dcp_stats(self, buckets, servers, stat_names = [],
+                                extra_key_condition = "replication"):
         """
             Method to extract the failovers stats given by cbstats tool
 
@@ -658,7 +678,7 @@ class DataCollector(object):
             dataMap = {}
             for server in servers:
                 stats = MemcachedClientHelper.direct_client(server, bucket).stats('dcp')
-                for key in stats.keys():
+                for key in list(stats.keys()):
                     for stat_name in stat_names:
                         if stat_name in key and extra_key_condition in key:
                             value = int(stats[key])
@@ -672,13 +692,13 @@ class DataCollector(object):
 
     def createMapVbucket(self,details,map_data):
         """ Helper method for vbucket information data collection """
-        for o in details.keys():
+        for o in list(details.keys()):
             tokens = o.split(":")
             if len(tokens) ==  2:
                 vb = tokens[0]
                 key = tokens[1]
                 value = details[o].strip()
-                if vb in map_data.keys():
+                if vb in list(map_data.keys()):
                     map_data[vb][key] = value
                 else:
                     m = {}
@@ -687,7 +707,7 @@ class DataCollector(object):
             elif len(tokens)  ==  1:
                 vb = tokens[0]
                 value = details[o].strip()
-                if vb in map_data.keys():
+                if vb in list(map_data.keys()):
                     map_data[vb]["state"] = value
                 else:
                     m = {}
@@ -700,7 +720,7 @@ class DataCollector(object):
         revIdIndex = 5
         for value in dataInCSV:
             values = value.split(",")
-            if values[index] in bucketMap.keys():
+            if values[index] in list(bucketMap.keys()):
                 prev_revId =  int(bucketMap[values[index]][revIdIndex])
                 new_revId = int(values[revIdIndex])
                 if prev_revId < new_revId:
@@ -709,7 +729,9 @@ class DataCollector(object):
                 bucketMap[values[index]] = value
         return bucketMap
 
-    def get_local_data_map_using_cbtransfer(self, server, buckets, data_path=None, userId="Administrator", password="password", getReplica=False, mode = "memory"):
+    def get_local_data_map_using_cbtransfer(self, server, buckets, data_path=None,
+                                                  userId="Administrator", password="password",
+                                                  getReplica=False, mode = "memory"):
         """ Get Local CSV information :: method used when running simple tests only """
         temp_path = "/tmp/"
         replicaOption = ""
@@ -729,9 +751,11 @@ class DataCollector(object):
         # Iterate per bucket and generate maps
         for bucket in buckets:
             if data_path == None:
-                options = " -b " + bucket.name + " -u " + userId + " -p " + password + " --single-node"
+                options = " -b " + bucket.name + " -u " + userId + " -p " + password + \
+                                                                   " --single-node"
             else:
-                options = " -b " + bucket.name + " -u " + userId + " -p " + password + " " + replicaOption
+                options = " -b " + bucket.name + " -u " + userId + " -p " + password + \
+                                                                   " " + replicaOption
             suffix = "_" + bucket.name + "_N%2FA.csv"
             if mode == "memory" or mode == "backup":
                suffix = "_" + bucket.name + "_" + self.ip + "%3A"+server.port+".csv"
@@ -739,7 +763,8 @@ class DataCollector(object):
             csv_path = temp_path + fileName
             dest_path = temp_path+"/"+genFileName
             destination = "csv:" + csv_path
-            bin_path=os.path.abspath(os.path.join(os.getcwd(), os.pardir))+"/install/bin/cbtransfer"
+            bin_path=os.path.abspath(os.path.join(os.getcwd(), os.pardir))+ \
+                                                   "/install/bin/cbtransfer"
             command = "{0} {1} {2} {3}".format(bin_path,source,destination,options)
             os.system(command)
             file_existed = os.path.isfile(dest_path)
@@ -753,53 +778,138 @@ class DataCollector(object):
                 os.remove(dest_path)
         return headerInfo, bucketMap
 
-    def get_kv_dump_from_backup_file(self, server, cli_command, cmd_ext,
-                                     backup_dir, master_key, buckets):
+    def get_kv_dump_from_backup_file(self, server, cli_command, cmd_ext, master_key, buckets, debug_logs=False,
+                                     objstore_provider=None, backupset=None):
         """
-            Extract key value from database file shard_0.fdb
+            Extract key value from database file shard_0.sqlite.0
             Return: key, kv store name, status and value
         """
         conn = RemoteMachineShellConnection(server)
+        cluster_version = RestConnection(server).get_nodes_version()
         backup_data = {}
         status = False
+        now = datetime.datetime.now()
+        shards_with_data = {}
         for bucket in buckets:
             backup_data[bucket.name] = {}
-            output, error = conn.execute_command("ls %s/backup/201*/%s*/data "\
-                                                        % (backup_dir, bucket.name))
-            if "shard_0.fdb" in output:
-                if master_key == "random_keys":
-                    master_key = ".\{12\}$"
-                cmd = "%sforestdb_dump%s --plain-meta "\
-                      "%s/backup/201*/%s*/data/shard_0.fdb | grep -A 8 '^Doc\sID:\s%s' "\
-                                                    % (cli_command, cmd_ext,\
-                                                       backup_dir, bucket.name, master_key)
-                dump_output, error = conn.execute_command(cmd)
-                if dump_output:
-                    """ remove empty element """
-                    dump_output = [x.strip(' ') for x in dump_output]
-                    """ remove '--' element """
-                    dump_output = [ x for x in dump_output if not "--" in x ]
-                    print "Start extracting data from database file"
-                    key_ids       =  [x.split(":")[1].strip(' ') for x in dump_output[0::9]]
-                    key_partition =  [x.split(":")[1].strip(' ') for x in dump_output[1::9]]
-                    key_status    =  [x.split(":")[-1].strip(' ') for x in dump_output[6::9]]
-                    key_value = []
-                    for x in dump_output[8::9]:
-                        if x.split(":",1)[1].strip(' ').startswith("{"):
-                            key_value.append(x.split(":",1)[1].strip())
-                        else:
-                            key_value.append(x.split(":")[-1].strip(' '))
-                    for idx, key in enumerate(key_ids):
-                        backup_data[bucket.name][key] = \
-                               {"KV store name":key_partition[idx], "Status":key_status[idx],
-                                "Value":key_value[idx]}
-                    print "Done get data from backup file"
-                    status = True
-                else:
-                    print "Data base is empty"
-                    return  backup_data, status
+            shards_with_data[bucket.name] = []
+            print("---- Collecting data in backup repo")
+            if master_key == "random_keys":
+                master_key = ".\{12\}$"
+            dump_output = []
+
+            command = (
+                f"ls -tr {backupset.objstore_staging_directory + '/' if objstore_provider else ''}"
+                f"{backupset.directory}/{backupset.name} | tail -1"
+            )
+
+            backup_name, e = conn.execute_command(command)
+            if not backup_name or e:
+                return None, status
+
+            command = (
+                f"ls -tr --group-directories-first {backupset.objstore_staging_directory + '/' if objstore_provider else ''}"
+                f"{backupset.directory}/{backupset.name}/{backup_name[0]} | head -1"
+            )
+
+            bucket_name, e = conn.execute_command(command)
+            if not bucket_name or e:
+                return None, status
+
+            if objstore_provider:
+                object_store_command = (
+                    f"{' --obj-staging-dir ' + backupset.objstore_staging_directory}"
+                    f"{' --obj-access-key-id ' + backupset.objstore_access_key_id if backupset.objstore_access_key_id else ''}"
+                    f"{' --obj-cacert ' + backupset.objstore_cacert if backupset.objstore_cacert else ''}"
+                    f"{' --obj-endpoint ' + backupset.objstore_endpoint if backupset.objstore_endpoint else ''}"
+                    f"{' --obj-no-ssl-verify' if backupset.objstore_no_ssl_verify else ''}"
+                    f"{' --obj-region ' + backupset.objstore_region if backupset.objstore_region else ''}"
+                    f"{' --obj-secret-access-key ' + backupset.objstore_secret_access_key if backupset.objstore_secret_access_key else ''}"
+                    f"{' --s3-force-path-style' if objstore_provider.schema_prefix() == 's3://' else ''}"
+                    )
+
+            if cluster_version[:3] >= "7.0":
+                command = (
+                    f"ls -tr --group-directories-first {backupset.objstore_staging_directory + '/' if objstore_provider else ''}"
+                    f"{backupset.directory}/{backupset.name}/{backup_name[0]}/{bucket_name[0]}/data | grep index"
+                )
+                data_files, e = conn.execute_command(command)
+                data_files = [x.replace('index_', '') for x in data_files]
+                data_files = [x.split('.')[0] for x in data_files]
+                for i in data_files:
+                    command = (
+                        f"{cli_command}cbriftdump{cmd_ext} -j "
+                        f" -f {objstore_provider.schema_prefix() + backupset.objstore_bucket + '/' if objstore_provider else ''}"
+                        f"{backupset.directory}/backup/{backup_name[0]}/{bucket_name[0]}/data/index_{i}.sqlite.0"
+                    )
+
+                    if objstore_provider:
+                        command += object_store_command
+                    output, error = conn.execute_command(command, debug=False)
+                    if output:
+                        key_status = []
+                        key_ids = []
+                        key_value = []
+                        key_partition = i
+                        shards_with_data[bucket.name].append(i)
+                        for x in output:
+                            data_dumps = json.loads(x)
+                            if type(data_dumps['value']) is str:
+                                key_value.append(bytes.fromhex(data_dumps['value']).decode('utf-8'))
+                            else:
+                                key_value.append(str(data_dumps['value']).replace("'", '"'))
+                            key_ids.append(data_dumps['key'])
+                            key_status.append(data_dumps['deleted'])
+                            for idx, key in enumerate(key_ids):
+                                backup_data[bucket.name][key] = \
+                                   {"KV store name":key_partition, "Status":key_status[idx],
+                                    "Value":key_value[idx]}
+                        status = True
             else:
-                raise Exception("Could not find file shard_0.fdb at %s" % server.ip)
+                for i in range(0, 1024):
+                    command = (
+                        f"{cli_command}cbriftdump{cmd_ext}"
+                        f" -f {objstore_provider.schema_prefix() + backupset.objstore_bucket + '/' if objstore_provider else ''}"
+                        f"{backupset.directory}/backup/{backup_name[0]}/{bucket_name[0]}/data/index_{i}.sqlite.0"
+                    )
+
+                    if objstore_provider:
+                        command += object_store_command
+                    command += f" | grep -A 8 'Key: {master_key}' "
+
+                    output, error = conn.execute_command(command, debug=False)
+                    if output:
+                        shards_with_data[bucket.name].append(i)
+                        """ remove empty element """
+                        output = [x.strip(' ') for x in output]
+                        """ remove '--' element """
+                        output = [ x for x in output if not "--" in x ]
+                        key_partition = i
+                        key_ids       =  [x.split(":")[1].strip(' ') for x in output[0::7]]
+                        key_status    =  [x.split(":")[1].strip(' ') for x in output[2::7]]
+                        key_value = []
+                        for x in output[5::7]:
+                            if x.split(":",1)[1].strip(' ').startswith("{"):
+                                key_value.append(x.split(":",1)[1].strip())
+                            else:
+                                key_value.append(x.split(":")[-1].strip(' '))
+                        for idx, key in enumerate(key_ids):
+                            backup_data[bucket.name][key] = \
+                               {"KV store name":key_partition, "Status":key_status[idx],
+                                "Value":key_value[idx]}
+                        status = True
+
+            if not backup_data[bucket.name]:
+                print(("Data base of bucket {0} is empty".format(bucket.name)))
+                return  backup_data, status
+            print(("---- Done extract data from backup files in backup repo of bucket {0}"\
+                                                                   .format(bucket.name)))
+        if debug_logs:
+            print(("---- shards with data in each bucket: {0}".format(shards_with_data)))
+        else:
+            for bucket in buckets:
+                print(("---- total files with data in bucket {0} are {1}"\
+                           .format(bucket.name, len(shards_with_data[bucket.name]))))
         return backup_data, status
 
     def get_views_definition_from_backup_file(self, server, backup_dir, buckets):

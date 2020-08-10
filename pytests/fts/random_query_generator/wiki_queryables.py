@@ -18,6 +18,36 @@ class WikiQuerables:
         """
         return self.return_unicode(self.get_random_value(TITLES))
 
+    def get_queryable_title_range(self, min=True):
+        """
+        Returns a valid dept to be queried
+        """
+        delimit = int(len(TITLES)/2)
+        if min:
+            return self.return_unicode(self.get_random_value(sorted(TITLES)[:delimit]))
+        else:
+            return self.return_unicode(self.get_random_value(sorted(TITLES)[delimit:]))
+
+    def get_queryable_revision_text_text_range(self, min=True):
+        """
+        Returns a valid dept to be queried
+        """
+        delimit = int(len(TITLES)/2)
+        if min:
+            return self.return_unicode(self.get_random_value(sorted(TITLES)[:delimit]))
+        else:
+            return self.return_unicode(self.get_random_value(sorted(TITLES)[delimit:]))
+
+    def get_queryable_revision_contributor_username_range(self, min=True):
+        """
+        Returns a valid dept to be queried
+        """
+        delimit = int(len(USERNAMES)/2)
+        if min:
+            return self.return_unicode(self.get_random_value(sorted(USERNAMES)[:delimit]))
+        else:
+            return self.return_unicode(self.get_random_value(sorted(USERNAMES)[delimit:]))
+
     def get_queryable_revision_contributor_id(self):
         """
         Returns a valid wiki contributor id(number)
@@ -53,13 +83,13 @@ class WikiQuerables:
 
     def return_unicode(self, text):
         try:
-            text = unicode(text, 'utf-8')
+            text = str(text, 'utf-8')
             return text
         except TypeError:
             return text
 
     def get_queryable_regex_title(self):
-        list = ['Au*', '[A-Ca-z ]+', u'[A-Za-z]+\xe9*', 'Embas+y*',
+        list = ['Au*', '[A-Ca-z ]+', '[A-Za-z]+\xe9*', 'Embas+y*',
                 'Etc[,./]*', 'Edit*', 'Flesch[-:]Kincaid*',
                 '[:{}()]', '[0-9]+', 'Kil+', '[E-M]ist[ ,]of*', 'm[m-t].']
         return self.return_unicode(self.get_random_value(list))

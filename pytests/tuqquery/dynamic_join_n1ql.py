@@ -7,6 +7,7 @@ from tuqquery.tuq import QueryTests
 JOIN_INNER = "INNER"
 JOIN_LEFT = "LEFT"
 
+
 class JoinQueryTests(QueryTests):
     def setUp(self):
         super(JoinQueryTests, self).setUp()
@@ -14,6 +15,7 @@ class JoinQueryTests(QueryTests):
         self.full_list = self.generate_full_docs_list(self.gens_load)
         self.additional_set = self.generate_docs_additional()
         self.load(self.additional_set)
+        self.query_buckets = self.get_query_buckets(check_all_buckets=True)
         
     def suite_setUp(self):
         super(JoinQueryTests, self).suite_setUp()
@@ -24,19 +26,18 @@ class JoinQueryTests(QueryTests):
     def suite_tearDown(self):
         super(JoinQueryTests, self).suite_tearDown()
 
-
 ##############################################################################################
 #
 #   SIMPLE CHECKS
 ##############################################################################################
     def test_simple_join_keys(self):
-        for bucket in self.buckets:
+        for query_bucket in self.query_buckets:
             query_template = "SELECT employee.$str0, employee.$list_str0, new_project " +\
-            "FROM %s as employee %s JOIN default.project as new_project " % (bucket.name, self.type_join) +\
-            "ON KEYS employee.$list_str0"
+                             "FROM {0} as employee {1} JOIN {0}.project as new_project ".format(query_bucket,
+                                                                                                self.type_join) +\
+                             "ON KEYS employee.$list_str0"
             actual_result, expected_result = self.run_query_from_template(query_template)
             self._verify_results(actual_result['results'], expected_result)
-
 
 ##############################################################################################
 #
@@ -57,11 +58,11 @@ class JoinQueryTests(QueryTests):
         generators = []
         start, end = 0, 0
         join_keys = self.gen_results.type_args['list_str'][0]
-        key_prefixes = list(set([doc[join_keys] for doc in self.gen_results.full_list]))[:-1]
+        key_prefixes = list({doc[join_keys] for doc in self.gen_results.full_list})[:-1]
         template = '{{ "add_name":"{0}", "project": "{1}"}}'
         for key_prefix in key_prefixes:
             generators.append(DocumentGenerator(key_prefix, template,
-                                                ["test-%s" % i for i in xrange(0, 10)],
+                                                ["test-%s" % i for i in range(0, 10)],
                                                 ["Project%s" % start],
                                                 start=start, end=start+10))
             start, end = end, end+10
@@ -78,7 +79,7 @@ class JoinQueryTests(QueryTests):
             for item in all_docs_list:
                 keys = item[join_keys]
                 if particular_key is not None:
-                    keys=[item[join_keys][particular_key]]
+                    keys = [item[join_keys][particular_key]]
                 tasks_items = self.generate_full_docs_list(self.gens_tasks, keys=keys)
                 for tasks_item in tasks_items:
                     item_to_add = copy.deepcopy(item)
@@ -88,12 +89,13 @@ class JoinQueryTests(QueryTests):
             for item in all_docs_list:
                 keys = item[join_keys]
                 if particular_key is not None:
-                    keys=[item[join_keys][particular_key]]
+                    keys = [item[join_keys][particular_key]]
                 tasks_items = self.generate_full_docs_list(self.gens_tasks, keys=keys)
                 for key in keys:
                     item_to_add = copy.deepcopy(item)
                     if key in [doc["_id"] for doc in tasks_items]:
-                        item_to_add.update([{joining_key_alias: doc[joining_key]} for doc in tasks_items if key == doc['_id']][0])
+                        item_to_add.update([{joining_key_alias: doc[joining_key]}
+                                            for doc in tasks_items if key == doc['_id']][0])
                         joined_list.append(item_to_add)
             joined_list.extend([{}] * self.gens_tasks[-1].end)
         else:

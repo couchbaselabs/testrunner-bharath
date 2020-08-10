@@ -29,7 +29,7 @@ class SwapRebalanceBase(unittest.TestCase):
         self.servers = self.input.servers
         serverInfo = self.servers[0]
         rest = RestConnection(serverInfo)
-        if len(set([server.ip for server in self.servers])) == 1:
+        if len({server.ip for server in self.servers}) == 1:
             ip = rest.get_nodes_self().ip
             for server in self.servers:
                 server.ip = ip
@@ -41,6 +41,7 @@ class SwapRebalanceBase(unittest.TestCase):
         self.ratio_expiry = self.input.param("ratio-expiry", 0.03)
         self.ratio_deletes = self.input.param("ratio-deletes", 0.13)
         self.num_buckets = self.input.param("num-buckets", 1)
+        self.bucket_storage = self.input.param("bucket_storage", 'couchstore')
         self.failover_factor = self.num_swap = self.input.param("num-swap", 1)
         self.num_initial_servers = self.input.param("num-initial-servers", 3)
         self.fail_orchestrator = self.swap_orchestrator = self.input.param("swap-orchestrator", False)
@@ -67,23 +68,21 @@ class SwapRebalanceBase(unittest.TestCase):
             info = rest.get_nodes_self()
             rest.init_cluster(username=serverInfo.rest_username, password=serverInfo.rest_password)
             rest.init_cluster_memoryQuota(memoryQuota=int(info.mcdMemoryReserved * node_ram_ratio))
-
+            SwapRebalanceBase.enable_diag_eval_on_non_local_hosts(self, serverInfo)
             # Add built-in user
             testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
             RbacBase().create_user_source(testuser, 'builtin', self.servers[0])
-            time.sleep(10)
 
             # Assign user to role
             role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
             RbacBase().add_user_role(role_list, RestConnection(self.servers[0]), 'builtin')
-            time.sleep(10)
 
             if self.num_buckets > 10:
                 BaseTestCase.change_max_buckets(self, self.num_buckets)
             self.log.info("==============  SwapRebalanceBase setup was finished for test #{0} {1} =============="
                       .format(self.case_number, self._testMethodName))
             SwapRebalanceBase._log_start(self)
-        except Exception, e:
+        except Exception as e:
             self.cluster_helper.shutdown()
             self.fail(e)
 
@@ -95,7 +94,7 @@ class SwapRebalanceBase(unittest.TestCase):
                    or (hasattr(self, '_exc_info') and self._exc_info()[1] is not None)
         if test_failed and TestInputSingleton.input.param("stop-on-failure", False)\
                         or self.input.param("skip_cleanup", False):
-                    self.log.warn("CLEANUP WAS SKIPPED")
+                    self.log.warning("CLEANUP WAS SKIPPED")
         else:
             SwapRebalanceBase.reset(self)
             SwapRebalanceBase._log_finish(self)
@@ -131,6 +130,21 @@ class SwapRebalanceBase(unittest.TestCase):
                           .format(self.case_number, self._testMethodName))
 
     @staticmethod
+    def enable_diag_eval_on_non_local_hosts(self, master):
+        """
+        Enable diag/eval to be run on non-local hosts.
+        :param master: Node information of the master node of the cluster
+        :return: Nothing
+        """
+        remote = RemoteMachineShellConnection(master)
+        output, error = remote.enable_diag_eval_on_non_local_hosts()
+        if "ok" not in output:
+            self.log.error("Error in enabling diag/eval on non-local hosts on {}. {}".format(master.ip, output))
+            raise Exception("Error in enabling diag/eval on non-local hosts on {}".format(master.ip))
+        else:
+            self.log.info("Enabled diag/eval for non-local hosts from {}".format(master.ip))
+
+    @staticmethod
     def _log_start(self):
         try:
             msg = "{0} : {1} started ".format(datetime.datetime.now(), self._testMethodName)
@@ -161,7 +175,8 @@ class SwapRebalanceBase(unittest.TestCase):
             node_ram_ratio = BucketOperationHelper.base_bucket_ratio(self.servers)
             info = rest.get_nodes_self()
             available_ram = info.memoryQuota * node_ram_ratio
-            rest.create_bucket(bucket=name, ramQuotaMB=int(available_ram), replicaNumber=replica)
+            rest.create_bucket(bucket=name, ramQuotaMB=int(available_ram), replicaNumber=replica,
+                               storageBackend=self.bucket_storage)
             ready = BucketOperationHelper.wait_for_memcached(master, name)
             self.assertTrue(ready, msg="wait_for_memcached failed")
         self.assertTrue(helper.bucket_exists(name),
@@ -170,7 +185,8 @@ class SwapRebalanceBase(unittest.TestCase):
     @staticmethod
     def _create_multiple_buckets(self, replica=1):
         master = self.servers[0]
-        created = BucketOperationHelper.create_multiple_buckets(master, replica, howmany=self.num_buckets)
+        created = BucketOperationHelper.create_multiple_buckets(master, replica, howmany=self.num_buckets,
+                                                                bucket_storage=self.bucket_storage)
         self.assertTrue(created, "unable to create multiple buckets")
 
         rest = RestConnection(master)
@@ -212,7 +228,7 @@ class SwapRebalanceBase(unittest.TestCase):
         rest = RestConnection(master)
         for bucket in rest.get_buckets():
             loader = dict()
-            loader["mcsoda"] = LoadWithMcsoda(master, self.keys_count / 2, bucket=bucket.name,
+            loader["mcsoda"] = LoadWithMcsoda(master, self.keys_count // 2, bucket=bucket.name,
                     rest_password=master.rest_password, prefix=str(bucket.name), port=8091)
             loader["mcsoda"].cfg["ratio-sets"] = 0.8
             loader["mcsoda"].cfg["ratio-hot"] = 0.2
@@ -259,7 +275,7 @@ class SwapRebalanceBase(unittest.TestCase):
             for node in nodes:
                 if node.ip == server.ip and node.port == server.port:
                     servers_in_cluster.append(server)
-        RebalanceHelper.wait_for_replication(servers_in_cluster, test.cluster_helper)
+        time.sleep(60)
         SwapRebalanceBase.items_verification(test, master)
 
     @staticmethod
@@ -319,7 +335,7 @@ class SwapRebalanceBase(unittest.TestCase):
 
         self.log.info("SWAP REBALANCE PHASE")
         rest.rebalance(otpNodes=[node.id for node in rest.node_statuses()],
-            ejectedNodes=optNodesIds)
+                       ejectedNodes=optNodesIds)
 
         if do_stop_start:
             # Rebalance is stopped at 20%, 40% and 60% completion
@@ -333,7 +349,7 @@ class SwapRebalanceBase(unittest.TestCase):
                         self.log.error("rebalance progress code : {0}".format(progress))
                         break
                     elif progress == 100:
-                        self.log.warn("Rebalance has already reached 100%")
+                        self.log.warning("Rebalance has already reached 100%")
                         break
                     elif progress >= expected_progress:
                         self.log.info("Rebalance will be stopped with {0}%".format(progress))
@@ -428,16 +444,21 @@ class SwapRebalanceBase(unittest.TestCase):
             times = 2
             if self.cluster_run:
                 times = 20
-            for i in xrange(times):
+            for i in range(times):
                 try:
                     _mc = MemcachedClientHelper.direct_client(master, bucket)
                     pid = _mc.stats()["pid"]
                     break
-                except EOFError as e:
+                except (EOFError, KeyError) as e:
                     self.log.error("{0}.Retry in 2 sec".format(e))
                     SwapRebalanceBase.sleep(self, 2)
         if pid is None:
-            self.fail("impossible to get a PID")
+            # sometimes pid is not returned by mc.stats()
+            shell = RemoteMachineShellConnection(master)
+            pid = shell.get_memcache_pid()
+            shell.disconnect()
+            if pid is None:
+                self.fail("impossible to get a PID")
         command = "os:cmd(\"kill -9 {0} \")".format(pid)
         self.log.info(command)
         killed = rest.diag_eval(command)
@@ -453,13 +474,14 @@ class SwapRebalanceBase(unittest.TestCase):
             rest.monitorRebalance()
         except RebalanceFailedException:
             # retry rebalance if it failed
-            self.log.warn("Rebalance failed but it's expected")
+            self.log.warning("Rebalance failed but it's expected")
             SwapRebalanceBase.sleep(self, 30)
             self.assertFalse(RestHelper(rest).is_cluster_rebalanced(), msg="cluster need rebalance")
             knownNodes = rest.node_statuses();
             self.log.info("nodes are still in cluster: {0}".format([(node.ip, node.port) for node in knownNodes]))
-            ejectedNodes = list(set(optNodesIds) & set([node.id for node in knownNodes]))
+            ejectedNodes = list(set(optNodesIds) & {node.id for node in knownNodes})
             rest.rebalance(otpNodes=[node.id for node in knownNodes], ejectedNodes=ejectedNodes)
+            SwapRebalanceBase.sleep(self, 10, "Wait for rebalance to start")
             self.assertTrue(rest.monitorRebalance(),
                             msg="rebalance operation failed after adding node {0}".format(toBeEjectedNodes))
         else:
@@ -544,7 +566,7 @@ class SwapRebalanceBase(unittest.TestCase):
         add_back_servers = []
         nodes = rest.get_nodes()
         for server in nodes:
-            if isinstance(server.ip, unicode):
+            if isinstance(server.ip, str):
                 add_back_servers.append(server)
         final_add_back_servers = []
         for server in self.servers:
@@ -604,6 +626,8 @@ class SwapRebalanceBase(unittest.TestCase):
         for node in optNodesIds:
             self.log.info("failover node {0} and rebalance afterwards".format(node))
             rest.fail_over(node)
+            self.assertTrue(rest.monitorRebalance(),
+                msg="failed after failover of {0}".format(node))
 
         new_swap_servers = self.servers[num_initial_servers:num_initial_servers + self.failover_factor]
         for server in new_swap_servers:

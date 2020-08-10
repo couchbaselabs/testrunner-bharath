@@ -1,17 +1,19 @@
-import json
 import time
-
+from memcacheConstants import ERR_NOT_FOUND
 from castest.cas_base import CasBaseTest
 from couchbase_helper.documentgenerator import BlobGenerator
 from mc_bin_client import MemcachedError
-from membase.api.rest_client import RestConnection
-from memcacheConstants import ERR_NOT_FOUND
+
+from membase.api.rest_client import RestConnection, RestHelper
 from memcached.helper.data_helper import VBucketAwareMemcached, MemcachedClientHelper
+import json
+from couchbase.exceptions import NotFoundError
+
+
 from remote.remote_util import RemoteMachineShellConnection
 
 
 class OpsChangeCasTests(CasBaseTest):
-
     def setUp(self):
         super(OpsChangeCasTests, self).setUp()
 
@@ -28,9 +30,9 @@ class OpsChangeCasTests(CasBaseTest):
         We also use MemcachedClient delete() to delete a quarter of the items"""
 
         gen_load_mysql = BlobGenerator('nosql', 'nosql-', self.value_size, end=self.num_items)
-        gen_update = BlobGenerator('nosql', 'nosql-', self.value_size, end=(self.num_items / 2 - 1))
-        gen_delete = BlobGenerator('nosql', 'nosql-', self.value_size, start=self.num_items / 2, end=(3*self.num_items / 4 - 1))
-        gen_expire = BlobGenerator('nosql', 'nosql-', self.value_size, start=3*self.num_items / 4, end=self.num_items)
+        gen_update = BlobGenerator('nosql', 'nosql-', self.value_size, end=(self.num_items // 2 - 1))
+        gen_delete = BlobGenerator('nosql', 'nosql-', self.value_size, start=self.num_items // 2, end=(3*self.num_items // 4 - 1))
+        gen_expire = BlobGenerator('nosql', 'nosql-', self.value_size, start=3*self.num_items // 4, end=self.num_items)
         self._load_all_buckets(self.master, gen_load_mysql, "create", 0, flag=self.item_flag)
 
         if self.doc_ops is not None:
@@ -62,7 +64,7 @@ class OpsChangeCasTests(CasBaseTest):
             cas_error_collection = []
             data_error_collection = []
             while gen.has_next():
-                key, value = gen.next()
+                key, value = next(gen)
 
                 if ops in ["update", "touch"]:
                     for x in range(self.mutate_times):
@@ -73,13 +75,14 @@ class OpsChangeCasTests(CasBaseTest):
                             client.memcached(key).touch(key, 10)
 
                         o_new, cas_new, d_new = client.memcached(key).get(key)
+                        d_new = d_new.decode("utf-8")
                         if cas_old == cas_new:
-                            print 'cas did not change'
+                            print('cas did not change')
                             cas_error_collection.append(cas_old)
 
                         if ops == 'update':
                             if d_new != "{0}-{1}".format("mysql-new-value", x):
-                                data_error_collection.append((d_new,"{0}-{1}".format("mysql-new-value", x)))
+                                data_error_collection.append((d_new, "{0}-{1}".format("mysql-new-value", x)))
                             if cas_old != cas_new and d_new == "{0}-{1}".format("mysql-new-value", x):
                                 self.log.info("Use item cas {0} to mutate the same item with key {1} successfully! Now item cas is {2} "
                                               .format(cas_old, key, cas_new))
@@ -182,13 +185,13 @@ class OpsChangeCasTests(CasBaseTest):
                 raise Exception(ex)
 
     def _corrupt_max_cas(self, mcd, key):
-
         # set the CAS to -2 and then mutate to increment to -1 and then it should stop there
-        mcd.setWithMetaInvalid(key, json.dumps({'value':'value2'}), 0, 0, 0, -2)
+        mcd.setWithMetaInvalid(key, json.dumps({'value': 'value2'}),
+                               0, 0, 0, -2)
         # print 'max cas pt1', mcd.getMeta(key)[4]
-        mcd.set(key, 0, 0,json.dumps({'value':'value3'}))
+        mcd.set(key, 0, 0, json.dumps({'value':'value3'}))
         # print 'max cas pt2', mcd.getMeta(key)[4]
-        mcd.set(key, 0, 0,json.dumps({'value':'value4'}))
+        mcd.set(key, 0, 0, json.dumps({'value':'value4'}))
         # print 'max cas pt3', mcd.getMeta(key)[4]
 
     # test for MB-17517 - verify that if max CAS somehow becomes -1 we can recover from it
@@ -202,14 +205,15 @@ class OpsChangeCasTests(CasBaseTest):
         client = VBucketAwareMemcached(rest, 'default')
 
         # set a key
-        client.memcached(KEY_NAME).set(KEY_NAME, 0, 0,json.dumps({'value':'value1'}))
+        client.memcached(KEY_NAME).set(KEY_NAME, 0, 0,
+                                       json.dumps({'value': 'value1'}))
 
         # figure out which node it is on
         mc_active = client.memcached(KEY_NAME)
         mc_replica = client.memcached( KEY_NAME, replica_index=0 )
 
         # set the CAS to -2 and then mutate to increment to -1 and then it should stop there
-        self._corrupt_max_cas(mc_active,KEY_NAME)
+        self._corrupt_max_cas(mc_active, KEY_NAME)
 
         # CAS should be 0 now, do some gets and sets to verify that nothing bad happens
 
@@ -219,16 +223,17 @@ class OpsChangeCasTests(CasBaseTest):
         # remove that node
         self.log.info('Remove the node with -1 max cas')
 
-        rebalance = self.cluster.async_rebalance(self.servers[-1:], [] ,[self.master])
-        # rebalance = self.cluster.async_rebalance([self.master], [], self.servers[-1:])
-
+        rebalance = self.cluster.async_rebalance(self.servers[-1:],
+                                                 [],
+                                                 [self.master])
         rebalance.result()
         replica_CAS = mc_replica.getMeta(KEY_NAME)[4]
 
         # add the node back
         self.log.info('Add the node back, the max_cas should be healed')
-        rebalance = self.cluster.async_rebalance(self.servers[-1:], [self.master], [])
-        # rebalance = self.cluster.async_rebalance([self.master], self.servers[-1:],[])
+        rebalance = self.cluster.async_rebalance(self.servers[-1:],
+                                                 [self.master],
+                                                 [])
 
         rebalance.result()
 
@@ -237,7 +242,7 @@ class OpsChangeCasTests(CasBaseTest):
         mc_active = client.memcached(KEY_NAME)
         active_CAS = mc_active.getMeta(KEY_NAME)[4]
 
-        self.assertTrue(replica_CAS == active_CAS, 'cas mismatch active: {0} replica {1}'.format(active_CAS,replica_CAS))
+        self.assertTrue(replica_CAS == active_CAS, 'cas mismatch active: {0} replica {1}'.format(active_CAS, replica_CAS))
 
     # One node only needed for this test
     def corrupt_cas_is_healed_on_reboot(self):
@@ -246,21 +251,19 @@ class OpsChangeCasTests(CasBaseTest):
         KEY_NAME = 'key1'
 
         rest = RestConnection(self.master)
-        client = VBucketAwareMemcached(rest, 'default')
 
         # set a key
-        client.memcached(KEY_NAME).set(KEY_NAME, 0, 0,json.dumps({'value':'value1'}))
+        client = VBucketAwareMemcached(rest, 'default')
+        client.memcached(KEY_NAME).set(KEY_NAME, 0, 0,
+                                       json.dumps({'value': 'value1'}))
         # client.memcached(KEY_NAME).set('k2', 0, 0,json.dumps({'value':'value2'}))
 
         # figure out which node it is on
         mc_active = client.memcached(KEY_NAME)
 
         # set the CAS to -2 and then mutate to increment to -1 and then it should stop there
-        self._corrupt_max_cas(mc_active,KEY_NAME)
-
-        # print 'max cas k2', mc_active.getMeta('k2')[4]
-
-        # CAS should be 0 now, do some gets and sets to verify that nothing bad happens
+        self._corrupt_max_cas(mc_active, KEY_NAME)
+        corrupt_cas = mc_active.getMeta(KEY_NAME)[4]
 
         # self._restart_memcache('default')
         remote = RemoteMachineShellConnection(self.master)
@@ -269,12 +272,13 @@ class OpsChangeCasTests(CasBaseTest):
         remote.start_server()
         time.sleep(30)
 
-        rest = RestConnection(self.master)
         client = VBucketAwareMemcached(rest, 'default')
         mc_active = client.memcached(KEY_NAME)
 
-        maxCas = mc_active.getMeta(KEY_NAME)[4]
-        self.assertTrue(maxCas == 0, 'max cas after reboot is not 0 it is {0}'.format(maxCas))
+        curr_cas = mc_active.getMeta(KEY_NAME)[4]
+        self.assertTrue(curr_cas == corrupt_cas,
+                        'Corrupted cas (%s) != curr_cas (%s)'
+                        % (corrupt_cas, curr_cas))
 
     #MB-21448 bug test
     #Description: REPLACE_WITH_CAS on a key that has recently been deleted and then requested 

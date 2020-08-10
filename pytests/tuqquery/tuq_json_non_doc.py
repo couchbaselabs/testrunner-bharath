@@ -10,11 +10,13 @@ class JSONNonDocTests(QueryTests):
             self.value_type = self.input.param("value_type", "int")
             self.gens_load = self.gen_docs(type='json_non_docs', values_type=self.value_type)
             for bucket in self.buckets:
-                self.cluster.bucket_flush(self.master, bucket=bucket,
-                                      timeout=self.wait_timeout * 5)
+                self.cluster.bucket_flush(self.master, bucket=bucket, timeout=self.wait_timeout * 5)
+            # Adding sleep after flushing buckets (see CBQE-5838)
+            self.sleep(210)
             self.load(self.gens_load)
         except:
             self.cluster.shutdown()
+        self.query_buckets = self.get_query_buckets(check_all_buckets=True)
         self.log.info("==============  JSONNonDocTests setup has completed ==============")
         self.log_config_info()
 
@@ -38,54 +40,54 @@ class JSONNonDocTests(QueryTests):
 
     def test_simple_query(self):
         self.fail_if_no_buckets()
-        for bucket in self.buckets:
-            self.query = "select * from %s" % bucket.name
+        for query_bucket in self.query_buckets:
+            self.query = "select * from %s d" % query_bucket
             actual_result = self.run_cbq_query()
             self.sleep(5, 'wait for index build')
             actual_result = self.run_cbq_query()
-            actual_result = [doc[bucket.name] for doc in actual_result['results']]
+            actual_result = [doc['d'] for doc in actual_result['results']]
             expected_result = self.generate_full_docs_list(self.gens_load)
-            self._verify_results(sorted(actual_result), sorted(expected_result))
+            self._verify_results(actual_result, expected_result)
 
     def test_int_where(self):
         self.fail_if_no_buckets()
-        for bucket in self.buckets:
-            self.query = "select v from %s v where v > 300" % bucket.name
+        for query_bucket in self.query_buckets:
+            self.query = "select v from %s v where v > 300" % query_bucket
             actual_result = self.run_cbq_query()
             self.sleep(5, 'wait for index build')
             actual_result = self.run_cbq_query()
             actual_result = [doc["v"] for doc in actual_result['results']]
             expected_result = self.generate_full_docs_list(self.gens_load)
             expected_result = [doc for doc in expected_result if doc > 300 ]
-            self._verify_results(sorted(actual_result), sorted(expected_result))
+            self._verify_results(actual_result, expected_result)
 
     def test_prepared_int_where(self):
         self.fail_if_no_buckets()
-        for bucket in self.buckets:
-            self.query = "select v from %s v where v > 300" % bucket.name
+        for query_bucket in self.query_buckets:
+            self.query = "select v from %s v where v > 300" % query_bucket
             self.prepared_common_body()
 
     def test_string_where(self):
         self.fail_if_no_buckets()
-        for bucket in self.buckets:
-            self.query = "select v from %s where v = 4" % bucket.name
+        for query_bucket in self.query_buckets:
+            self.query = "select v from %s where v = 4" % query_bucket
             actual_result = self.run_cbq_query()
             self.sleep(5, 'wait for index build')
             actual_result = self.run_cbq_query()
             actual_result = [doc["$1"] for doc in actual_result['results']]
             expected_result = self.generate_full_docs_list(self.gens_load)
             expected_result = [doc for doc in expected_result if doc == 4 ]
-            self._verify_results(sorted(actual_result), sorted(expected_result))
+            self._verify_results(actual_result, expected_result)
 
     def test_array_where(self):
         self.fail_if_no_buckets()
-        for bucket in self.buckets:
-            self.query = "SELECT v FROM %s v WHERE ANY num IN v SATISFIES num > 20 end" % bucket.name
+        for query_bucket in self.query_buckets:
+            self.query = "SELECT v FROM %s v WHERE ANY num IN v SATISFIES num > 20 end" % query_bucket
             actual_result = self.run_cbq_query()
             self.sleep(5, 'wait for index build')
             actual_result = self.run_cbq_query()
             actual_result = [doc["v"] for doc in actual_result['results']]
             expected_result = self.generate_full_docs_list(self.gens_load)
             expected_result = [doc for doc in expected_result if doc[0] > 20 or doc[1] > 20 ]
-            self._verify_results(sorted(actual_result), sorted(expected_result))
+            self._verify_results(actual_result, expected_result)
 

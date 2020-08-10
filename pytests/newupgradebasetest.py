@@ -4,7 +4,7 @@ import testconstants
 import gc
 import sys
 import traceback
-import Queue
+import queue
 from threading import Thread
 from basetestcase import BaseTestCase
 from mc_bin_client import MemcachedError
@@ -17,7 +17,6 @@ from couchbase_helper.document import DesignDocument, View
 from couchbase_helper.documentgenerator import BlobGenerator
 from query_tests_helper import QueryHelperTests
 from couchbase_helper.tuq_helper import N1QLHelper
-from couchbase_helper.query_helper import QueryHelper
 from scripts.install import InstallerJob
 from builds.build_query import BuildQuery
 from eventing.eventing_base import EventingBaseTest
@@ -37,9 +36,9 @@ from testconstants import SHERLOCK_VERSION
 from testconstants import CB_VERSION_NAME
 from testconstants import COUCHBASE_MP_VERSION
 from testconstants import CE_EE_ON_SAME_FOLDER
-from testconstants import STANDARD_BUCKET_PORT
+from testconstants import STANDARD_BUCKET_PORT, IPV4_REGEX
 
-class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
+class NewUpgradeBaseTest(QueryHelperTests, EventingBaseTest, FTSBaseTest):
     def setUp(self):
         super(NewUpgradeBaseTest, self).setUp()
         self.released_versions = ["2.0.0-1976-rel", "2.0.1", "2.5.0", "2.5.1",
@@ -51,10 +50,13 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
         self.use_hostnames = self.input.param("use_hostnames", False)
         self.product = self.input.param('product', 'couchbase-server')
         self.initial_version = self.input.param('initial_version', '2.5.1-1083')
+        self.use_domain_name = self.input.param('use_domain_names', 0)
         self.initial_vbuckets = self.input.param('initial_vbuckets', 1024)
+        self.clean_upgrade_install = self.input.param("clean_upgrade_install", True)
         self.upgrade_versions = self.input.param('upgrade_version', '4.1.0-4963')
         self.upgrade_versions = self.upgrade_versions.split(";")
         self.skip_cleanup = self.input.param("skip_cleanup", False)
+        self.debug_logs = self.input.param("debug_logs", False)
         self.init_nodes = self.input.param('init_nodes', True)
 
         self.is_downgrade = self.input.param('downgrade', False)
@@ -94,8 +96,8 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
         self.metadata_bucket_name = self.input.param('metadata_bucket_name', 'metadata')
         self.cb_bucket_name = self.input.param('cb_bucket_name', 'travel-sample')
         self.cb_server_ip = self.input.param("cb_server_ip", None)
-        self.cbas_bucket_name = self.input.param('cbas_bucket_name', 'travel')
-        self.cbas_dataset_name = self.input.param("cbas_dataset_name", 'travel_ds')
+        self.cbas_bucket_name = self.input.param('cbas_bucket_name', 'travel-sample')
+        self.cbas_dataset_name = self.input.param("cbas_dataset_name", 'travel')
         self.cbas_dataset_name_invalid = self.input.param('cbas_dataset_name_invalid',
                                                                 self.cbas_dataset_name)
         self.cbas_bucket_name_invalid = self.input.param('cbas_bucket_name_invalid',
@@ -127,18 +129,19 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             self.is_rpm = True
             if os_version.lower() == "centos 7":
                 self.is_centos7 = True
-        self.queue = Queue.Queue()
+        self.queue = queue.Queue()
         self.upgrade_servers = []
         if self.initial_build_type == "community" and self.upgrade_build_type == "enterprise":
             if self.initial_version != self.upgrade_versions:
-                self.log.warn(
+                self.log.warning(
                     "we can't upgrade from couchbase CE to EE with a different version,defaulting to initial_version")
-                self.log.warn("http://developer.couchbase.com/documentation/server/4.0/install/upgrading.html")
+                self.log.warning("http://developer.couchbase.com/documentation/server/4.0/install/upgrading.html")
                 self.upgrade_versions = self.input.param('initial_version', '4.1.0-4963')
                 self.upgrade_versions = self.upgrade_versions.split(";")
         self.fts_obj = None
         self.n1ql_helper = None
         self.index_name_prefix = None
+        self.flusher_total_batch_limit = self.input.param("flusher_total_batch_limit", None)
 
     def tearDown(self):
         test_failed = (hasattr(self, '_resultForDoCleanups') and \
@@ -147,13 +150,13 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                                  (hasattr(self, '_exc_info') and \
                                   self._exc_info()[1] is not None)
         if test_failed and self.skip_cleanup:
-                self.log.warn("CLEANUP WAS SKIPPED DUE TO FAILURES IN UPGRADE TEST")
+                self.log.warning("CLEANUP WAS SKIPPED DUE TO FAILURES IN UPGRADE TEST")
                 self.cluster.shutdown(force=True)
                 self.log.info("Test Input params were:")
                 pprint(self.input.test_params)
 
                 if self.input.param('BUGS', False):
-                    self.log.warn("Test failed. Possible reason is: {0}"
+                    self.log.warning("Test failed. Possible reason is: {0}"
                                            .format(self.input.param('BUGS', False)))
         else:
             if not hasattr(self, 'rest'):
@@ -169,14 +172,14 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                     if server.ip in [node.ip for node in nodes]:
                         temp.append(server)
                 self.servers = temp
-            except Exception, e:
+            except Exception as e:
                 if e:
-                    print "Exception ", e
+                    print(("Exception ", e))
                 self.cluster.shutdown(force=True)
                 self.fail(e)
             super(NewUpgradeBaseTest, self).tearDown()
             if self.upgrade_servers:
-                self._install(self.upgrade_servers,version=self.initial_version)
+                self._install(self.upgrade_servers, version=self.initial_version)
         self.sleep(20, "sleep 20 seconds before run next test")
 
     def _install(self, servers, version=None, community_to_enterprise=False):
@@ -186,6 +189,8 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
         params['version'] = self.initial_version
         params['vbuckets'] = [self.initial_vbuckets]
         params['init_nodes'] = self.init_nodes
+        params['debug_logs'] = self.debug_logs
+        params['use_domain_names'] = self.use_domain_name
         if 5 <= int(self.initial_version[:1]) or 5 <= int(self.upgrade_versions[0][:1]):
             params['fts_query_limit'] = 10000000
         if version:
@@ -211,7 +216,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                         shell.execute_command("systemctl daemon-reload", debug=False)
                         shell.start_server()
                     else:
-                        log.error("Couchbase-server did not start...")
+                        self.log.error("Couchbase-server did not start...")
                 shell.disconnect()
                 if not success:
                     sys.exit("some nodes were not install successfully!")
@@ -223,13 +228,12 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                 server.hostname = hostname
 
     def operations(self, servers, services=None):
+        set_services = services
         if services is not None:
             if "-" in services:
                 set_services = services.split("-")
             else:
                 set_services = services.split(",")
-        else:
-            set_services = services
 
         if 4.5 > float(self.initial_version[:3]):
             self.gsi_type = "forestdb"
@@ -337,23 +341,19 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
         return appropriate_build
 
     def _upgrade(self, upgrade_version, server, queue=None, skip_init=False, info=None,
-                                                            save_upgrade_config=False,
-                                                            fts_query_limit=None):
+                 save_upgrade_config=False, fts_query_limit=None, debug_logs=False):
         try:
             remote = RemoteMachineShellConnection(server)
             appropriate_build = self._get_build(server, upgrade_version, remote, info=info)
             self.assertTrue(appropriate_build.url,
                             msg="unable to find build {0}".format(upgrade_version))
-            self.assertTrue(remote.download_build(appropriate_build),
-                                          "Build wasn't downloaded!")
-            o, e = remote.couchbase_upgrade(appropriate_build,\
-                                            save_upgrade_config=save_upgrade_config,\
+            self.assertTrue(remote.download_build(appropriate_build), "Build wasn't downloaded!")
+            o, e = remote.couchbase_upgrade(appropriate_build,
+                                            save_upgrade_config=save_upgrade_config,
                                             forcefully=self.is_downgrade,
-                                            fts_query_limit=fts_query_limit)
+                                            fts_query_limit=fts_query_limit, debug_logs=debug_logs)
             self.log.info("upgrade {0} to version {1} is completed".format(server.ip, upgrade_version))
-            """ remove this line when bug MB-11807 fixed """
-            if self.is_ubuntu:
-                remote.start_server()
+            remote.start_server()
             """ remove end here """
             if 5.0 > float(self.initial_version[:3]) and self.is_centos7:
                 remote.execute_command("systemctl daemon-reload")
@@ -369,8 +369,8 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             remote.disconnect()
             self.sleep(10)
             return o, e
-        except Exception, e:
-            print traceback.extract_stack()
+        except Exception as e:
+            print((traceback.extract_stack()))
             if queue is not None:
                 queue.put(False)
                 if not self.is_linux:
@@ -388,7 +388,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
 
     def _async_update(self, upgrade_version, servers, queue=None, skip_init=False,
                       info=None, save_upgrade_config=False,
-                      fts_query_limit=None):
+                      fts_query_limit=None, debug_logs=False):
         self.log.info("servers {0} will be upgraded to {1} version".
                       format([server.ip for server in servers], upgrade_version))
         q = queue or self.queue
@@ -397,7 +397,8 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             upgrade_thread = Thread(target=self._upgrade,
                                     name="upgrade_thread" + server.ip,
                                     args=(upgrade_version, server, q, skip_init, info,
-                                          save_upgrade_config, fts_query_limit))
+                                          save_upgrade_config, fts_query_limit,
+                                          debug_logs))
             upgrade_threads.append(upgrade_thread)
             upgrade_thread.start()
         return upgrade_threads
@@ -410,10 +411,14 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
     def verification(self, servers, check_items=True):
         if self.use_hostnames:
             for server in servers:
+                is_server_with_ipv4 = re.match(IPV4_REGEX, server.ip)
+                if is_server_with_ipv4:
+                    self.fail("ini file needs hostname in server ip to run")
                 node_info = RestConnection(server).get_nodes_self()
                 new_hostname = node_info.hostname
-                self.assertEqual("%s:%s" % (server.hostname, server.port), new_hostname,
-                                 "Hostname is incorrect for server %s. Settings are %s" % (server.ip, new_hostname))
+                self.assertEqual("{0}:{1}".format(server.ip, server.port), new_hostname,
+                                 "Hostname is incorrect for server {0}. Settings are {1}"\
+                                 .format(server.ip, new_hostname))
         if self.master.ip != self.rest.ip or \
            self.master.ip == self.rest.ip and str(self.master.port) != str(self.rest.port):
             if self.port:
@@ -527,7 +532,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             server_in_cluster = server
         self.default_view = View(self.default_view_name, None, None)
         for bucket in self.buckets:
-            for i in xrange(int(self.ddocs_num)):
+            for i in range(int(self.ddocs_num)):
                 views = self.make_default_views(self.default_view_name, self.view_num,
                                                self.is_dev_ddoc, different_map=True)
                 ddoc = DesignDocument(self.default_view_name + str(i), views)
@@ -557,8 +562,8 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             for valid_key in valid_keys:
                 try:
                     _, flags, exp, seqno, cas = client.memcached(valid_key).getMeta(valid_key)
-                except MemcachedError, e:
-                    print e
+                except MemcachedError as e:
+                    print(e)
                     client.reset(RestConnection(self.master))
                     _, flags, exp, seqno, cas = client.memcached(valid_key).getMeta(valid_key)
                 self.assertTrue((comparator == '==' and seqno == seqno_expected) or
@@ -582,8 +587,8 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                     self.wait_node_restarted(server, wait_time=testconstants.NS_SERVER_TIMEOUT * 4, wait_if_warmup=True)
                 else:
                     self.wait_node_restarted(server, wait_time=testconstants.NS_SERVER_TIMEOUT * 10, wait_if_warmup=True, check_service=True)
-            except Exception, e:
-                print traceback.extract_stack()
+            except Exception as e:
+                print((traceback.extract_stack()))
                 if queue is not None:
                     queue.put(False)
                     if not self.is_linux:
@@ -598,10 +603,10 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
         in_servers = set(new_vbs) - set(old_vbs)
         self.assertEqual(len(out_servers), len(in_servers),
                         "Seems like it wasn't swap rebalance. Out %s, in %s" % (
-                                                len(out_servers),len(in_servers)))
+                                                len(out_servers), len(in_servers)))
         for vb_type in ["active_vb", "replica_vb"]:
             self.log.info("Checking %s on nodes that remain in cluster..." % vb_type)
-            for server, stats in old_vbs.iteritems():
+            for server, stats in list(old_vbs.items()):
                 if server in new_vbs:
                     self.assertTrue(sorted(stats[vb_type]) == sorted(new_vbs[server][vb_type]),
                     "Server %s Seems like %s vbuckets were shuffled, old vbs is %s, new are %s" %(
@@ -609,10 +614,10 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             self.log.info("%s vbuckets were not suffled" % vb_type)
             self.log.info("Checking in-out nodes...")
             vbs_servs_out = vbs_servs_in = []
-            for srv, stat in old_vbs.iteritems():
+            for srv, stat in list(old_vbs.items()):
                 if srv in out_servers:
                     vbs_servs_out.extend(stat[vb_type])
-            for srv, stat in new_vbs.iteritems():
+            for srv, stat in list(new_vbs.items()):
                 if srv in in_servers:
                     vbs_servs_in.extend(stat[vb_type])
             self.assertTrue(sorted(vbs_servs_out) == sorted(vbs_servs_in),
@@ -640,7 +645,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                     else:
                         self.fail("Failed DCP rebalance upgrade")
                 elif self.sleep(5) is None and any ("DCP upgrade completed successfully." \
-                                    in d.values() for d in self.rest.get_logs(10)):
+                                    in list(d.values()) for d in self.rest.get_logs(10)):
                     self.log.info("DCP upgrade is completed")
                 else:
                     self.fail("DCP reabalance upgrade is not running")
@@ -707,7 +712,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
         self.run_async_index_operations(operation_type)
         for task in kv_tasks:
             task.result()
-        self.verification(servers,check_items=False)
+        self.verification(servers, check_items=False)
 
     def _create_ephemeral_buckets(self):
         create_ephemeral_buckets = self.input.param(
@@ -829,14 +834,14 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             else:
                 raise("No FTS node in cluster")
             self.ops_dist_map = self.calculate_data_change_distribution(
-                create_per=self.create_ops_per , update_per=self.update_ops_per ,
+                create_per=self.create_ops_per, update_per=self.update_ops_per,
                 delete_per=self.delete_ops_per, expiry_per=self.expiry_ops_per,
                 start=0, end=self.docs_per_day)
             self.log.info(self.ops_dist_map)
             self.dataset = "simple"
             self.docs_gen_map = self.generate_ops_docs(self.docs_per_day, 0)
             self.async_ops_all_buckets(self.docs_gen_map, batch_size=100)
-        except Exception, ex:
+        except Exception as ex:
             self.log.info(ex)
 
     def get_nodes_in_cluster_after_upgrade(self, master_node=None):
@@ -896,7 +901,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                 self.log.error(e)
             finally:
                 self.undeploy_and_delete_function(body)
-        except Exception, e:
+        except Exception as e:
             self.log.info(e)
 
     def generate_docs_simple(self, num_items, start=0):
@@ -911,7 +916,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             if self.dataset == "array":
                 return self.generate_docs_array(num_items, start)
             return getattr(self, 'generate_docs_' + self.dataset)(num_items, start)
-        except Exception, ex:
+        except Exception as ex:
             log.info(str(ex))
             self.fail("There is no dataset %s, please enter a valid one" % self.dataset)
 
@@ -1000,8 +1005,8 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
         try:
             self.log.info("Verify fts via queries again")
             self.update_delete_fts_data_run_queries(self.fts_obj)
-        except Exception, ex:
-            print ex
+        except Exception as ex:
+            print(ex)
 
     """ for cbas test """
     def load_sample_buckets(self, servers=None, bucketName=None,
@@ -1018,7 +1023,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                 self.sleep(20)
                 num_actual = 0
                 if not servers:
-                    num_actual = self.get_item_count(self.master,bucketName)
+                    num_actual = self.get_item_count(self.master, bucketName)
                 else:
                     bucket_maps = RestConnection(servers[0]).get_buckets_itemCount()
                     num_actual = bucket_maps[bucketName]
@@ -1067,7 +1072,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             return response["status"], response[
                 "metrics"], errors, results, handle
 
-        except Exception,e:
+        except Exception as e:
             raise Exception(str(e))
 
     def create_bucket_on_cbas(self, cbas_bucket_name, cb_bucket_name,
@@ -1086,7 +1091,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             cmd_create_bucket = "create bucket " + cbas_bucket_name + \
                             " with {\"name\":\"" + cb_bucket_name + "\"};"
         status, metrics, errors, results, _ = \
-                   self.execute_statement_on_cbas_via_rest(cmd_create_bucket,username=username,
+                   self.execute_statement_on_cbas_via_rest(cmd_create_bucket, username=username,
                                                            password=password)
 
         if validate_error_msg:
@@ -1097,17 +1102,17 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             else:
                 return True
 
-    def create_dataset_on_bucket(self, cbas_bucket_name, cbas_dataset_name,
+    def create_dataset_on_bucket(self, cbas_dataset_name, cbas_bucket_name,
                                  where_field=None, where_value = None,
                                  validate_error_msg=False, username = None,
                                  password = None):
         """
         Creates a shadow dataset on a CBAS bucket
         """
-        cmd_create_dataset = "create shadow dataset {0} on {1};".format(
+        cmd_create_dataset = "create dataset {0} on `{1}`".format(
             cbas_dataset_name, cbas_bucket_name)
         if where_field and where_value:
-            cmd_create_dataset = "create shadow dataset {0} on {1} WHERE `{2}`=\"{3}\";"\
+            cmd_create_dataset = "create dataset {0} on {1} WHERE `{2}`=\"{3}\";"\
                                               .format(cbas_dataset_name, cbas_bucket_name,
                                                       where_field, where_value)
         status, metrics, errors, results, _ = \
@@ -1123,18 +1128,15 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
                 return True
 
     def test_create_dataset_on_bucket(self):
-        # Create bucket on CBAS
-        self.create_bucket_on_cbas(cbas_bucket_name=self.cbas_bucket_name,
-                                   cb_bucket_name=self.cb_bucket_name,
-                                   cb_server_ip=self.cb_server_ip)
-
-        # Create dataset on the CBAS bucket
         result = self.create_dataset_on_bucket(
-            cbas_bucket_name=self.cbas_bucket_name_invalid,
             cbas_dataset_name=self.cbas_dataset_name,
+            cbas_bucket_name=self.cbas_bucket_name,
             validate_error_msg=self.validate_error)
         if not result:
-            self.fail("FAIL : Actual error msg does not match the expected")
+            if self.validate_error:
+                self.fail("FAIL : Actual error msg does not match the expected")
+            else:
+                self.fail("Failed to create data set on bucket")
 
     def create_replica_index(self):
         self.log.info("create_index")
@@ -1144,7 +1146,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             self.n1ql_helper.create_primary_index(using_gsi = True,
                                                server = self.n1ql_server)
             self.log.info("done create_index")
-        except Exception, e:
+        except Exception as e:
             self.log.info(e)
 
     def create_index_with_replica_and_query(self):
@@ -1160,7 +1162,7 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             self.create_replica_index()
             self.n1ql_helper.run_cbq_query(query=create_index_query,
                                            server=self.n1ql_node)
-        except Exception, e:
+        except Exception as e:
             self.log.info(e)
         self.sleep(30)
         index_map = self.get_index_map()
@@ -1176,13 +1178,13 @@ class NewUpgradeBaseTest(QueryHelperTests,EventingBaseTest, FTSBaseTest):
             self.n1ql_helper.verify_replica_indexes([self.index_name_prefix],
                                                     index_map,
                                                     self.num_index_replicas)
-        except Exception, e:
+        except Exception as e:
             self.log.info(e)
 
     def _initialize_n1ql_helper(self):
         if self.n1ql_helper == None:
             self.n1ql_server = self.get_nodes_from_services_map(service_type = \
-                                              "n1ql",servers=self.input.servers)
+                                              "n1ql", servers=self.input.servers)
             self.n1ql_helper = N1QLHelper(version = "sherlock", shell = None,
                 use_rest = True, max_verify = self.max_verify,
                 buckets = self.buckets, item_flag = None,

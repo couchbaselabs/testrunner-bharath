@@ -2,15 +2,16 @@
 
 # TODO: add installer support for membasez
 
-import Queue
-import copy
 import getopt
+import copy, re
+import logging
 import os
-import re
-import socket
 import sys
-from datetime import datetime
 from threading import Thread
+from datetime import datetime
+import socket
+import queue
+import traceback
 
 sys.path = [".", "lib"] + sys.path
 import testconstants
@@ -19,17 +20,22 @@ from builds.build_query import BuildQuery
 import logging.config
 from membase.api.exception import ServerUnavailableException
 from membase.api.rest_client import RestConnection, RestHelper
-from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper, RemoteMachineHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from testconstants import MV_LATESTBUILD_REPO
+from testconstants import SHERLOCK_BUILD_REPO
+from testconstants import COUCHBASE_REPO
 from testconstants import CB_REPO, CB_DOWNLOAD_SERVER, CB_DOWNLOAD_SERVER_FQDN
 from testconstants import COUCHBASE_VERSION_2
-from testconstants import COUCHBASE_VERSION_3, COUCHBASE_FROM_SPOCK
+from testconstants import COUCHBASE_VERSION_3, COUCHBASE_FROM_WATSON,\
+                          COUCHBASE_FROM_SPOCK
 from testconstants import CB_VERSION_NAME, COUCHBASE_FROM_VERSION_4,\
                           CB_RELEASE_BUILDS, COUCHBASE_VERSIONS
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, CBAS_QUOTA
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, CBAS_QUOTA, CLUSTER_QUOTA_RATIO
 from testconstants import LINUX_COUCHBASE_PORT_CONFIG_PATH, LINUX_COUCHBASE_OLD_CONFIG_PATH
-from testconstants import WIN_COUCHBASE_PORT_CONFIG_PATH, WIN_COUCHBASE_OLD_CONFIG_PATH
+from testconstants import WIN_COUCHBASE_PORT_CONFIG_PATH, WIN_COUCHBASE_OLD_CONFIG_PATH,\
+                          MACOS_NAME
+from testconstants import WIN_NUM_ERLANG_PROCESS
 import TestInput
 
 
@@ -37,7 +43,7 @@ logging.config.fileConfig("scripts.logging.conf")
 log = logging.getLogger()
 
 def usage(err=None):
-    print """\
+    print("""\
 Syntax: install.py [options]
 
 Options:
@@ -56,9 +62,14 @@ Available keys:
  upr=True                   Enable UPR replication
  xdcr_upr=                  Enable UPR for XDCR (temporary param until XDCR with UPR is stable), values: None | True | False
  fts_query_limit=1000000    Set a limit for the max results to be returned by fts for any query
+ cbft_env_options           Additional fts environment variables
  change_indexer_ports=false Sets indexer ports values to non-default ports
  storage_mode=plasma        Sets indexer storage mode
  enable_ipv6=False          Enable ipv6 mode in ns_server
+ ntp=True                   Check if ntp is installed. Default is true. Set ntp=False, in case systemctl is not allowed, such as in docker container
+ fts_quota=256              Set quota for fts services.  It must be equal or greater 256.  If fts_quota does not pass,
+                            it will take FTS_QUOTA value in lib/testconstants.py
+ debug_logs=false            If you don't want to print install logs, set this param value to false. By default, this value preset to true.
 
 
 Examples:
@@ -77,7 +88,7 @@ Examples:
  # to install non-root non default path, add nr_install_dir params
    install.py -i /tmp/ubuntu.ini -p product=cb,version=5.0.0-1900,nr_install_dir=testnow1
 
-"""
+""")
     sys.exit(err)
 
 
@@ -131,7 +142,13 @@ class Installer(object):
         #remote_client.membase_uninstall()
 
         self.msi = 'msi' in params and params['msi'].lower() == 'true'
-        remote_client.couchbase_uninstall(windows_msi=self.msi,product=params['product'])
+        if "debug_logs" in params and params["debug_logs"] in ["False", "false", False]:
+            debug_logs = False
+        else:
+            debug_logs = True
+        remote_client.couchbase_uninstall(windows_msi=self.msi,
+                                          product=params['product'],
+                                          debug_logs=debug_logs)
         remote_client.disconnect()
 
 
@@ -143,6 +160,7 @@ class Installer(object):
         names = []
         url = ''
         direct_build_url = None
+        debug_logs = True
 
         # replace "v" with version
         # replace p with product
@@ -200,6 +218,10 @@ class Installer(object):
             else:
                 msi = False
         if ok:
+            if "debug_logs" in params and params["debug_logs"] in ["False", "false", False]:
+                debug_logs = False
+
+        if ok:
             mb_alias = ["membase", "membase-server", "mbs", "mb"]
             cb_alias = ["couchbase", "couchbase-server", "cb"]
             css_alias = ["couchbase-single", "couchbase-single-server", "css"]
@@ -232,8 +254,18 @@ class Installer(object):
 
         remote_client = RemoteMachineShellConnection(server)
         info = remote_client.extract_remote_info()
-        print "\n*** OS version of this server %s is %s ***" % (remote_client.ip,
-                                                       info.distribution_version)
+        print(("--> remote server architecture_type..{}".format(info.architecture_type)))
+        server_os_type = info.distribution_version
+        if info.distribution_type.lower() == "mac":
+            macOS_name = info.distribution_version[:5]
+            if macOS_name >= "10.10":
+                server_os_type = "MacOS: {0} or ".format(MACOS_NAME[macOS_name])\
+                                                     + info.distribution_version
+            else:
+                server_os_type = "MacOS " + info.distribution_version
+
+        print(("\n*** OS version of this server {0} is {1} ***"\
+                            .format(remote_client.ip, server_os_type)))
         if info.distribution_version.lower() == "suse 12":
             if version[:5] not in COUCHBASE_FROM_SPOCK:
                 mesg = "%s does not support cb version %s \n" % \
@@ -248,7 +280,6 @@ class Installer(object):
                 """
                 if "2k8" in info.windows_name:
                     info.windows_name = 2008
-
                 if msi_build[0] in COUCHBASE_FROM_SPOCK:
                     info.deliverable_type = "msi"
                 elif "5" > msi_build[0] and info.windows_name == 2016:
@@ -260,7 +291,7 @@ class Installer(object):
                     time.sleep(5)
                     os.system('kill %d' % os.getpid())
             else:
-                print "Incorrect version format"
+                print("Incorrect version format")
                 sys.exit()
         remote_client.disconnect()
         if ok and not linux_repo:
@@ -270,7 +301,7 @@ class Installer(object):
             releases_version = ["1.6.5.4", "1.7.0", "1.7.1", "1.7.1.1", "1.8.0"]
             cb_releases_version = ["1.8.1", "2.0.0", "2.0.1", "2.1.0", "2.1.1", "2.2.0",
                                     "2.5.0", "2.5.1", "2.5.2", "3.0.0", "3.0.1", "3.0.2",
-                                    "3.0.3", "3.1.0", "3.1.1", "3.1.2", "3.1.3", "3.1.5","3.1.6",
+                                    "3.0.3", "3.1.0", "3.1.1", "3.1.2", "3.1.3", "3.1.5", "3.1.6",
                                     "4.0.0", "4.0.1", "4.1.0", "4.1.1", "4.1.2", "4.5.0"]
             build_repo = MV_LATESTBUILD_REPO
             if toy is not "":
@@ -278,10 +309,9 @@ class Installer(object):
             elif "server-analytics" in names:
                 build_repo = CB_REPO.replace("couchbase-server", "server-analytics") + CB_VERSION_NAME[version[:3]] + "/"
             elif "moxi-server" in names and version[:5] != "2.5.2":
-                print "version   ", version
                 """
                 moxi repo:
-                   http://172.23.120.24/builds/latestbuilds/moxi/4.6.0/101/moxi-server..
+                   http://172.23.126.166/builds/latestbuilds/moxi/4.6.0/101/moxi-server..
                 """
                 build_repo = CB_REPO.replace("couchbase-server", "moxi") + version[:5] + "/"
             elif version[:5] not in COUCHBASE_VERSION_2 and \
@@ -293,6 +323,7 @@ class Installer(object):
             if 'enable_ipv6' in params and params['enable_ipv6']:
                 build_repo = build_repo.replace(CB_DOWNLOAD_SERVER,
                                                 CB_DOWNLOAD_SERVER_FQDN)
+
             for name in names:
                 if version[:5] in releases_version:
                     build = BuildQuery().find_membase_release_build(
@@ -310,6 +341,7 @@ class Installer(object):
                                             os_version = info.distribution_version,
                                             direct_build_url=direct_build_url)
                 else:
+                    #print("--> Getting all builds..{}".format(info.architecture_type))
                     builds, changes = BuildQuery().get_all_builds(version=version,
                                       timeout=timeout,
                                       direct_build_url=direct_build_url,
@@ -343,8 +375,12 @@ class Installer(object):
                             #build.url = build.url.replace("enterprise", "community")
                             #build.name = build.name.replace("enterprise", "community")
                     """ check if URL is live """
+                    url_valid = False
                     remote_client = RemoteMachineShellConnection(server)
-                    if remote_client.is_url_live(build.url):
+                    print(("check if {} is live".format(build.url)))
+                    url_valid = remote_client.is_url_live(build.url)
+                    remote_client.disconnect()
+                    if url_valid:
                         return build
                     else:
                         sys.exit("ERROR: URL is not good. Check URL again")
@@ -413,7 +449,7 @@ class MembaseServerInstaller(Installer):
     def install(self, params, queue=None):
         try:
             build = self.build_url(params)
-        except Exception, e:
+        except Exception as e:
             if queue:
                 queue.put(False)
             raise e
@@ -438,7 +474,7 @@ class MembaseServerInstaller(Installer):
         if type == "windows":
             build = self.build_url(params)
             remote_client.download_binary_in_win(build.url, params["version"])
-            success = remote_client.install_server_win(build, params["version"], \
+            success = remote_client.install_server_win(build, params["version"],
                                                        vbuckets=vbuckets)
         else:
             downloaded = remote_client.download_build(build)
@@ -447,8 +483,8 @@ class MembaseServerInstaller(Installer):
                           .format(build.url, params["server"].ip))
                 return False
             path = server.data_path or '/tmp'
-            success &= remote_client.install_server(build, path=path, vbuckets=vbuckets, \
-                                                    swappiness=swappiness, openssl=openssl)
+            success = remote_client.install_server(build, path=path, vbuckets=vbuckets,
+                                                   swappiness=swappiness, openssl=openssl)
             ready = RestHelper(RestConnection(params["server"])).is_ns_server_running(60)
             if not ready:
                 log.error("membase-server did not start...")
@@ -472,18 +508,32 @@ class CouchbaseServerInstaller(Installer):
         remote_client = RemoteMachineShellConnection(params["server"])
         success = True
         success &= remote_client.is_couchbase_installed()
+        if remote_client.info.type.lower() == 'windows':
+            count = RemoteMachineHelper(remote_client).process_count("erl")
+            retry = 6
+            if count is None:
+                sys.exit("**** erlang service does not run ****")
+            while count < WIN_NUM_ERLANG_PROCESS and retry != 0:
+                time.sleep(10)
+                log.info("Wait 10 seconds for all erlang processes are up")
+                count = RemoteMachineHelper(remote_client).process_count("erl")
+                retry -= 1
+                if retry == 0:
+                    sys.exit("not all erlang processes up")
         if not success:
             mesg = "\n\nServer {0} failed to install".format(params["server"].ip)
             sys.exit(mesg)
         while time.time() < start_time + 5 * 60:
             try:
+                log.info("creating RestConnection({}) and the server type is {}".format(server,type(server)))
                 rest = RestConnection(server)
-
+                log.info("Done creating rest connection")
                 # Optionally change node name and restart server
                 if params.get('use_domain_names', 0):
                     RemoteUtilHelper.use_hostname_for_server_settings(server)
 
                 if params.get('enable_ipv6', 0):
+                    rest.enable_ip_version()
                     status, content = RestConnection(server).rename_node(
                         hostname=server.ip.replace('[', '').replace(']', ''))
                     if status:
@@ -497,7 +547,7 @@ class CouchbaseServerInstaller(Installer):
                                          content))
 
                 # Make sure that data_path and index_path are writable by couchbase user
-                for path in set(filter(None, [server.data_path, server.index_path])):
+                for path in set([_f for _f in [server.data_path, server.index_path] if _f]):
                     time.sleep(3)
 
                     for cmd in ("rm -rf {0}/*".format(path),
@@ -512,6 +562,12 @@ class CouchbaseServerInstaller(Installer):
                     init_nodes = params["init_nodes"]
                 else:
                     init_nodes = "True"
+
+                if 'fts_quota' in params and int(params['fts_quota']) >= 256:
+                    fts_quota = int(params['fts_quota'])
+                else:
+                    fts_quota = FTS_QUOTA
+
                 if (isinstance(init_nodes, bool) and init_nodes) or \
                         (isinstance(init_nodes, str) and init_nodes.lower() == "true"):
                     if not server.services:
@@ -525,7 +581,14 @@ class CouchbaseServerInstaller(Installer):
                         kv_quota = int(rest.get_nodes_self().mcdMemoryReserved)
                     info = rest.get_nodes_self()
                     cb_version = info.version[:5]
-                    kv_quota = int(info.mcdMemoryReserved * 2/3)
+                    cb_version_build = info.version[:3]
+                    log.info("--> rest.get_nodes_self().mcdMemoryReserved".format(rest.get_nodes_self().mcdMemoryReserved))
+                    version_no_eventing_support = ["4.5", "4.6", "4.7", "5.0", "5.1"]
+                    log.info("--> info.mcdMemoryReserved={},CLUSTER_QUOTA_RATIO={}".format(info.mcdMemoryReserved,CLUSTER_QUOTA_RATIO))
+                    if cb_version_build in version_no_eventing_support:
+                        if "eventing" in set_services:
+                            set_services.remove("eventing")
+                    kv_quota = int(info.mcdMemoryReserved * CLUSTER_QUOTA_RATIO)
                     """ for fts, we need to grep quota from ns_server
                                 but need to make it works even RAM of vm is
                                 smaller than 2 GB """
@@ -537,10 +600,10 @@ class CouchbaseServerInstaller(Installer):
                             log.info("set index quota to node %s " % server.ip)
                             rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=INDEX_QUOTA)
                         if "fts" in set_services:
-                            log.info("quota for fts service will be %s MB" % (FTS_QUOTA))
-                            kv_quota -= FTS_QUOTA
+                            log.info("quota for fts service will be %s MB" % (fts_quota))
+                            kv_quota -= fts_quota
                             log.info("set both index and fts quota at node %s "% server.ip)
-                            rest.set_service_memoryQuota(service='ftsMemoryQuota', memoryQuota=FTS_QUOTA)
+                            rest.set_service_memoryQuota(service='ftsMemoryQuota', memoryQuota=fts_quota)
                         if "cbas" in set_services:
                             log.info("quota for cbas service will be %s MB" % (CBAS_QUOTA))
                             kv_quota -= CBAS_QUOTA
@@ -585,7 +648,8 @@ class CouchbaseServerInstaller(Installer):
                 remote_client.check_man_page()
                 """ add unzip command on server if it is not available """
                 remote_client.check_cmd("unzip")
-                remote_client.is_ntp_installed()
+                if "ntp" not in params or params["ntp"].lower() != "false":
+                    remote_client.is_ntp_installed()
                 remote_client.disconnect()
                 # TODO: Make it work with windows
                 if "erlang_threads" in params:
@@ -625,11 +689,15 @@ class CouchbaseServerInstaller(Installer):
         log.info('********CouchbaseServerInstaller:install')
 
         self.msi = 'msi' in params and params['msi'].lower() == 'true'
+        if "debug_logs" in params and params["debug_logs"] in ["False", "false", False]:
+            debug_logs = False
+        else:
+            debug_logs = True
         start_server = True
         try:
             if "linux_repo" not in params:
                 build = self.build_url(params)
-        except Exception, e:
+        except Exception as e:
             if queue:
                 queue.put(False)
             raise e
@@ -671,11 +739,22 @@ class CouchbaseServerInstaller(Installer):
         else:
             fts_query_limit = None
 
+        if 'fts_quota' in params and int(params["fts_quota"]) >= 256:
+            fts_quota = int(params["fts_quota"])
+        else:
+            fts_quota = FTS_QUOTA
+
         if "enable_ipv6" in params:
             enable_ipv6 = params["enable_ipv6"]
             start_server = False
         else:
             enable_ipv6 = None
+
+        if "cbft_env_options" in params:
+            cbft_env_options = params["cbft_env_options"]
+            start_server = False
+        else:
+            cbft_env_options = None
 
         if "linux_repo" in params and params["linux_repo"].lower() == "true":
             linux_repo = True
@@ -699,9 +778,11 @@ class CouchbaseServerInstaller(Installer):
                                        params["version"].replace("-rel", ""),
                                        vbuckets=vbuckets,
                                        fts_query_limit=fts_query_limit,
-                                       enable_ipv6=enable_ipv6,
-                                       windows_msi=self.msi )
+                                       cbft_env_options=cbft_env_options,
+                                       windows_msi=self.msi,
+                                       enable_ipv6=enable_ipv6)
             else:
+                print(("Downloading the build...{}".format(build)))
                 downloaded = remote_client.download_build(build)
 
                 if not downloaded:
@@ -713,17 +794,23 @@ class CouchbaseServerInstaller(Installer):
                     success = remote_client.install_server(build, path=path,
                                          startserver=start_server,\
                                          vbuckets=vbuckets, swappiness=swappiness,\
-                                        openssl=openssl, upr=upr, xdcr_upr=xdcr_upr,
-                                        fts_query_limit=fts_query_limit,
-                                        enable_ipv6=enable_ipv6)
-                    log.info('wait 5 seconds for Couchbase server to start')
-                    time.sleep(5)
+                                         openssl=openssl, upr=upr, xdcr_upr=xdcr_upr,
+                                         fts_query_limit=fts_query_limit,
+                                         cbft_env_options= cbft_env_options,
+                                         debug_logs=debug_logs)
+                    log.info('wait 30 seconds for Couchbase server to start')
+                    time.sleep(30)
                     if "rest_vbuckets" in params:
                         rest_vbuckets = int(params["rest_vbuckets"])
                         ClusterOperationHelper.set_vbuckets(server, rest_vbuckets)
-                except BaseException, e:
+                except BaseException as e:
                     success = False
-                    log.error("installation failed: {0}".format(e))
+                    log.error("------->installation failed: {0}".format(e))
+                    traceback.print_exc()
+                    exc_type, exc_obj, exc_tb = sys.exc_info()
+                    fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                    print((exc_type, fname, exc_tb.tb_lineno))
+
             remote_client.disconnect()
             if queue:
                 queue.put(success)
@@ -737,7 +824,7 @@ class CouchbaseServerInstaller(Installer):
                                                              cb_edition, remote_client)
                 log.info('wait 5 seconds for Couchbase server to start')
                 time.sleep(5)
-            except BaseException, e:
+            except BaseException as e:
                 success = False
                 log.error("installation failed: {0}".format(e))
             remote_client.disconnect()
@@ -823,7 +910,7 @@ class MoxiInstaller(Installer):
     def install(self, params, queue=None):
         try:
             build = self.build_url(params)
-        except Exception, e:
+        except Exception as e:
             if queue:
                 queue.put(False)
             raise e
@@ -840,7 +927,7 @@ class MoxiInstaller(Installer):
                 return False
             try:
                 success = remote_client.install_moxi(build)
-            except BaseException, e:
+            except BaseException as e:
                 success = False
                 log.error("installation failed: {0}".format(e))
         remote_client.disconnect()
@@ -926,10 +1013,10 @@ class SDKInstaller(Installer):
                 remote_client.execute_command('wget {0}{1}'.format(package_url, lcb_core))
                 remote_client.execute_command('wget {0}{1}'.format(package_url,
                     lcb_libevent))
-                remote_client.execute_command('wget {0}{1}'.format(package_url,lcb_devel))
-                remote_client.execute_command('wget {0}{1}'.format(package_url,lcb_bin))
+                remote_client.execute_command('wget {0}{1}'.format(package_url, lcb_devel))
+                remote_client.execute_command('wget {0}{1}'.format(package_url, lcb_bin))
                 remote_client.execute_command('rpm -ivh {0} {1} {2}'.format(lcb_core,
-                    lcb_libevent,lcb_devel,lcb_bin))
+                    lcb_libevent, lcb_devel, lcb_bin))
                 remote_client.execute_command('yum -y install python-pip')
                 remote_client.execute_command('pip -y uninstall couchbase')
                 remote_client.execute_command('pip -y install {0}'.format(sdk_url))
@@ -996,9 +1083,6 @@ class ESInstaller(object):
 class InstallerJob(object):
     def sequential_install(self, servers, params):
         installers = []
-
-
-
         for server in servers:
             _params = copy.deepcopy(params)
             _params["server"] = server
@@ -1009,15 +1093,16 @@ class InstallerJob(object):
                 installer.uninstall(_params)
                 if "product" in params and params["product"] in ["couchbase", "couchbase-server", "cb"]:
                     success = True
-                    for server in servers:
-                        success &= not RemoteMachineShellConnection(server).is_couchbase_installed()
-                    if not success:
-                        print "Server:{0}.Couchbase is still" + \
-                              " installed after uninstall".format(server)
-                        return success
-                print "uninstall succeeded"
+                    shell = RemoteMachineShellConnection(_params["server"])
+                    success &= not shell.is_couchbase_installed()
+                    shell.disconnect()
+                if not success:
+                    print(("Server:{0}.Couchbase is still" + \
+                          " installed after uninstall".format(_params["server"])))
+                    return success
+                print("uninstall succeeded")
             except Exception as ex:
-                print "unable to complete the uninstallation: ", ex
+                print(("unable to complete the uninstallation: ", ex))
         success = True
         for installer, _params in installers:
             try:
@@ -1025,19 +1110,19 @@ class InstallerJob(object):
                 try:
                     installer.initialize(_params)
                 except Exception as ex:
-                    print "unable to initialize the server after successful installation", ex
+                    print(("unable to initialize the server after successful installation", ex))
             except Exception as ex:
-                print "unable to complete the installation: ", ex
+                print(("unable to complete the installation: ", ex))
         return success
 
     def parallel_install(self, servers, params):
         uninstall_threads = []
         install_threads = []
         initializer_threads = []
-        queue = Queue.Queue()
+        queue1 = queue.Queue()
         success = True
         for server in servers:
-            if params.get('enable_ipv6',0):
+            if params.get('enable_ipv6', 0):
                 if re.match('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', server.ip):
                     sys.exit("****************************** ERROR: You are "
                              "trying to enable IPv6 on an IPv4 machine, "
@@ -1049,7 +1134,7 @@ class InstallerJob(object):
                        args=(_params,))
             i_t = Thread(target=installer_factory(params).install,
                        name="installer-thread-{0}".format(server.ip),
-                       args=(_params, queue))
+                       args=(_params, queue1))
             init_t = Thread(target=installer_factory(params).initialize,
                        name="initializer-thread-{0}".format(server.ip),
                        args=(_params,))
@@ -1060,29 +1145,31 @@ class InstallerJob(object):
             t.start()
         for t in uninstall_threads:
             t.join()
-            print "thread {0} finished".format(t.name)
+            print(("thread {0} finished".format(t.name)))
         if "product" in params and params["product"] in ["couchbase", "couchbase-server", "cb"]:
             success = True
             for server in servers:
-                success &= not RemoteMachineShellConnection(server).is_couchbase_installed()
+                shell = RemoteMachineShellConnection(server)
+                success &= not shell.is_couchbase_installed()
+                shell.disconnect()
             if not success:
-                print "Server:{0}.Couchbase is still installed after uninstall".format(server)
+                print(("Server:{0}.Couchbase is still installed after uninstall".format(server)))
                 return success
         for t in install_threads:
             t.start()
         for t in install_threads:
             t.join()
-            print "thread {0} finished".format(t.name)
-        while not queue.empty():
-            success &= queue.get()
+            print(("thread {0} finished".format(t.name)))
+        while not queue1.empty():
+            success &= queue1.get()
         if not success:
-            print "installation failed. initializer threads were skipped"
+            print("installation failed. initializer threads were skipped")
             return success
         for t in initializer_threads:
             t.start()
         for t in initializer_threads:
             t.join()
-            print "thread {0} finished".format(t.name)
+            print(("thread {0} finished".format(t.name)))
         """ remove any capture files left after install windows """
         remote_client = RemoteMachineShellConnection(servers[0])
         type = remote_client.extract_remote_info().distribution_type
@@ -1092,6 +1179,7 @@ class InstallerJob(object):
                 shell = RemoteMachineShellConnection(server)
                 shell.execute_command("rm -f /cygdrive/c/automation/*_172.23*")
                 shell.execute_command("rm -f /cygdrive/c/automation/*_10.17*")
+                shell.disconnect()
                 os.system("rm -f resources/windows/automation/*_172.23*")
                 os.system("rm -f resources/windows/automation/*_10.17*")
         return success
@@ -1135,12 +1223,12 @@ def change_couchbase_indexer_ports(input):
         remote.stop_server()
         lines = remote.read_remote_file(port_config_path, filename)
         for line in lines:
-            for key in params.keys():
+            for key in list(params.keys()):
                 if key in line:
                     line = ""
                     break
             output_lines += "{0}".format(line)
-        for key in params.keys():
+        for key in list(params.keys()):
             line = "{" + str(key) + ", " + str(params[key]) + "}."
             output_lines += "{0}\n".format(line)
         output_lines = output_lines.replace(r'"', r'\"')
@@ -1200,7 +1288,7 @@ def main():
             usage("ERROR: no servers specified. Please use the -i parameter.")
     except IndexError:
         usage()
-    except getopt.GetoptError, err:
+    except getopt.GetoptError as err:
         usage("ERROR: " + str(err))
     # TODO: This is not broken, but could be something better
     #      like a validator, to check SSH, input params etc
@@ -1214,16 +1302,25 @@ def main():
     else:
         log.info('Doing  serial install****')
         success = InstallerJob().sequential_install(input.servers, input.test_params)
+
+    # Check for installation success
+    if not success:
+        sys.exit(log_install_failed)
+
+    success = True
     if "product" in input.test_params and input.test_params["product"] in ["couchbase", "couchbase-server", "cb"]:
-        print "verify installation..."
-        success = True
+        print("verify installation...")
         for server in input.servers:
-            success &= RemoteMachineShellConnection(server).is_couchbase_installed()
+            success = RemoteMachineShellConnection(server).is_couchbase_installed()
+            if not success:
+                print(("installation failed on:{}".format(server)))
+            success &= success
         if not success:
             sys.exit(log_install_failed)
+
+    success = True
     if "product" in input.test_params and input.test_params["product"] in ["moxi", "moxi-server"]:
-        print "verify installation..."
-        success = True
+        print("verify installation...")
         for server in input.servers:
             success &= RemoteMachineShellConnection(server).is_moxi_installed()
         if not success:

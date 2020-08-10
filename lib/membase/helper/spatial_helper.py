@@ -4,13 +4,14 @@ import time
 
 import logger
 import memcacheConstants
-from TestInput import TestInputSingleton
 from couchbase_helper.document import DesignDocument, View
 from membase.api.rest_client import RestConnection, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from memcached.helper.data_helper import MemcachedError
 from memcached.helper.data_helper import VBucketAwareMemcached
+
+from TestInput import TestInputSingleton
 
 
 # The SpatialHelper operates on a single bucket over a single RestConnection
@@ -45,8 +46,8 @@ class SpatialHelper:
         self.rest.init_cluster(self.master.rest_username,
                                self.master.rest_password)
         self.rest.init_cluster_memoryQuota(self.master.rest_username,
-                                      self.master.rest_password,
-                                      memoryQuota=mem_quota)
+                                           self.master.rest_password,
+                                           memoryQuota=mem_quota)
         for server in self.servers:
             ClusterOperationHelper.cleanup_cluster([server])
         ClusterOperationHelper.wait_for_ns_servers_or_assert(
@@ -72,14 +73,12 @@ class SpatialHelper:
             ClusterOperationHelper.wait_for_ns_servers_or_assert(
                 self.servers, self.testcase)
 
-
     def create_index_fun(self, name, fun=None):
         if fun is None:
             fun = 'function (doc, meta) {emit(doc.geometry, doc);}'
         function = self._create_function(name, fun)
         self.rest.create_spatial(self.bucket, name, function)
         self._indexes.add(name)
-
 
     # If you insert docs that are already there, they are simply
     # overwritten.
@@ -88,7 +87,7 @@ class SpatialHelper:
     # If `return_docs` is true, it'll return the full docs and not
     # only the keys
     def insert_docs(self, num_of_docs, prefix='doc', extra_values={},
-                    return_docs=False):
+                    return_docs=False, scope=None, collection=None):
         random.seed(12345)
         rest = RestConnection(self.master)
         smart = VBucketAwareMemcached(rest, self.bucket)
@@ -96,8 +95,8 @@ class SpatialHelper:
         for i in range(0, num_of_docs):
             key = doc_name = "{0}-{1}".format(prefix, i)
             geom = {"type": "Point", "coordinates":
-                        [random.randrange(-180, 180),
-                         random.randrange(-90, 90)]}
+                [random.randrange(-180, 180),
+                 random.randrange(-90, 90)]}
             value = {
                 "name": doc_name,
                 "age": random.randrange(1, 1000),
@@ -114,7 +113,7 @@ class SpatialHelper:
             fail_count = 0
             while True:
                 try:
-                    smart.set(key, 0, 0, json.dumps(value))
+                    smart.set(key, 0, 0, json.dumps(value), scope=scope, collection=collection)
                     break
                 except MemcachedError as e:
                     fail_count += 1
@@ -135,16 +134,16 @@ class SpatialHelper:
         views = [View(self.testcase.default_view_name + "0",
                       'function (doc) {emit(doc.geometry, doc.age);}',
                       dev_view=self.testcase.use_dev_views, is_spatial=True),
-                View(self.testcase.default_view_name + "1",
+                 View(self.testcase.default_view_name + "1",
                       'function (doc) {emit(doc.geometry, null);}',
                       dev_view=self.testcase.use_dev_views, is_spatial=True),
-                View(self.testcase.default_view_name + "2",
+                 View(self.testcase.default_view_name + "2",
                       'function (doc) {emit(doc.geometry, doc.name);}',
                       dev_view=self.testcase.use_dev_views, is_spatial=True),
-                View(self.testcase.default_view_name + "3",
+                 View(self.testcase.default_view_name + "3",
                       'function (doc) {emit(doc.geometry, [doc.name, doc.age]);}',
                       dev_view=self.testcase.use_dev_views, is_spatial=True),
-                View(self.testcase.default_view_name + "4",
+                 View(self.testcase.default_view_name + "4",
                       'function (doc) {emit(doc.geometry, {result : {age:doc.age}});}',
                       dev_view=self.testcase.use_dev_views, is_spatial=True)]
         ddocs = []
@@ -152,9 +151,9 @@ class SpatialHelper:
             ddocs.append(DesignDocument(self.testcase.default_ddoc_name, [],
                                         spatial_views=views))
         else:
-            for i in xrange(5):
+            for i in range(5):
                 ddocs.append(DesignDocument(self.testcase.default_ddoc_name + str(i), [],
-                                        spatial_views=[views[i]]))
+                                            spatial_views=[views[i]]))
         for ddoc in ddocs:
             for view in ddoc.spatial_views:
                 self.testcase.cluster.create_view(self.testcase.master, ddoc.name, view,
@@ -165,13 +164,13 @@ class SpatialHelper:
         expected_docs = []
         if 'bbox' in params:
             for doc in docs_inserted:
-                if doc['geometry']['coordinates'][0] <= params['bbox'][2] and\
-                doc['geometry']['coordinates'][0] >= params['bbox'][0] and\
-                doc['geometry']['coordinates'][1] <= params['bbox'][3] and\
-                doc['geometry']['coordinates'][1] >= params['bbox'][1]:
-                        expected_docs.append({'key' : doc['name'], 'value' : doc})
+                if doc['geometry']['coordinates'][0] <= params['bbox'][2] and \
+                        doc['geometry']['coordinates'][0] >= params['bbox'][0] and \
+                        doc['geometry']['coordinates'][1] <= params['bbox'][3] and \
+                        doc['geometry']['coordinates'][1] >= params['bbox'][1]:
+                    expected_docs.append({'key': doc['name'], 'value': doc})
         else:
-            expected_docs = [{'key' : doc['name'], 'value' : doc} for doc in docs_inserted]
+            expected_docs = [{'key': doc['name'], 'value': doc} for doc in docs_inserted]
         if 'skip' in params:
             if int(params['skip']) > len(expected_docs):
                 expected_docs = expected_docs[int(params['skip']):]
@@ -184,7 +183,7 @@ class SpatialHelper:
         missing_docs = []
         extra_docs = []
         self.log.info("Expected {0} items, current {1}".format(
-                                   len(expected), len(current)))
+            len(expected), len(current)))
         for key in expected:
             if not key['key'] in [doc['id'] for doc in current]:
                 missing_docs.append(key)
@@ -193,15 +192,15 @@ class SpatialHelper:
                 extra_docs.append(key)
         if missing_docs or extra_docs:
             self.testcase.fail("Extra docs: {0},\n Missing docs: {1}".format(
-                                   extra_docs, missing_docs))
+                extra_docs, missing_docs))
         self.log.info("Current keys match expected keys")
 
     def query_view(self, rest, ddoc, view, bucket='default', extra_params={}, num_expected=None,
                    verify_keys=[], num_tries=20):
         start = time.time()
-        for i in xrange(num_tries):
+        for i in range(num_tries):
             try:
-                #full_set=true&connection_timeout=60000
+                # full_set=true&connection_timeout=60000
                 params = {"connection_timeout": 60000}
                 if not "full_set" in params and view.dev_view:
                     params["full_set"] = True
@@ -211,7 +210,7 @@ class SpatialHelper:
                     params["bbox"] = ",".join([str(x) for x in params["bbox"]])
 
                 results = rest.query_view(ddoc.name, view.name, bucket, params,
-                                                    type="spatial")
+                                          type="spatial")
                 delta = time.time() - start
                 if results:
                     # Keep on trying until we have at least the number
@@ -229,9 +228,9 @@ class SpatialHelper:
                     return results["rows"]
             except Exception as ex:
                 if ex.message.find('view_undefined') != -1 or ex.message.find('not_found') != -1 or \
-                 ex.message.find('unable to reach') != -1 or ex.message.find('timeout') != -1 or \
-                 ex.message.find('socket error') != -1 or ex.message.find('econnrefused') != -1 or \
-                 ex.message.find("doesn't exist") != -1:
+                        ex.message.find('unable to reach') != -1 or ex.message.find('timeout') != -1 or \
+                        ex.message.find('socket error') != -1 or ex.message.find('econnrefused') != -1 or \
+                        ex.message.find("doesn't exist") != -1:
                     self.log.error("spatial view {1} not ready yet , try again "
                                    "in 5 seconds... , error {0}".format(ex, view.name))
                     time.sleep(5)
@@ -242,7 +241,7 @@ class SpatialHelper:
         self.log.info("num results:  {0}".format(len(results["rows"])))
         self.testcase.fail(
             "unable to get spatial view for {0} after {1} tries"
-            .format(view.name, num_tries))
+                .format(view.name, num_tries))
 
     # Returns the keys of the deleted documents
     # If you try to delete a document that doesn't exists, just skip it
@@ -271,7 +270,7 @@ class SpatialHelper:
         start = time.time()
         for i in range(0, 10):
             try:
-                #full_set=true&connection_timeout=60000&limit=10&skip=0
+                # full_set=true&connection_timeout=60000&limit=10&skip=0
                 params = {"connection_timeout": 60000}
                 params.update(extra_params)
                 # Make "full_set=true" the default
@@ -309,12 +308,10 @@ class SpatialHelper:
         # Can't get the correct result, fail the test
         self.testcase.fail(
             "unable to get spatial_results for {0} after 4 tries"
-            .format(spatial))
-
+                .format(spatial))
 
     def info(self, spatial):
         return self.rest.spatial_info(self.bucket, spatial)
-
 
     # A request to perform the compaction normally returns immediately after
     # it is starting, without waiting until it's completed. This function
@@ -337,16 +334,14 @@ class SpatialHelper:
                 time.sleep(1)
                 timeout -= 1
 
-
     def _create_function(self, name, function):
-        #if this view already exist then get the rev and embed it here?
+        # if this view already exist then get the rev and embed it here?
         doc = {"language": "javascript"}
         doc["spatial"] = {name: function}
         self.log.info("doc {0}".format(doc))
         return json.dumps(doc)
 
-
-    #create a bucket if it doesn't exist
+    # create a bucket if it doesn't exist
     def _create_default_bucket(self):
         helper = RestHelper(self.rest)
         if not helper.bucket_exists(self.bucket):
@@ -365,17 +360,15 @@ class SpatialHelper:
             helper.bucket_exists(self.bucket),
             "unable to create {0} bucket".format(self.bucket))
 
-
     # Return the keys (document ids) of a spatial view response
     def get_keys(self, results):
         keys = []
         if results:
             rows = results["rows"]
             for row in rows:
-                keys.append(row["id"].encode("ascii", "ignore"))
+                keys.append(row["id"])
             self.log.info("there are {0} keys".format(len(keys)))
         return keys
-
 
     # Verify that the built index is correct. Wait until all data got
     # persited on disk
@@ -384,8 +377,7 @@ class SpatialHelper:
     # Note that the resultset might be way bigger, we only check if
     # the keys that should be inserted, were really inserted (i.e. that
     # there might be additional keys returned)
-    def query_index_for_verification(self, design_name, inserted,
-                                     full_docs=False,):
+    def query_index_for_verification(self, design_name, inserted, full_docs=False):
         results = self.get_results(design_name, num_expected=len(inserted))
         result_keys = self.get_keys(results)
 
@@ -409,11 +401,11 @@ class SpatialHelper:
             for row in results['rows']:
                 # Delete all top level key-values that are not part of the
                 # inserted_expanded list
-                del_keys = set(row.keys()) - set(['id', 'geometry', 'value'])
+                del_keys = set(row.keys()) - {'id', 'geometry', 'value'}
                 for key in del_keys:
                     del row[key]
                 # Delete all special values inserted by CouchDB or Couchbase
-                for key in row['value'].keys():
+                for key in list(row['value'].keys()):
                     if key.startswith('_') or key.startswith('$'):
                         del row['value'][key]
                 results_collapsed.append(json.dumps(row, sort_keys=True))
@@ -421,12 +413,11 @@ class SpatialHelper:
             diff = set(inserted_expanded) - set(results_collapsed)
             self.testcase.assertEqual(diff, set())
 
-
     # Compare the inserted documents with the returned result
     # Both arguments contain a list of document names
     def verify_result(self, inserted, result):
-        #not_found = []
-        #for key in inserted:
+        # not_found = []
+        # for key in inserted:
         #    if not key in result:
         #        not_found.append(key)
         not_found = list(set(inserted) - set(result))
@@ -435,7 +426,6 @@ class SpatialHelper:
             self.testcase.fail("the spatial function did return only {0} "
                                "docs and not {1} as expected"
                                .format(len(result), len(inserted)))
-
 
     def _print_keys_not_found(self, keys_not_found, how_many=10):
         how_many = min(how_many, len(keys_not_found))
