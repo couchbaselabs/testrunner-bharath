@@ -1,0 +1,8 @@
+    node<number>:
+        image: <image>
+        ports:
+          - "18091-18094:8091-8094"
+          - "11211:11210"
+        networks:
+          couchbase:
+            ipv4_address: <ip>

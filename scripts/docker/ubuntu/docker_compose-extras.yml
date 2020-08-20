@@ -1,0 +1,17 @@
+version: "2"
+services:
+  node2:
+        image: couchdata:baseline
+        networks:
+          couchbase:
+            ipv4_address: 172.22.0.4
+  node3:
+        image: couchdata:baseline
+        networks:
+          couchbase:
+            ipv4_address: 172.22.0.5
+networks:
+  couchbase:
+    ipam:
+      config:
+        - subnet: 172.22.0.0/24
