@@ -4,5 +4,4 @@
         - "8091-8094:8091-8094"
         - "11210:11210"
         networks:
-          couchbase:
-            ipv4_address: <ip>
+          - couchbase1

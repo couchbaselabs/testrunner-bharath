@@ -1,5 +1,4 @@
     node<number>:
         image: <image>
         networks:
-          couchbase:
-            ipv4_address: <ip>
+          - couchbase<number>

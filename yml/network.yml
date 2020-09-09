@@ -1,4 +1,12 @@
-  couchbase:
-    ipam:
-      config:
-        - subnet: 172.22.0.0/24
+  couchbase1:
+    external:
+      name: test_network
+  couchbase2:
+    external:
+      name: test_network2
+  couchbase3:
+    external:
+      name: test_network3
+  couchbase4:
+    external:
+      name: test_network4

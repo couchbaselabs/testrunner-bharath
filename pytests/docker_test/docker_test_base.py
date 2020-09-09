@@ -24,8 +24,8 @@ class DockerTestBase(unittest.TestCase):
         self.input = TestInputSingleton.input
         self.servers = self.input.servers
         self.nodes_init = self.input.param("nodes_init", 2)
-        self.master = copy.deepcopy(self.servers[0])
-        self.master.ip = "localhost"
+        self.master = self.servers[0]
+        #self.master.ip = "localhost"
         self.populate_yml_file = "populated.yml"
         self.log.info("Bringing up the images now")
         docker_compose_cmd = "docker-compose -f %s up -d" % \
@@ -73,13 +73,12 @@ class DockerTestBase(unittest.TestCase):
         #    base_images.append(self.base_image_name)
         self.create_yml_file(file_name=self.base_file_yml,
                              image=base_images,
-                             servers=self.servers, different_ports=[
-                self.servers[2]])
+                             servers=self.servers)
         docker_compose_cmd = "docker-compose -f %s up -d" % self.base_file_yml
         subprocess.run(docker_compose_cmd, capture_output=True,
                        shell=True)
-        self.master = copy.deepcopy(self.servers[0])
-        self.master.ip = "localhost"
+        self.master = self.servers[0]
+        #self.master.ip = "localhost"
         self.rest = RestConnection(self.master)
         self.log.info("Initialising base cluster")
         self.rest.init_cluster(username=self.master.rest_username,
@@ -100,9 +99,9 @@ class DockerTestBase(unittest.TestCase):
         self.cluster = Cluster()
         default_params = self._create_bucket_params(
             server=self.master, size=100)
-        #self.rest.create_bucket("default", ramQuotaMB=100)
-        #time.sleep(10)
-        #self.cluster.create_default_bucket(default_params)
+        self.rest.create_bucket("default", ramQuotaMB=100)
+        time.sleep(10)
+        self.cluster.create_default_bucket(default_params)
         self.buckets = []
         self.buckets.append(Bucket(name="default",
                                        authType="sasl",
@@ -121,9 +120,9 @@ class DockerTestBase(unittest.TestCase):
                                 start=0,
                                 end=1000)
         bucket = self.buckets[0]
-        self.log.info("Loading travel-sample app")
-        self.rest.load_sample("travel-sample")
-        #self._load_bucket(bucket, self.master, gen, "create", 0)
+        #self.log.info("Loading travel-sample app")
+        #self.rest.load_sample("travel-sample")
+        self._load_bucket(bucket, self.master, gen, "create", 0)
         self.log.info("Sleeping for 10 sec to let the cluster "
                       "stabilise")
         time.sleep(10)
@@ -153,8 +152,7 @@ class DockerTestBase(unittest.TestCase):
                 self.populated_image_name, node))
         self.create_yml_file(file_name=self.populate_yml_file,
                              image=populated_yml_images,
-                             servers=self.servers, different_ports=[
-                self.servers[2]])
+                             servers=self.servers)
         end = time.time()
         self.log.info("Time for suite setup : {0}".format(end - start))
         DockerTestBase.suite_setup_done = True
