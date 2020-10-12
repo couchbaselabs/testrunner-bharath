@@ -14,7 +14,7 @@ from TestInput import TestInputSingleton, TestInputServer
 from couchbase_helper.cluster import Cluster
 from membase.api.rest_client import RestConnection, Bucket
 from couchbase_helper.documentgenerator import DocumentGenerator
-
+from remote.remote_util import  RemoteMachineShellConnection
 
 class DockerTestBase(unittest.TestCase):
     suite_setup_done = False
@@ -24,8 +24,8 @@ class DockerTestBase(unittest.TestCase):
         self.input = TestInputSingleton.input
         self.servers = self.input.servers
         self.nodes_init = self.input.param("nodes_init", 2)
-        self.master = self.servers[0]
-        #self.master.ip = "localhost"
+        self.master = copy.deepcopy(self.servers[0])
+        self.master.ip = "localhost"
         self.populate_yml_file = "populated.yml"
         self.log.info("Bringing up the images now")
         docker_compose_cmd = "docker-compose -f %s up -d" % \
@@ -71,12 +71,23 @@ class DockerTestBase(unittest.TestCase):
                        "couchdata7.0:baseline", "couchdata7.0:baseline"]
         #for i in range(0, self.servers.__len__()):
         #    base_images.append(self.base_image_name)
-        self.create_yml_file(file_name=self.base_file_yml,
-                             image=base_images,
-                             servers=self.servers)
-        docker_compose_cmd = "docker-compose -f %s up -d" % self.base_file_yml
-        subprocess.run(docker_compose_cmd, capture_output=True,
-                       shell=True)
+        # self.create_yml_file(file_name=self.base_file_yml,
+        #                      image=base_images,
+        #                      servers=self.servers, different_ports=[
+        #         self.servers[2]])
+        docker_run_cmd  =  "docker run -d --name couchbase -v " \
+                           "~/couchbase:/opt/couchbase/var --net=host {0}"
+        for i in range(self.servers.___len__()):
+            server = self.servers[i]
+            base_image_name = base_images[i]
+            _docker_run_cmd = docker_run_cmd.format(base_image_name)
+            remote_connection = RemoteMachineShellConnection(server)
+            remote_connection.execute_command(_docker_run_cmd)
+            remote_connection.disconnect()
+        time.sleep(5)
+        # docker_compose_cmd = "docker-compose -f %s up -d" % self.base_file_yml
+        # subprocess.run(docker_compose_cmd, capture_output=True,
+        #                shell=True)
         self.master = self.servers[0]
         #self.master.ip = "localhost"
         self.rest = RestConnection(self.master)
@@ -126,33 +137,46 @@ class DockerTestBase(unittest.TestCase):
         self.log.info("Sleeping for 10 sec to let the cluster "
                       "stabilise")
         time.sleep(10)
-        docker_compose_cmd = "docker-compose -f %s stop" % self.base_file_yml
-        subprocess.run(docker_compose_cmd, capture_output=True,
-                       shell=True)
+        # docker_compose_cmd = "docker-compose -f %s stop" % self.base_file_yml
+        # subprocess.run(docker_compose_cmd, capture_output=True,
+        #                shell=True)
         nodes = ['master']
-        for i in range(1, self.servers.__len__()):
-            nodes.append("node{}".format(i))
+        # for i in range(1, self.servers.__len__()):
+        #     nodes.append("node{}".format(i))
         self.populated_image_name = "couchdata:15m"
-        for node in nodes:
-            docker_commit_cmd = "docker commit $(docker-compose -f  " \
-                                "%s ps -q %s | awk '{print " \
-                                "$1}') %s_%s" % (self.base_file_yml,
-                                                 node,
-                                                 self.populated_image_name, node)
-            subprocess.run(docker_commit_cmd, capture_output=True,
-                           shell=True)
-        docker_compose_cmd = "docker-compose -f %s down" % \
-                             self.base_file_yml
-        subprocess.run(docker_compose_cmd, capture_output=True,
-                       shell=True)
-        self.populate_yml_file = "populated.yml"
-        populated_yml_images = []
-        for node in nodes:
-            populated_yml_images.append("%s_%s" % (
-                self.populated_image_name, node))
-        self.create_yml_file(file_name=self.populate_yml_file,
-                             image=populated_yml_images,
-                             servers=self.servers)
+        for i in range(0, self.servers[:self.nodes_init]):
+            server = self.servers[i]
+            remote_connection = RemoteMachineShellConnection(server)
+            docker_commit_cmd = "docker commit $(docker ps -a -l -q " \
+                                "-f name=couchbase) {0}".format(self.populated_image_name)
+            remote_connection.execute_command(docker_commit_cmd)
+            docker_stop_cmd = "docker stop couchbase"
+            remote_connection.execute_command(docker_stop_cmd)
+            docker_rm_cmd = "docker rm $(docker  ps -a -l -q -f " \
+                            "name=couchbase"
+            remote_connection.execute_command(docker_rm_cmd)
+            remote_connection.disconnect()
+        # for node in nodes:
+        #     docker_commit_cmd = "docker commit $(docker-compose -f  " \
+        #                         "%s ps -q %s | awk '{print " \
+        #                         "$1}') %s_%s" % (self.base_file_yml,
+        #                                          node,
+        #                                          self.populated_image_name, node)
+        #     subprocess.run(docker_commit_cmd, capture_output=True,
+        #                    shell=True)
+        # docker_compose_cmd = "docker-compose -f %s down" % \
+        #                      self.base_file_yml
+        # subprocess.run(docker_compose_cmd, capture_output=True,
+        #                shell=True)
+        # self.populate_yml_file = "populated.yml"
+        # populated_yml_images = []
+        # for node in nodes:
+        #     populated_yml_images.append("%s_%s" % (
+        #         self.populated_image_name, node))
+        # self.create_yml_file(file_name=self.populate_yml_file,
+        #                      image=populated_yml_images,
+        #                      servers=self.servers, different_ports=[
+        #         self.servers[2]])
         end = time.time()
         self.log.info("Time for suite setup : {0}".format(end - start))
         DockerTestBase.suite_setup_done = True
