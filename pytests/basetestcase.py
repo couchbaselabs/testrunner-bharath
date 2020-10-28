@@ -43,12 +43,138 @@ from scripts.collect_server_info import cbcollectRunner
 
 
 class BaseTestCase(unittest.TestCase):
+    suite_setup_done = False
+    def suite_setUp(self):
+        if str(self.__class__).find('DockerTest') == -1:
+            BaseTestCase.suite_setup_done = True
+            return
+        start = time.time()
+        self.log = logger.Logger.get_logger()
+        self.input = TestInputSingleton.input
+        self.servers = self.input.servers
+        self.nodes_init = self.input.param("nodes_init", 2)
+        self.base_file_yml = 'baseline.yml'
+        self.base_image_name = self.input.param("base_image",
+                                                "couchdata:baseline")
+        base_images = ["couchdata:baseline", "couchdata:baseline",
+                       "couchdata6.6:baseline", "couchdata6.6:baseline"]
+        #for i in range(0, self.servers.__len__()):
+        #    base_images.append(self.base_image_name)
+        # self.create_yml_file(file_name=self.base_file_yml,
+        #                      image=base_images,
+        #                      servers=self.servers, different_ports=[
+        #         self.servers[2]])
+        docker_run_cmd  =  "docker run -d --name couchbase --net=host {0}"
+        for i in range(self.servers.__len__()):
+            server = self.servers[i]
+            base_image_name = base_images[i]
+            _docker_run_cmd = docker_run_cmd.format(base_image_name)
+            remote_connection = RemoteMachineShellConnection(server)
+            remote_connection.execute_command(_docker_run_cmd)
+            remote_connection.disconnect()
+        time.sleep(5)
+        # docker_compose_cmd = "docker-compose -f %s up -d" % self.base_file_yml
+        # subprocess.run(docker_compose_cmd, capture_output=True,
+        #                shell=True)
+        self.master = self.servers[0]
+        #self.master.ip = "localhost"
+        self.rest = RestConnection(self.master)
+        self.log.info("Initialising base cluster")
+        self.rest.init_cluster(username=self.master.rest_username,
+                               password=self.master.rest_password)
+        known_nodes = ["ns_1@{}".format(self.servers[0].ip)]
+        for i in range(1, self.nodes_init):
+            ip = self.servers[i].ip
+            otp_node = self.rest.add_node(
+                user=self.master.rest_username,
+                             password=self.master.rest_password,
+                               remoteIp=ip)
+            known_nodes.append(otp_node.id)
+        self.rest.rebalance(known_nodes)
+        rebalance_status = self.rest.monitorRebalance()
+        if not rebalance_status:
+            self.fail("Rebalance failed. Check logs")
+        #time.sleep(2)
+        self.cluster = Cluster()
+        self.add_built_in_server_user(node=self.master)
+        default_params = self._create_bucket_params(
+            server=self.master, size=100)
+        #self.rest.create_bucket("default", ramQuotaMB=100)
+        time.sleep(10)
+        self.cluster.create_default_bucket(default_params)
+        self.buckets = []
+        self.buckets.append(Bucket(name="default",
+                                       authType="sasl",
+                                       saslPassword="",
+                                       num_replicas=default_params[
+                                           'replicas'],
+                                       bucket_size=100,
+                                       eviction_policy=default_params['eviction_policy'],
+                                       lww=default_params['lww'],
+                                       type=default_params[
+                                           'bucket_type']))
+        age = list(range(5))
+        first = ['james', 'sharon']
+        template = '{{ "age": {0}, "first_name": "{1}" }}'
+        gen = DocumentGenerator('test_docs', template, age, first,
+                                start=0,
+                                end=1000)
+        bucket = self.buckets[0]
+        #self.log.info("Loading travel-sample app")
+        #self.rest.load_sample("travel-sample")
+        self._load_bucket(bucket, self.master, gen, "create", 0)
+        self.log.info("Sleeping for 10 sec to let the cluster "
+                      "stabilise")
+        time.sleep(10)
+        # docker_compose_cmd = "docker-compose -f %s stop" % self.base_file_yml
+        # subprocess.run(docker_compose_cmd, capture_output=True,
+        #                shell=True)
+        nodes = ['master']
+        # for i in range(1, self.servers.__len__()):
+        #     nodes.append("node{}".format(i))
+        self.populated_image_name = "couchdata:15m"
+        for i in range(0, len(self.servers[:self.nodes_init])):
+            server = self.servers[i]
+            remote_connection = RemoteMachineShellConnection(server)
+            docker_commit_cmd = "docker commit $(docker ps -a -l -q " \
+                                "-f name=couchbase) {0}".format(self.populated_image_name)
+            remote_connection.execute_command(docker_commit_cmd)
+            docker_stop_cmd = "docker stop couchbase"
+            remote_connection.execute_command(docker_stop_cmd)
+            docker_rm_cmd = "docker rm $(docker  ps -a -l -q -f " \
+                            "name=couchbase)"
+            remote_connection.execute_command(docker_rm_cmd)
+            remote_connection.disconnect()
+        end = time.time()
+        self.log.info("Time for suite setup : {0}".format(end - start))
+        BaseTestCase.suite_setup_done = True
+
+    def suite_tearDown(self):
+        if str(self.__class__).find('DockerTest') == -1:
+            return
+        self.log.info("Suite Teardown in progress")
+        for i in range(self.servers.__len__()):
+            server = self.servers[i]
+            remote_connection = RemoteMachineShellConnection(server)
+            docker_stop_cmd = "docker stop couchbase"
+            remote_connection.execute_command(docker_stop_cmd)
+            docker_rm_cmd = "docker rm $(docker  ps -a -l -q -f " \
+                            "name=couchbase)"
+            remote_connection.execute_command(docker_rm_cmd)
+            docker_rmi_cmd = "docker rmi $(docker images -q couchdata)"
+            #remote_connection.execute_command(docker_rmi_cmd)
+            remote_connection.disconnect()
+
     def setUp(self):
+        if not BaseTestCase.suite_setup_done and str(
+                self.__class__).find('DockerTest') > -1:
+            return
         self.log = logger.Logger.get_logger()
         self.input = TestInputSingleton.input
         self.primary_index_created = False
         self.use_sdk_client = self.input.param("use_sdk_client",False)
         self.analytics = self.input.param("analytics",False)
+        self.docker_tests = self.input.param("docker_test", False)
         if self.input.param("log_level", None):
             self.log.setLevel(level=0)
             for hd in self.log.handlers:
@@ -82,6 +208,8 @@ class BaseTestCase(unittest.TestCase):
             to run installation """
         self.skip_init_check_cbserver = \
             self.input.param("skip_init_check_cbserver", False)
+        if self.docker_tests:
+            self.docker_setup()
         self.data_collector = DataCollector()
         self.data_analyzer = DataAnalyzer()
         self.result_analyzer = DataAnalysisResultAnalyzer()
@@ -251,7 +379,8 @@ class BaseTestCase(unittest.TestCase):
             if str(self.__class__).find('newupgradetests') != -1 or \
                             str(self.__class__).find('upgradeXDCR') != -1 or \
                             str(self.__class__).find('Upgrade_EpTests') != -1 or \
-                            (str(self.__class__).find('UpgradeTests') != -1 and self.skip_init_check_cbserver) or \
+                            (str(self.__class__).find('UpgradeTests') != -1 and self.skip_init_check_cbserver) or\
+                            self.docker_tests or \
                             hasattr(self, 'skip_buckets_handle') and \
                             self.skip_buckets_handle:
                 self.log.info("any cluster operation in setup will be skipped")
@@ -437,6 +566,9 @@ class BaseTestCase(unittest.TestCase):
         if self.skip_setup_cleanup:
             return
         try:
+            if hasattr(self, 'docker_tests') and self.docker_tests:
+                self.docker_teardown()
+                return
             if hasattr(self, 'skip_buckets_handle') and self.skip_buckets_handle:
                 return
             test_failed = (hasattr(self, '_resultForDoCleanups') and
@@ -511,6 +643,61 @@ class BaseTestCase(unittest.TestCase):
                 self.reset_env_variables()
             self.cluster.shutdown(force=True)
             self._log_finish(self)
+
+    def docker_setup(self):
+        start = time.time()
+        self.log = logger.Logger.get_logger()
+        self.input = TestInputSingleton.input
+        self.servers = self.input.servers
+        self.nodes_init = self.input.param("nodes_init", 2)
+        self.master = self.servers[0]
+        # self.master.ip = "localhost"
+        # self.populate_yml_file = "populated.yml"
+        self.log.info("Bringing up the images now")
+        # docker_compose_cmd = "docker-compose -f %s up -d" % \
+        #                     self.populate_yml_file
+        base_images = ["couchdata:15m", "couchdata:15m",
+                       "couchdata6.6:baseline", "couchdata6.6:baseline"]
+        docker_run_cmd = "docker run -d --name couchbase --net=host {0}"
+        for i in range(self.servers.__len__()):
+            server = self.servers[i]
+            base_image_name = base_images[i]
+            _docker_run_cmd = docker_run_cmd.format(base_image_name)
+            remote_connection = RemoteMachineShellConnection(server)
+            remote_connection.execute_command(_docker_run_cmd)
+            remote_connection.disconnect()
+        # subprocess.run(docker_compose_cmd, capture_output=True,
+        #              shell=True)
+        self.rest = RestConnection(self.master)
+        self.cluster = Cluster()
+        default_params = self._create_bucket_params(
+            server=self.master, size=100)
+        self.buckets = []
+        self.buckets.append(Bucket(name="default",
+                                   authType="sasl",
+                                   saslPassword="",
+                                   num_replicas=default_params[
+                                       'replicas'],
+                                   bucket_size=100,
+                                   eviction_policy=default_params[
+                                       'eviction_policy'],
+                                   lww=default_params['lww'],
+                                   type=default_params[
+                                       'bucket_type']))
+        end = time.time()
+        self.log.info("Time for test setup: {}".format(end - start))
+
+    def docker_teardown(self):
+        self.log.info("Tearing down the images now.")
+        for i in range(self.servers.__len__()):
+            server = self.servers[i]
+            remote_connection = RemoteMachineShellConnection(server)
+            docker_stop_cmd = "docker stop couchbase"
+            remote_connection.execute_command(docker_stop_cmd)
+            docker_rm_cmd = "docker rm $(docker  ps -a -l -q -f " \
+                            "name=couchbase)"
+            remote_connection.execute_command(docker_rm_cmd)
+            remote_connection.disconnect()
 
     def get_index_map(self):
         return RestConnection(self.master).get_index_status()
