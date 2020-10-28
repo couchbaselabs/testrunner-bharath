@@ -70,6 +70,14 @@ class BaseTestCase(unittest.TestCase):
             base_image_name = base_images[i]
             _docker_run_cmd = docker_run_cmd.format(base_image_name)
             remote_connection = RemoteMachineShellConnection(server)
+            try:
+                docker_stop_cmd = "docker stop couchbase"
+                remote_connection.execute_command(docker_stop_cmd)
+                docker_rm_cmd = "docker rm $(docker  ps -a -l -q -f " \
+                                "name=couchbase)"
+                remote_connection.execute_command(docker_rm_cmd)
+            except:
+                pass
             remote_connection.execute_command(_docker_run_cmd)
             remote_connection.disconnect()
         time.sleep(5)
@@ -351,7 +359,8 @@ class BaseTestCase(unittest.TestCase):
 
             self.log.info("==============  basetestcase setup was started for test #{0} {1}==============" \
                           .format(self.case_number, self._testMethodName))
-            if not self.skip_buckets_handle and not self.skip_init_check_cbserver:
+            if not self.skip_buckets_handle and not \
+                    self.skip_init_check_cbserver and not self.docker_tests:
                 self._cluster_cleanup()
 
 
