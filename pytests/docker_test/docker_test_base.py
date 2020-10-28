@@ -61,6 +61,7 @@ class DockerTestBase(BaseTestCase):
                                        'bucket_type']))
         end = time.time()
         self.log.info("Time for test setup: {}".format(end - start))
+        self.sleep(20)
 
     def tearDown(self):
         self.log.info("Tearing down the images now.")
